@@ -19,6 +19,26 @@ line.
 
 ---
 
+## 0. Fastest path — `bootstrap.sh`
+
+Run this **on each box**; it clones (if needed), installs the commands, installs
++ enables the AV stack, and can add a scan timer — in one go:
+
+```bash
+# from a checkout you already have:
+./bootstrap.sh --full --timer 86400000
+
+# from scratch on a fresh box (clones first):
+REPO_URL=<remote>/linux-av.git ./bootstrap.sh --system --full --timer 86400000
+```
+
+`--full` scans the **whole box** (see §4.1); omit it to scan only `$HOME`.
+`--system` installs for all users, `--timer <ms>` adds a persistent daily-ish
+timer. The rest of this README explains what it does and how to drive `av-scan`
+by hand.
+
+---
+
 ## 1. Layout
 
 ```
@@ -106,6 +126,41 @@ av-scan --status                  # engine, socket, services, paths
 `av-scan` prefers **`clamdscan`** (talks to the running daemon — fast, low RAM)
 and falls back to **`clamscan`** (standalone) when no daemon socket is found.
 Force it with `--engine clamscan` or `AV_ENGINE=`.
+
+### 4.1 Scanning the whole box (all users + mounted drives)
+
+**By default `av-scan` scans only `$AV_SCAN_PATHS` (i.e. `$HOME`) as your own
+user** — it does *not* touch other users' homes, system dirs, or mounts. To
+cover the whole machine you need **both**:
+
+1. **Target `/`** — pass `--full` (or set `AV_SCAN_PATHS=/`, which
+   `bootstrap.sh --full` writes to `/etc/linux-av/av.env`).
+2. **Run as root** — otherwise files you can't read (other users' dirs, system
+   files) are silently skipped. The systemd timer already runs as root; by hand,
+   use `sudo`.
+
+```bash
+sudo av-scan --full --now            # entire filesystem, as root
+sudo AV_SCAN_PATHS=/ av-scan --now   # same, via env
+```
+
+What a root `--full` scan **does** and **does not** cover:
+
+- ✅ **Other users' home directories** — yes, when run as root.
+- ✅ **Mounted drives** (USB, extra disks, bind mounts) — yes; ClamAV crosses
+  filesystem boundaries by default, so anything mounted under `/` at scan time is
+  included.
+- ⚠️ **Network mounts** (NFS/SMB) — also included, and can be *very* slow. Skip
+  them by adding their mountpoints to `AV_EXCLUDE_DIRS`.
+- ❌ **Unmounted / disconnected drives** — a scan only sees what's mounted when
+  it runs. Mount it first, or scan explicitly: `sudo av-scan --path /mnt/disk --now`.
+- ❌ **Real-time coverage** — a periodic full scan is a snapshot in time. For
+  on-write/on-open protection, enable `av-setup onaccess`.
+
+> **"Install once and it scans everything?"** You install the tools **once per
+> box**, but there's no central controller — run `bootstrap.sh` on *each* box
+> (or push it with your config-management tool). And "everything" only happens
+> with `--full` **as root**; the default is your `$HOME` only.
 
 ### Scheduling — two ways
 

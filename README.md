@@ -267,7 +267,8 @@ Key vars (all optional, shown with defaults):
 | `AV_CLAMD_SOCKET` | auto-detected | override if detection fails |
 | `AV_ON_FOUND` | – | shell command run when threats are found (alert hook) |
 | `AV_TIMER_NAME` | `linux-av-scan` | basename of the installed systemd units |
-| `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for installed timers (scan after each boot) |
+| `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for the scan/rootkit timers (run after each boot) |
+| `AV_AIDE_BOOT_DELAY` | `15min` | `OnBootSec` drop-in for the AIDE check timer |
 
 ## 6. Cross-distro reference (the differences, in one place)
 
@@ -365,6 +366,13 @@ The *scheduled* daily check differs too, and `av-setup enable` turns it on for y
 | Schedule unit | `aidecheck.timer` (daily 05:00, `ConditionACPower=true`) | `dailyaidecheck.timer` or `/etc/cron.daily/aide` (per release) |
 | Enable | `sudo systemctl enable --now aidecheck.timer` | usually auto-enabled by the package; else enable the timer / set `CRON_DAILY_RUN=yes` in `/etc/default/aide` |
 | Init DB | `aide --init` → move to `/var/lib/aide/aide.db.gz` | `sudo aideinit` |
+
+Those packaged timers fire at a fixed clock time, so a box that's powered off then
+never runs the check. `av-setup enable` drops in
+`/etc/systemd/system/<timer>.d/10-linux-av-bootdelay.conf` adding
+`OnBootSec=$AV_AIDE_BOOT_DELAY` (default 15 min) + `Persistent=true`, so the AIDE
+check also runs after every boot and catches up a missed run — matching the
+scan/rootkit timers.
 
 ## 9. License
 

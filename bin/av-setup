@@ -105,11 +105,25 @@ do_enable() {
             aide --init && mv -f /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz \
                 || log_warn "aide --init failed"
         fi
-        # Enable the distro's scheduled integrity check if one is shipped.
+        # Enable the distro's scheduled integrity check if one is shipped, and add
+        # a drop-in so it also runs after every boot. The packaged timers fire at a
+        # fixed OnCalendar time (Arch 05:00, Debian daily) which is skipped entirely
+        # if the box is off then; OnBootSec + Persistent=true fix that for machines
+        # that aren't always on — matching the scan/rootkit timers.
+        local t dropdir
         for t in aidecheck.timer dailyaidecheck.timer; do
             if systemctl cat "$t" >/dev/null 2>&1; then
+                dropdir="/etc/systemd/system/${t}.d"
+                mkdir -p "$dropdir"
+                {
+                    echo "# added by linux-av: also run after every boot, and catch up a missed run"
+                    echo "[Timer]"
+                    echo "OnBootSec=${AV_AIDE_BOOT_DELAY}"
+                    echo "Persistent=true"
+                } > "$dropdir/10-linux-av-bootdelay.conf"
+                systemctl daemon-reload
                 systemctl enable --now "$t" \
-                    && log_info "enabled periodic AIDE check ($t)" \
+                    && log_info "enabled periodic AIDE check ($t) + boot-delay override (${AV_AIDE_BOOT_DELAY} after boot)" \
                     || log_warn "could not enable $t"
                 break
             fi

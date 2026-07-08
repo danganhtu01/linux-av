@@ -64,6 +64,13 @@ do_enable() {
         if ! have freshclam; then
             log_warn "clamav not installed — skipping DB seed + service enable (fix 'av-setup install' first)"
         else
+            # Arch ships /etc/clamav/{freshclam,clamd}.conf with a literal
+            # 'Example' line that makes ClamAV refuse to start until it's removed.
+            for cf in /etc/clamav/freshclam.conf /etc/clamav/clamd.conf; do
+                if [ -f "$cf" ] && grep -q '^Example' "$cf"; then
+                    sed -i 's/^Example/#Example/' "$cf" && log_info "disabled 'Example' line in $cf"
+                fi
+            done
             log_info "seeding virus DB (freshclam) — required before clamd starts ..."
             freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
             log_info "enabling clamav-freshclam + clamav-daemon ..."

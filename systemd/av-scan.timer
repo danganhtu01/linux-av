@@ -1,0 +1,16 @@
+# Rendered by `av-scan --install-timer` (placeholders @INTERVAL@ / @NAME@ filled in).
+# OnUnitActiveSec is derived from the millisecond interval you passed
+# (e.g. --install-timer 86400000  ->  OnUnitActiveSec=86400s = 1 day).
+[Unit]
+Description=linux-av scheduled scan timer
+Documentation=https://github.com/atdang/linux-av
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=@INTERVAL@
+AccuracySec=1s
+Persistent=true
+Unit=@NAME@.service
+
+[Install]
+WantedBy=timers.target

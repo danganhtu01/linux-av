@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# av-setup — install and enable the AV / protection stack, the right way for
+#            this distro (Arch / Debian / Ubuntu).
+#
+#   av-setup install     install packages: clamav rkhunter chkrootkit aide audit
+#   av-setup enable       seed signatures + enable the systemd services
+#   av-setup onaccess     enable ClamAV real-time (on-access) scanning
+#   av-setup status       show what is installed / running
+#   av-setup all          install + enable (the usual first-run)
+#
+# Needs root; it will re-exec itself through sudo if you forget.
+
+set -uo pipefail
+
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+    [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
+done
+AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# shellcheck source=../lib/common.sh
+. "$AV_HOME/lib/common.sh"
+av_detect_distro
+
+# ---------------------------------------------------------------------------
+do_install() {
+    reexec_root install
+    log_info "distro=$AV_DISTRO_ID family=$AV_FAMILY pkg=$AV_PKG_MGR"
+    [ "$AV_PKG_MGR" = apt ] && apt-get update -y
+
+    # ClamAV, rkhunter, AIDE, auditd are in the official repos everywhere.
+    # shellcheck disable=SC2046
+    av_pkg_install $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
+                   $(av_pkg_names aide)   $(av_pkg_names audit)
+
+    # chkrootkit: official on Debian/Ubuntu, AUR on Arch.
+    if [ "$AV_FAMILY" = debian ]; then
+        # shellcheck disable=SC2046
+        av_pkg_install $(av_pkg_names chkrootkit)
+    else
+        log_warn "chkrootkit is in the AUR on Arch — install with your AUR helper, e.g.:"
+        log_warn "    yay -S chkrootkit    (or: paru -S chkrootkit)"
+    fi
+    log_info "packages installed."
+}
+
+# ---------------------------------------------------------------------------
+do_enable() {
+    reexec_root enable
+    have systemctl || die "no systemd on this box (unexpected)"
+
+    if [ "$AV_FAMILY" = arch ]; then
+        # Arch enables NOTHING automatically and clamd won't start without a DB.
+        log_info "seeding virus DB (freshclam) — required before clamd starts ..."
+        freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
+        log_info "enabling clamav-freshclam + clamav-daemon ..."
+        systemctl enable --now clamav-freshclam.service
+        systemctl enable --now clamav-daemon.service
+        log_info "enabling auditd ..."
+        systemctl enable --now auditd.service
+    else
+        # Debian/Ubuntu auto-enable clamav-freshclam, clamav-daemon and auditd
+        # at install time. Just make sure they're up and the DB is seeded.
+        log_info "Debian/Ubuntu auto-enable these at install; ensuring they are running ..."
+        systemctl enable --now clamav-freshclam.service 2>/dev/null || true
+        # clamd may be waiting on the first DB download; nudge it.
+        systemctl start clamav-daemon.service 2>/dev/null || true
+        systemctl enable --now auditd.service 2>/dev/null || true
+    fi
+
+    # AIDE baseline (path/binary differs by family).
+    if have aide || have aide.wrapper; then
+        log_info "building AIDE baseline (one-time, can be slow) ..."
+        if [ "$AV_FAMILY" = debian ]; then
+            aideinit -y -f || log_warn "aideinit failed"
+        else
+            aide --init && mv -f /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz \
+                || log_warn "aide --init failed"
+        fi
+    fi
+
+    log_info "done. Check with: av-setup status"
+}
+
+# ---------------------------------------------------------------------------
+do_onaccess() {
+    reexec_root onaccess
+    local conf=/etc/clamav/clamd.conf
+    [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
+    log_warn "on-access scanning watches ${AV_SCAN_PATHS} and needs these in $conf:"
+    cat <<EOF
+    OnAccessIncludePath ${AV_SCAN_PATHS%% *}
+    OnAccessPrevention yes
+    OnAccessExtraScanning yes
+EOF
+    if ! grep -q '^OnAccessIncludePath' "$conf"; then
+        {
+            echo ""
+            echo "# added by linux-av av-setup onaccess"
+            echo "OnAccessIncludePath ${AV_SCAN_PATHS%% *}"
+            echo "OnAccessPrevention yes"
+            echo "OnAccessExtraScanning yes"
+        } >> "$conf"
+        log_info "appended on-access config to $conf"
+    fi
+    systemctl enable --now clamav-clamonacc.service \
+        && log_info "real-time scanning enabled (clamav-clamonacc.service)" \
+        || log_warn "could not enable clamav-clamonacc.service — check 'journalctl -u clamav-clamonacc'"
+}
+
+# ---------------------------------------------------------------------------
+do_status() {
+    printf '== linux-av setup status ==\n'
+    printf 'distro: %s (family=%s)\n\n' "$AV_DISTRO_ID" "$AV_FAMILY"
+    local c
+    for c in clamscan clamdscan freshclam rkhunter chkrootkit aide aide.wrapper auditctl; do
+        if have "$c"; then printf '  [x] %s\n' "$c"; else printf '  [ ] %s (missing)\n' "$c"; fi
+    done
+    echo
+    if have systemctl; then
+        for s in clamav-daemon clamav-freshclam clamav-clamonacc auditd; do
+            printf '  %-20s %s\n' "$s" "$(systemctl is-active "$s.service" 2>/dev/null || true)"
+        done
+    fi
+}
+
+case "${1:-}" in
+    install)  do_install ;;
+    enable)   do_enable ;;
+    onaccess) do_onaccess ;;
+    status)   do_status ;;
+    all)      do_install; do_enable ;;
+    ""|-h|--help)
+        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command: $1 (try: install | enable | onaccess | status | all)" ;;
+esac

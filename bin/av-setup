@@ -48,8 +48,8 @@ do_install() {
             if have "$p"; then
                 log_info "$p already present (AUR)"
             elif [ "$p" = aide ]; then
-                log_warn "'aide' is AUR-only on Arch and its 0.19.x release fails to build against"
-                log_warn "  nettle 3.10+. Build it against libgcrypt instead — see README 'AIDE on Arch'."
+                log_warn "'aide' is AUR-only on Arch and won't build against nettle 3.10+."
+                log_warn "  Install it (built against libgcrypt) as your normal user:  av-aide-arch"
             else
                 log_warn "'$p' is AUR-only on Arch (can't build as root) — install as a normal user:  yay -S $p"
             fi
@@ -140,6 +140,7 @@ do_onaccess() {
 
     # clamd must re-read clamd.conf before clamonacc connects.
     systemctl restart clamav-daemon.service 2>/dev/null || true
+    systemctl reset-failed clamav-clamonacc.service 2>/dev/null || true
     if systemctl enable --now clamav-clamonacc.service; then
         log_info "real-time scanning enabled (clamav-clamonacc.service), watching: $watch"
     else

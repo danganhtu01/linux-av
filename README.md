@@ -246,27 +246,45 @@ rm ~/.local/bin/av-scan ~/.local/bin/av-setup   # or /usr/local/bin with sudo
   crash), `2` scanner error.
 - Logs go to `$AV_LOG_FILE` (default under `~/.local/state/linux-av/`).
 
-## 8.1 Troubleshooting — AIDE fails to build on Arch (nettle 3.10+)
+## 8.1 Installing AIDE on Arch (`av-aide-arch`)
 
-`aide` is AUR-only on Arch, and its 0.19.x release calls a Nettle API that
-changed in **nettle 3.10** (`nettle_hash_digest_func` dropped its `length`
-argument). Building against the system nettle fails with:
+On **Debian/Ubuntu**, AIDE is a normal repo package — `av-setup install` pulls
+`aide aide-common` with `apt`, done. **Arch is different**: AIDE is AUR-only and
+its 0.19.x release won't compile against `nettle >= 3.10` (the
+`nettle_hash_digest_func` signature dropped its `length` argument), failing with:
 
 ```
 src/md.c:169: too many arguments to function '...digest'; expected 2, have 3
 ```
 
-AIDE also supports **libgcrypt**, which is unaffected — build against that:
+AIDE also supports **libgcrypt**, whose code path is unaffected. The bundled
+`av-aide-arch` script fetches the AUR PKGBUILD, forces the crypto backend to
+gcrypt, and builds it:
 
 ```bash
-cd ~/.cache/paru/clone/aide        # PKGBUILD paru already fetched (or: paru -G aide && cd aide)
-sed -i 's/^  --with-curl$/  --with-curl \\\n  --without-nettle \\\n  --with-gcrypt/' PKGBUILD
-makepkg -si                        # re-extracts a clean tree, configures with gcrypt, builds
+av-aide-arch              # fetch → patch (--without-nettle --with-gcrypt) → makepkg → install
+av-aide-arch --rebuild    # force a clean rebuild
 ```
 
 Verify: `aide --version` runs and `ldd "$(command -v aide)" | grep gcrypt` shows
-`libgcrypt.so`. Then `sudo av-scan --integrity` works. (AIDE is optional — the
-ClamAV / rkhunter / chkrootkit / auditd stack is fully functional without it.)
+`libgcrypt.so`. Then `sudo av-scan --integrity` works. AIDE is optional — the
+ClamAV / rkhunter / chkrootkit / auditd stack is fully functional without it.
+
+### How the makepkg build differs from an `apt`/`pacman` install
+
+| Aspect | `apt`/`pacman` (repo package) | `makepkg` (AUR, what `av-aide-arch` does) |
+|---|---|---|
+| Runs as | root (`sudo apt/pacman`) | **your normal user** — `makepkg` *refuses* to run as root; it calls `sudo` itself only for the final install |
+| Source | prebuilt binary package | **downloads source + compiles locally** from a PKGBUILD |
+| Toolchain | none needed | needs `base-devel` + `git` installed |
+| Trust | distro-signed package | PKGBUILD from the AUR — *read it first*; makepkg verifies the upstream tarball's PGP signature |
+| Customization | none | we edit the PKGBUILD's `./configure` to add `--without-nettle --with-gcrypt` |
+| Flags used | — | `makepkg -sif` → `-s` install build deps, `-i` install the result, `-f` overwrite a stale build |
+| Result | package + auto-enabled services (Debian) | a `.pkg.tar.zst` that pacman installs; **no service is auto-enabled** (Arch never does) |
+
+`av-aide-arch` prefers your AUR helper (`paru -G` / `yay -G`) to fetch the
+PKGBUILD and falls back to a direct `git clone` of the AUR repo. Override the
+build dir with `AV_AIDE_BUILD_DIR` (default `~/.cache/linux-av`).
 
 ## 9. License
 

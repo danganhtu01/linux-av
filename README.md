@@ -29,13 +29,13 @@ Run this **on each box**; it clones (if needed), installs the commands, installs
 ./bootstrap.sh --full --timer 86400000
 
 # from scratch on a fresh box (clones first):
-REPO_URL=<remote>/linux-av.git ./bootstrap.sh --system --full --timer 86400000
+REPO_URL=<remote>/linux-av.git ./bootstrap.sh --system --full --onaccess --timer 86400000
 ```
 
 `--full` scans the **whole box** (see §4.1); omit it to scan only `$HOME`.
-`--system` installs for all users, `--timer <ms>` adds a persistent daily-ish
-timer. The rest of this README explains what it does and how to drive `av-scan`
-by hand.
+`--system` installs for all users, `--onaccess` enables ClamAV real-time
+protection, and `--timer <ms>` adds a persistent daily-ish timer. The rest of
+this README explains what it does and how to drive `av-scan` by hand.
 
 ---
 

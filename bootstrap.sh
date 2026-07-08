@@ -8,8 +8,8 @@
 #   ./bootstrap.sh
 #
 #   # from scratch on a fresh box (clones first):
-#   REPO_URL=https://github.com/atdang/linux-av.git ./bootstrap.sh
-#   ./bootstrap.sh --repo git@github.com:atdang/linux-av.git
+#   REPO_URL=https://github.com/danganhtu01/linux-av.git ./bootstrap.sh
+#   ./bootstrap.sh --repo git@github.com:danganhtu01/linux-av.git
 #
 # Useful flags:
 #   --repo <url>     git remote to clone from (or set REPO_URL)
@@ -18,14 +18,15 @@
 #   --timer <ms>     also install a persistent systemd scan timer, every <ms>
 #   --full           scan the WHOLE box (/), all users + mounts, not just $HOME
 #                    (writes /etc/linux-av/av.env and targets the timer at /)
+#   --onaccess       enable ClamAV real-time (on-access) protection too
 #
-# Example — every box, daily whole-system scan:
-#   sudo REPO_URL=<url> ./bootstrap.sh --system --full --timer 86400000
+# Example — every box: whole-box daily scan + real-time protection:
+#   sudo REPO_URL=<url> ./bootstrap.sh --system --full --onaccess --timer 86400000
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-}"
 TARGET_DIR="${TARGET_DIR:-$HOME/linux-av}"
-SYSTEM=0; TIMER_MS=""; SCAN_ALL=0
+SYSTEM=0; TIMER_MS=""; SCAN_ALL=0; ONACCESS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
         --system) SYSTEM=1 ;;
         --timer)  TIMER_MS="$2"; shift ;;
         --full)   SCAN_ALL=1 ;;
+        --onaccess) ONACCESS=1 ;;
         -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
         *) echo "unknown arg: $1 (try --help)" >&2; exit 1 ;;
     esac; shift
@@ -68,18 +70,24 @@ say "installing + enabling the AV stack (av-setup all)"
 "$REPO/bin/av-setup" all
 
 # --- 4. Whole-box config (optional) ----------------------------------------
-TIMER_PATHS="${AV_SCAN_PATHS:-$HOME}"   # $HOME here = the human's, before sudo
+SCAN_TARGET="${AV_SCAN_PATHS:-$HOME}"   # $HOME here = the human's, before sudo
 if [ "$SCAN_ALL" -eq 1 ]; then
     say "configuring WHOLE-BOX scanning (/), system-wide"
     sudo mkdir -p /etc/linux-av
     printf '# written by bootstrap.sh --full\nAV_SCAN_PATHS="/"\n' | sudo tee /etc/linux-av/av.env >/dev/null
-    TIMER_PATHS="/"
+    SCAN_TARGET="/"
 fi
 
-# --- 5. Scan timer (optional) ----------------------------------------------
+# --- 5. Real-time on-access scanning (optional) ----------------------------
+if [ "$ONACCESS" -eq 1 ]; then
+    say "enabling real-time on-access scanning, watching: $SCAN_TARGET"
+    sudo env AV_SCAN_PATHS="$SCAN_TARGET" "$REPO/bin/av-setup" onaccess
+fi
+
+# --- 6. Scan timer (optional) ----------------------------------------------
 if [ -n "$TIMER_MS" ]; then
-    say "installing systemd scan timer every ${TIMER_MS}ms, target: $TIMER_PATHS"
-    sudo env AV_SCAN_PATHS="$TIMER_PATHS" "$AVSCAN" --install-timer "$TIMER_MS"
+    say "installing systemd scan timer every ${TIMER_MS}ms, target: $SCAN_TARGET"
+    sudo env AV_SCAN_PATHS="$SCAN_TARGET" "$AVSCAN" --install-timer "$TIMER_MS"
 fi
 
 say "done on $(hostname). Verify:  av-scan --status   (open a new shell if 'av-scan' isn't found yet)"

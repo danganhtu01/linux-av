@@ -3,7 +3,7 @@
 # (Arch, Debian, Ubuntu all use systemd, so this file is identical everywhere).
 [Unit]
 Description=linux-av scheduled ClamAV scan
-Documentation=https://github.com/atdang/linux-av
+Documentation=https://github.com/danganhtu01/linux-av
 After=clamav-daemon.service
 
 [Service]

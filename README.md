@@ -240,6 +240,28 @@ rm ~/.local/bin/av-scan ~/.local/bin/av-setup   # or /usr/local/bin with sudo
   crash), `2` scanner error.
 - Logs go to `$AV_LOG_FILE` (default under `~/.local/state/linux-av/`).
 
+## 8.1 Troubleshooting — AIDE fails to build on Arch (nettle 3.10+)
+
+`aide` is AUR-only on Arch, and its 0.19.x release calls a Nettle API that
+changed in **nettle 3.10** (`nettle_hash_digest_func` dropped its `length`
+argument). Building against the system nettle fails with:
+
+```
+src/md.c:169: too many arguments to function '...digest'; expected 2, have 3
+```
+
+AIDE also supports **libgcrypt**, which is unaffected — build against that:
+
+```bash
+cd ~/.cache/paru/clone/aide        # PKGBUILD paru already fetched (or: paru -G aide && cd aide)
+sed -i 's/^  --with-curl$/  --with-curl \\\n  --without-nettle \\\n  --with-gcrypt/' PKGBUILD
+makepkg -si                        # re-extracts a clean tree, configures with gcrypt, builds
+```
+
+Verify: `aide --version` runs and `ldd "$(command -v aide)" | grep gcrypt` shows
+`libgcrypt.so`. Then `sudo av-scan --integrity` works. (AIDE is optional — the
+ClamAV / rkhunter / chkrootkit / auditd stack is fully functional without it.)
+
 ## 9. License
 
 MIT — see [LICENSE](LICENSE).

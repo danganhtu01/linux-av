@@ -25,17 +25,55 @@ Run this **on each box**; it clones (if needed), installs the commands, installs
 + enables the AV stack, and can add a scan timer — in one go:
 
 ```bash
-# from a checkout you already have:
-./bootstrap.sh --full --timer 86400000
+# from a checkout you already have (run as your normal user):
+./bootstrap.sh --full --onaccess --aide --timer 86400000 --rootkit-timer 604800000
 
 # from scratch on a fresh box (clones first):
-REPO_URL=<remote>/linux-av.git ./bootstrap.sh --system --full --onaccess --timer 86400000
+REPO_URL=<remote>/linux-av.git ./bootstrap.sh --system --full --onaccess --aide \
+    --timer 86400000 --rootkit-timer 604800000
 ```
 
-`--full` scans the **whole box** (see §4.1); omit it to scan only `$HOME`.
-`--system` installs for all users, `--onaccess` enables ClamAV real-time
-protection, and `--timer <ms>` adds a persistent daily-ish timer. The rest of
-this README explains what it does and how to drive `av-scan` by hand.
+Run it **as your normal user** — it escalates with `sudo` itself, and the
+`--aide` source build must not be root. `--full` scans the **whole box** (§4.1),
+`--system` installs for all users, `--onaccess` turns on real-time protection,
+`--aide` installs AIDE, and `--timer`/`--rootkit-timer` add the scheduled scans
+(each also runs ~1 min after every boot). Exact per-distro commands are below.
+
+## 0.1 Full setup — commands per distro
+
+`bootstrap.sh` auto-detects the distro, so the **one-liner is identical
+everywhere** — only the prerequisites differ.
+
+**Arch** (and Manjaro / EndeavourOS):
+```bash
+sudo pacman -S --needed git base-devel        # git + makepkg toolchain (for --aide)
+paru -S chkrootkit                            # chkrootkit is AUR (or: yay -S chkrootkit)
+git clone https://github.com/danganhtu01/linux-av.git ~/linux-av && cd ~/linux-av
+./bootstrap.sh --system --full --onaccess --aide --timer 86400000 --rootkit-timer 604800000
+```
+clamav/rkhunter/audit come from the official repos; **AIDE is built from the AUR
+against libgcrypt** (nettle 3.10+ breaks the default build); nothing auto-enables
+on Arch, so bootstrap does it.
+
+**Debian / Ubuntu** (and Mint / Pop!_OS / Raspberry Pi OS):
+```bash
+sudo apt update && sudo apt install -y git
+git clone https://github.com/danganhtu01/linux-av.git ~/linux-av && cd ~/linux-av
+./bootstrap.sh --system --full --onaccess --aide --timer 86400000 --rootkit-timer 604800000
+```
+clamav / clamav-daemon / rkhunter / chkrootkit / aide / auditd all come from apt,
+the ClamAV + auditd services auto-enable on install, and AppArmor is already on.
+
+**What each flag turns on:**
+
+| Flag | Effect |
+|---|---|
+| `--system` | commands in `/usr/local/bin` for all users |
+| `--full` | scan `/` (whole box); writes `/etc/linux-av/av.env` |
+| `--onaccess` | ClamAV real-time protection (watches `/home` under `--full`) |
+| `--aide` | install AIDE (Arch: libgcrypt source build; Debian: apt) |
+| `--timer <ms>` | full-scan timer: ~1 min after boot, then every `<ms>` |
+| `--rootkit-timer <ms>` | rkhunter+chkrootkit timer: ~1 min after boot, then every `<ms>` |
 
 ---
 
@@ -44,16 +82,20 @@ this README explains what it does and how to drive `av-scan` by hand.
 ```
 linux-av/
 ├── bin/
-│   ├── av-scan          # scan runner: --now / --scheduled <ms> / timers / rootkit / integrity
-│   └── av-setup         # installs packages + enables services per distro
+│   ├── av-scan            # scan runner: --now / --scheduled <ms> / timers / rootkit / integrity
+│   ├── av-setup           # installs packages + enables services per distro
+│   └── av-aide-arch       # builds/installs AIDE on Arch against libgcrypt (AUR)
 ├── lib/
-│   └── common.sh        # distro detection, path/env resolution, logging (sourced by both)
+│   └── common.sh          # distro detection, path/env resolution, logging (sourced by all)
 ├── systemd/
-│   ├── av-scan.service  # templates rendered by `av-scan --install-timer`
-│   └── av-scan.timer
+│   ├── av-scan.service    # scan-timer service template (rendered by --install-timer)
+│   ├── av-rootkit.service # rootkit-timer service template
+│   └── av-scan.timer      # generic timer template (boot delay + interval)
 ├── config/
-│   └── av.env.example   # every tunable, with defaults — copy to av.env
-└── install.sh           # symlinks the two tools onto your PATH
+│   └── av.env.example     # every tunable, with defaults — copy to av.env
+├── bootstrap.sh           # one-shot per-box rollout (clone → install → enable)
+├── install.sh             # symlinks the commands onto your PATH
+└── LICENSE                # MIT
 ```
 
 ## 2. Install the tools (no distro packages yet)

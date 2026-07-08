@@ -92,7 +92,11 @@ do_enable() {
         systemctl enable --now auditd.service 2>/dev/null || true
     fi
 
-    # AIDE baseline (path/binary differs by family).
+    # AIDE baseline + the packaged periodic check.
+    # Note: on Debian/Ubuntu the check runs via 'aide.wrapper' (from aide-common,
+    # which assembles /etc/aide/aide.conf.d/* into one config); on Arch there is
+    # no wrapper — 'aide' reads /etc/aide.conf directly and the AUR package ships
+    # aidecheck.timer instead.
     if have aide || have aide.wrapper; then
         log_info "building AIDE baseline (one-time, can be slow) ..."
         if [ "$AV_FAMILY" = debian ]; then
@@ -101,6 +105,15 @@ do_enable() {
             aide --init && mv -f /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz \
                 || log_warn "aide --init failed"
         fi
+        # Enable the distro's scheduled integrity check if one is shipped.
+        for t in aidecheck.timer dailyaidecheck.timer; do
+            if systemctl cat "$t" >/dev/null 2>&1; then
+                systemctl enable --now "$t" \
+                    && log_info "enabled periodic AIDE check ($t)" \
+                    || log_warn "could not enable $t"
+                break
+            fi
+        done
     fi
 
     log_info "done. Check with: av-setup status"

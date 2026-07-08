@@ -239,3 +239,7 @@ rm ~/.local/bin/av-scan ~/.local/bin/av-setup   # or /usr/local/bin with sudo
 - ClamAV exit codes are handled: `0` clean, `1` **threats found** (logged, not a
   crash), `2` scanner error.
 - Logs go to `$AV_LOG_FILE` (default under `~/.local/state/linux-av/`).
+
+## 9. License
+
+MIT — see [LICENSE](LICENSE).

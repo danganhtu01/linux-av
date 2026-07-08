@@ -1,0 +1,17 @@
+# Rendered by `av-scan --install-timer` (placeholders @BIN@ / @PATHS@ filled in).
+# Installed to /etc/systemd/system/<AV_TIMER_NAME>.service on every distro
+# (Arch, Debian, Ubuntu all use systemd, so this file is identical everywhere).
+[Unit]
+Description=linux-av scheduled ClamAV scan
+Documentation=https://github.com/atdang/linux-av
+After=clamav-daemon.service
+
+[Service]
+Type=oneshot
+# Runs as root so system paths are readable. AV_* env can be overridden in
+# /etc/linux-av/av.env (loaded by the script) or with systemd drop-ins.
+Environment=AV_COLOR=never
+Environment=AV_SCAN_PATHS=@PATHS@
+ExecStart=@BIN@ --now
+Nice=10
+IOSchedulingClass=idle

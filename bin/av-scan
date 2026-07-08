@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# av-scan — cross-distro antivirus scan runner (ClamAV) with optional
+#           rootkit + file-integrity passes.
+#
+#   av-scan --now                 run one scan of $AV_SCAN_PATHS right now
+#   av-scan --scheduled 10000     scan every 10000 ms (=10 s) in the foreground
+#   av-scan --full                scan the whole filesystem ( / )
+#   av-scan --quick               scan $HOME /tmp /var/tmp
+#   av-scan --path /srv --now     scan a specific path
+#   av-scan --update              refresh virus signatures (freshclam)
+#   av-scan --rootkit             run rkhunter + chkrootkit
+#   av-scan --integrity           run an AIDE file-integrity check
+#   av-scan --install-timer 86400000   install a persistent systemd timer (root)
+#   av-scan --remove-timer        remove that timer (root)
+#   av-scan --status              show AV service + last-scan status
+#
+# The interval for --scheduled / --install-timer is MILLISECONDS, matching the
+# example `av-scan --scheduled 10000` (= 10 seconds).
+#
+# Everything is tunable via env vars or the config file — see config/av.env.example.
+
+set -uo pipefail    # NOT -e: clamscan returns 1 on "virus found", which is expected.
+
+# --- locate the repo (following symlinks) and load shared helpers -----------
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+    [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
+done
+AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# shellcheck source=../lib/common.sh
+. "$AV_HOME/lib/common.sh"
+av_detect_distro
+
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# ---------------------------------------------------------------------------
+# Pick the scan engine.  clamdscan uses the running daemon (fast, low RAM);
+# clamscan is standalone (loads the whole DB each call). Same binary names on
+# every distro — only availability differs.
+# ---------------------------------------------------------------------------
+choose_engine() {
+    case "$AV_ENGINE" in
+        clamscan)  echo clamscan; return ;;
+        clamdscan) echo clamdscan; return ;;
+    esac
+    # auto:
+    local sock; sock="$(av_clamd_socket)"
+    if have clamdscan && [ -n "$sock" ]; then echo clamdscan
+    elif have clamscan;                   then echo clamscan
+    elif have clamdscan;                  then echo clamdscan
+    else echo ""; fi
+}
+
+# Build the per-engine exclude args and run one scan of "$@" (paths).
+run_scan() {
+    local engine paths=("$@")
+    engine="$(choose_engine)"
+    [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
+
+    mkdir -p "$AV_QUARANTINE"
+    local -a args=()
+    if [ "$engine" = clamscan ]; then
+        args+=( --recursive --infected --stdout )
+        local d; for d in $AV_EXCLUDE_DIRS; do args+=( "--exclude-dir=^${d}" ); done
+        [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
+    else
+        # clamdscan: the daemon holds the DB; fewer knobs, much faster.
+        args+=( --infected --multiscan --fdpass )
+        [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
+    fi
+
+    log_info "engine=$engine scanning: ${paths[*]}"
+    local rc=0
+    "$engine" "${args[@]}" "${paths[@]}"; rc=$?
+    case $rc in
+        0) log_info "clean — no threats in ${paths[*]}" ;;
+        1) log_warn "THREATS FOUND in ${paths[*]} (see $AV_LOG_FILE / quarantine)"
+           [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" || true ;;
+        *) log_err  "scanner error (rc=$rc) on ${paths[*]}" ;;
+    esac
+    return $rc
+}
+
+update_sigs() {
+    if have freshclam; then
+        log_info "updating signatures (freshclam) ..."
+        # If the freshclam *service* is running it holds a lock; that's fine —
+        # a manual run will just report it's already up to date or locked.
+        freshclam || log_warn "freshclam returned non-zero (service may hold the lock)"
+    else
+        die "freshclam not installed — run 'av-setup install'"
+    fi
+}
+
+rootkit_scan() {
+    local ran=0
+    if have rkhunter; then ran=1; log_info "rkhunter ..."; rkhunter --check --sk --nocolors || true; fi
+    if have chkrootkit; then ran=1; log_info "chkrootkit ..."; chkrootkit || true; fi
+    [ $ran -eq 1 ] || die "neither rkhunter nor chkrootkit installed"
+}
+
+integrity_scan() {
+    # aide binary + db path differ across distros; branch on family.
+    if [ "$AV_FAMILY" = debian ] && have aide.wrapper; then
+        log_info "aide (aide.wrapper --check) ..."; aide.wrapper --check || true
+    elif have aide; then
+        log_info "aide --check ..."; aide --check || true
+    else
+        die "aide not installed — run 'av-setup install'"
+    fi
+}
+
+show_status() {
+    printf 'distro         : %s (family=%s, pkg=%s)\n' "$AV_DISTRO_ID" "$AV_FAMILY" "$AV_PKG_MGR"
+    printf 'engine (auto)  : %s\n' "$(choose_engine)"
+    printf 'clamd socket   : %s\n' "$(av_clamd_socket || echo '(none)')"
+    printf 'scan paths     : %s\n' "$AV_SCAN_PATHS"
+    printf 'log file       : %s\n' "$AV_LOG_FILE"
+    printf 'quarantine     : %s\n' "$AV_QUARANTINE"
+    if have systemctl; then
+        echo '--- services ---'
+        systemctl is-active clamav-daemon.service clamav-freshclam.service auditd.service 2>/dev/null \
+            | paste -d' ' <(printf 'clamav-daemon\nclamav-freshclam\nauditd\n') - || true
+        systemctl is-active "${AV_TIMER_NAME}.timer" 2>/dev/null \
+            | sed "s/^/${AV_TIMER_NAME}.timer /" || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# systemd timer install/remove — same units on every distro (all three ship
+# systemd). Runs as root so scans can read system paths. Interval is in ms.
+# ---------------------------------------------------------------------------
+ms_to_systemd() { # ms -> "<n>s" (>=1s; systemd discourages sub-second timers)
+    local ms="$1" s
+    s=$(( ms / 1000 )); [ "$s" -lt 1 ] && s=1
+    echo "${s}s"
+}
+
+install_timer() {
+    local ms="$1"; need_root
+    [ "$ms" -gt 0 ] 2>/dev/null || die "interval (ms) must be a positive integer"
+    local bin; bin="$(command -v av-scan || echo "$AV_HOME/bin/av-scan")"
+    local unit="/etc/systemd/system/${AV_TIMER_NAME}"
+    local iv; iv="$(ms_to_systemd "$ms")"
+
+    sed -e "s|@BIN@|$bin|g" -e "s|@PATHS@|$AV_SCAN_PATHS|g" \
+        "$AV_HOME/systemd/av-scan.service" > "${unit}.service"
+    sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$AV_TIMER_NAME|g" \
+        "$AV_HOME/systemd/av-scan.timer"   > "${unit}.timer"
+
+    systemctl daemon-reload
+    systemctl enable --now "${AV_TIMER_NAME}.timer"
+    log_info "installed timer ${AV_TIMER_NAME}.timer every $iv -> $bin --now"
+    systemctl list-timers "${AV_TIMER_NAME}.timer" --no-pager || true
+}
+
+remove_timer() {
+    need_root
+    systemctl disable --now "${AV_TIMER_NAME}.timer" 2>/dev/null || true
+    rm -fv "/etc/systemd/system/${AV_TIMER_NAME}.service" \
+           "/etc/systemd/system/${AV_TIMER_NAME}.timer"
+    systemctl daemon-reload
+    log_info "removed timer ${AV_TIMER_NAME}"
+}
+
+# Foreground repeating scan; Ctrl-C to stop. Interval in ms (supports sub-second).
+scheduled_loop() {
+    local ms="$1"; shift
+    local secs; secs="$(awk -v m="$ms" 'BEGIN{printf "%.3f", m/1000}')"
+    log_info "scheduled scan every ${ms}ms (${secs}s) — Ctrl-C to stop"
+    trap 'log_info "stopped scheduled scan"; exit 0' INT TERM
+    local n=0
+    while :; do
+        n=$((n+1)); log_info "--- scan #$n ---"
+        run_scan "$@" || true
+        sleep "$secs"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing.
+# ---------------------------------------------------------------------------
+[ $# -eq 0 ] && usage 1
+MODE=""; INTERVAL_MS=""; declare -a PATHS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --now)            MODE=now ;;
+        --scheduled)      MODE=scheduled; INTERVAL_MS="${2:?--scheduled needs an interval in ms}"; shift ;;
+        --install-timer)  MODE=install-timer; INTERVAL_MS="${2:?--install-timer needs an interval in ms}"; shift ;;
+        --remove-timer)   MODE=remove-timer ;;
+        --full)           PATHS=(/) ;;
+        --quick)          PATHS=("$HOME" /tmp /var/tmp) ;;
+        -p|--path)        PATHS+=("${2:?--path needs a directory}"); shift ;;
+        --update)         MODE=update ;;
+        --rootkit)        MODE=rootkit ;;
+        --integrity)      MODE=integrity ;;
+        --status)         MODE=status ;;
+        -q|--quarantine)  export AV_QUARANTINE_ON=1 ;;
+        --engine)         export AV_ENGINE="${2:?}"; shift ;;
+        -h|--help)        usage 0 ;;
+        *)                die "unknown argument: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+# Default scan target = configured AV_SCAN_PATHS (space-separated -> array).
+if [ "${#PATHS[@]}" -eq 0 ]; then read -r -a PATHS <<<"$AV_SCAN_PATHS"; fi
+
+case "$MODE" in
+    now)            run_scan "${PATHS[@]}" ;;
+    scheduled)      scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
+    install-timer)  install_timer "$INTERVAL_MS" ;;
+    remove-timer)   remove_timer ;;
+    update)         update_sigs ;;
+    rootkit)        rootkit_scan ;;
+    integrity)      integrity_scan ;;
+    status)         show_status ;;
+    "")             die "no action given (try --now, --scheduled <ms>, --status, --help)" ;;
+esac

@@ -110,25 +110,41 @@ do_enable() {
 do_onaccess() {
     local conf=/etc/clamav/clamd.conf
     [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
-    log_warn "on-access scanning watches ${AV_SCAN_PATHS} and needs these in $conf:"
-    cat <<EOF
-    OnAccessIncludePath ${AV_SCAN_PATHS%% *}
-    OnAccessPrevention yes
-    OnAccessExtraScanning yes
-EOF
-    if ! grep -q '^OnAccessIncludePath' "$conf"; then
+
+    # On-access CANNOT watch the whole root filesystem — pick a sane target.
+    # Prefer AV_ONACCESS_PATHS; else the scan paths; but never '/'.
+    local watch="${AV_ONACCESS_PATHS:-$AV_SCAN_PATHS}"
+    case " $watch " in
+        *" / "*|"/") watch="/home"
+            log_warn "on-access can't watch '/' (whole root) — watching $watch instead."
+            log_warn "  set AV_ONACCESS_PATHS='/home /srv ...' to choose." ;;
+    esac
+
+    # clamd runs as this user; clamonacc REFUSES to start unless the scanner's own
+    # user is excluded, or it loops forever (scanning its own reads). Required.
+    local clamuser; clamuser="$(awk '/^User[ \t]/{print $2; exit}' "$conf")"
+    : "${clamuser:=clamav}"
+
+    if grep -q '^OnAccessIncludePath' "$conf"; then
+        log_info "on-access already configured in $conf — leaving it as-is"
+    else
         {
             echo ""
             echo "# added by linux-av av-setup onaccess"
-            echo "OnAccessIncludePath ${AV_SCAN_PATHS%% *}"
-            echo "OnAccessPrevention yes"
-            echo "OnAccessExtraScanning yes"
+            local p; for p in $watch; do echo "OnAccessIncludePath $p"; done
+            echo "OnAccessExcludeUname $clamuser"   # required: breaks the scan loop
+            echo "OnAccessPrevention yes"           # block access to infected files
         } >> "$conf"
-        log_info "appended on-access config to $conf"
+        log_info "configured on-access in $conf (watch: $watch, exclude user: $clamuser)"
     fi
-    systemctl enable --now clamav-clamonacc.service \
-        && log_info "real-time scanning enabled (clamav-clamonacc.service)" \
-        || log_warn "could not enable clamav-clamonacc.service — check 'journalctl -u clamav-clamonacc'"
+
+    # clamd must re-read clamd.conf before clamonacc connects.
+    systemctl restart clamav-daemon.service 2>/dev/null || true
+    if systemctl enable --now clamav-clamonacc.service; then
+        log_info "real-time scanning enabled (clamav-clamonacc.service), watching: $watch"
+    else
+        log_warn "clamav-clamonacc failed — check: journalctl -u clamav-clamonacc"
+    fi
 }
 
 # ---------------------------------------------------------------------------

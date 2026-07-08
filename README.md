@@ -107,7 +107,12 @@ the already-enabled services are up. Either way you end up in the same place.
 ```bash
 av-setup onaccess   # appends OnAccess* to /etc/clamav/clamd.conf, enables clamav-clamonacc
 ```
-Not on by default anywhere; it watches `$AV_SCAN_PATHS` and blocks-on-detect.
+Not on by default anywhere. It watches `AV_ONACCESS_PATHS` (default: your scan
+paths, but **never `/`** — on-access can't watch the whole root fs, so it falls
+back to `/home`) and blocks access to infected files. It also auto-adds the
+`OnAccessExcludeUname` directive that clamonacc *requires* (excluding the
+scanner's own user) to avoid an infinite scan loop. Narrow it with
+`AV_ONACCESS_PATHS='/home /srv'`.
 
 ## 4. Using `av-scan`
 
@@ -195,6 +200,7 @@ Key vars (all optional, shown with defaults):
 | Var | Default | Meaning |
 |---|---|---|
 | `AV_SCAN_PATHS` | `$HOME` | what `--now` scans |
+| `AV_ONACCESS_PATHS` | scan paths (never `/`) | what real-time scanning watches |
 | `AV_ENGINE` | `auto` | `auto` \| `clamdscan` \| `clamscan` |
 | `AV_LOG_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/linux-av` | logs + state |
 | `AV_QUARANTINE` | `$AV_LOG_DIR/quarantine` | where `-q` moves infected files |

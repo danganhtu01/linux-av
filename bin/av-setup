@@ -47,8 +47,11 @@ do_install() {
         for p in aide chkrootkit; do
             if have "$p"; then
                 log_info "$p already present (AUR)"
+            elif [ "$p" = aide ]; then
+                log_warn "'aide' is AUR-only on Arch and its 0.19.x release fails to build against"
+                log_warn "  nettle 3.10+. Build it against libgcrypt instead — see README 'AIDE on Arch'."
             else
-                log_warn "'$p' is AUR-only on Arch (can't build as root) — install as your normal user:  yay -S $p"
+                log_warn "'$p' is AUR-only on Arch (can't build as root) — install as a normal user:  yay -S $p"
             fi
         done
     fi

@@ -182,6 +182,17 @@ sudo av-scan --install-timer 86400000   # every 86 400 000 ms = 1 day
 sudo av-scan --remove-timer
 systemctl list-timers linux-av-scan.timer
 ```
+
+**Rootkit scans** (rkhunter + chkrootkit) are *not* scheduled by anything on Arch
+(Debian wires a cron.daily; Arch doesn't). Give them their own timer — weekly is
+plenty:
+```bash
+sudo av-scan --install-rootkit-timer 604800000   # every 604 800 000 ms = 7 days
+sudo av-scan --remove-rootkit-timer
+systemctl list-timers linux-av-rootkit.timer
+```
+This runs `av-scan --rootkit` (rkhunter `--check --sk` + chkrootkit) as root on
+the interval, logging to `/var/log/linux-av/`.
 > For genuine real-time protection use **on-access** (§3), not a tight
 > `--scheduled` loop — a 10 s loop is meant for testing, not production.
 

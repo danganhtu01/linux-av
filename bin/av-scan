@@ -10,8 +10,10 @@
 #   av-scan --update              refresh virus signatures (freshclam)
 #   av-scan --rootkit             run rkhunter + chkrootkit
 #   av-scan --integrity           run an AIDE file-integrity check
-#   av-scan --install-timer 86400000   install a persistent systemd timer (root)
+#   av-scan --install-timer 86400000   install a persistent daily scan timer (root)
 #   av-scan --remove-timer        remove that timer (root)
+#   av-scan --install-rootkit-timer 604800000  weekly rkhunter+chkrootkit timer (root)
+#   av-scan --remove-rootkit-timer   remove the rootkit timer (root)
 #   av-scan --status              show AV service + last-scan status
 #
 # The interval for --scheduled / --install-timer is MILLISECONDS, matching the
@@ -32,7 +34,7 @@ AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
 . "$AV_HOME/lib/common.sh"
 av_detect_distro
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit "${1:-0}"; }
 
 # ---------------------------------------------------------------------------
 # Pick the scan engine.  clamdscan uses the running daemon (fast, low RAM);
@@ -124,6 +126,8 @@ show_status() {
             | paste -d' ' <(printf 'clamav-daemon\nclamav-freshclam\nauditd\n') - || true
         systemctl is-active "${AV_TIMER_NAME}.timer" 2>/dev/null \
             | sed "s/^/${AV_TIMER_NAME}.timer /" || true
+        systemctl is-active "${AV_ROOTKIT_TIMER_NAME}.timer" 2>/dev/null \
+            | sed "s/^/${AV_ROOTKIT_TIMER_NAME}.timer /" || true
     fi
 }
 
@@ -137,31 +141,34 @@ ms_to_systemd() { # ms -> "<n>s" (>=1s; systemd discourages sub-second timers)
     echo "${s}s"
 }
 
+# install_timer <unit-name> <service-template> <interval-ms>
+# The .timer template (av-scan.timer) is generic; only the .service differs.
 install_timer() {
-    local ms="$1"; need_root
+    local name="$1" tmpl="$2" ms="$3"; need_root
     [ "$ms" -gt 0 ] 2>/dev/null || die "interval (ms) must be a positive integer"
     local bin; bin="$(command -v av-scan || echo "$AV_HOME/bin/av-scan")"
-    local unit="/etc/systemd/system/${AV_TIMER_NAME}"
+    local unit="/etc/systemd/system/${name}"
     local iv; iv="$(ms_to_systemd "$ms")"
 
     sed -e "s|@BIN@|$bin|g" -e "s|@PATHS@|$AV_SCAN_PATHS|g" \
-        "$AV_HOME/systemd/av-scan.service" > "${unit}.service"
-    sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$AV_TIMER_NAME|g" \
-        "$AV_HOME/systemd/av-scan.timer"   > "${unit}.timer"
+        "$AV_HOME/systemd/$tmpl" > "${unit}.service"
+    sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$name|g" \
+        "$AV_HOME/systemd/av-scan.timer" > "${unit}.timer"
 
     systemctl daemon-reload
-    systemctl enable --now "${AV_TIMER_NAME}.timer"
-    log_info "installed timer ${AV_TIMER_NAME}.timer every $iv -> $bin --now"
-    systemctl list-timers "${AV_TIMER_NAME}.timer" --no-pager || true
+    systemctl enable --now "${name}.timer"
+    log_info "installed ${name}.timer (every $iv)"
+    systemctl list-timers "${name}.timer" --no-pager || true
 }
 
+# remove_timer <unit-name>
 remove_timer() {
-    need_root
-    systemctl disable --now "${AV_TIMER_NAME}.timer" 2>/dev/null || true
-    rm -fv "/etc/systemd/system/${AV_TIMER_NAME}.service" \
-           "/etc/systemd/system/${AV_TIMER_NAME}.timer"
+    local name="$1"; need_root
+    systemctl disable --now "${name}.timer" 2>/dev/null || true
+    rm -fv "/etc/systemd/system/${name}.service" \
+           "/etc/systemd/system/${name}.timer"
     systemctl daemon-reload
-    log_info "removed timer ${AV_TIMER_NAME}"
+    log_info "removed timer ${name}"
 }
 
 # Foreground repeating scan; Ctrl-C to stop. Interval in ms (supports sub-second).
@@ -189,6 +196,8 @@ while [ $# -gt 0 ]; do
         --scheduled)      MODE=scheduled; INTERVAL_MS="${2:?--scheduled needs an interval in ms}"; shift ;;
         --install-timer)  MODE=install-timer; INTERVAL_MS="${2:?--install-timer needs an interval in ms}"; shift ;;
         --remove-timer)   MODE=remove-timer ;;
+        --install-rootkit-timer) MODE=install-rootkit-timer; INTERVAL_MS="${2:?--install-rootkit-timer needs an interval in ms}"; shift ;;
+        --remove-rootkit-timer)  MODE=remove-rootkit-timer ;;
         --full)           PATHS=(/) ;;
         --quick)          PATHS=("$HOME" /tmp /var/tmp) ;;
         -p|--path)        PATHS+=("${2:?--path needs a directory}"); shift ;;
@@ -210,8 +219,10 @@ if [ "${#PATHS[@]}" -eq 0 ]; then read -r -a PATHS <<<"$AV_SCAN_PATHS"; fi
 case "$MODE" in
     now)            run_scan "${PATHS[@]}" ;;
     scheduled)      scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
-    install-timer)  install_timer "$INTERVAL_MS" ;;
-    remove-timer)   remove_timer ;;
+    install-timer)          install_timer "$AV_TIMER_NAME" av-scan.service "$INTERVAL_MS" ;;
+    remove-timer)           remove_timer "$AV_TIMER_NAME" ;;
+    install-rootkit-timer)  install_timer "$AV_ROOTKIT_TIMER_NAME" av-rootkit.service "$INTERVAL_MS" ;;
+    remove-rootkit-timer)   remove_timer "$AV_ROOTKIT_TIMER_NAME" ;;
     update)         update_sigs ;;
     rootkit)        rootkit_scan ;;
     integrity)      integrity_scan ;;

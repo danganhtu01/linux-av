@@ -152,7 +152,7 @@ install_timer() {
 
     sed -e "s|@BIN@|$bin|g" -e "s|@PATHS@|$AV_SCAN_PATHS|g" \
         "$AV_HOME/systemd/$tmpl" > "${unit}.service"
-    sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$name|g" \
+    sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$name|g" -e "s|@BOOTDELAY@|$AV_TIMER_BOOT_DELAY|g" \
         "$AV_HOME/systemd/av-scan.timer" > "${unit}.timer"
 
     systemctl daemon-reload

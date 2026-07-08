@@ -65,10 +65,11 @@ done
 : "${AV_LOG_DIR:=$XDG_STATE_HOME/linux-av}"
 : "${AV_QUARANTINE:=$AV_LOG_DIR/quarantine}"
 : "${AV_LOG_FILE:=$AV_LOG_DIR/av-scan.log}"
-: "${AV_TIMER_NAME:=linux-av-scan}"                           # systemd unit basename
+: "${AV_TIMER_NAME:=linux-av-scan}"                           # scan-timer unit basename
+: "${AV_ROOTKIT_TIMER_NAME:=linux-av-rootkit}"                # rootkit-timer unit basename
 : "${AV_COLOR:=auto}"                                         # auto | always | never
 export AV_SCAN_PATHS AV_EXCLUDE_DIRS AV_ENGINE AV_LOG_DIR \
-       AV_QUARANTINE AV_LOG_FILE AV_TIMER_NAME AV_COLOR
+       AV_QUARANTINE AV_LOG_FILE AV_TIMER_NAME AV_ROOTKIT_TIMER_NAME AV_COLOR
 
 # ---------------------------------------------------------------------------
 # 3. Logging (colored to stderr, plain to $AV_LOG_FILE).

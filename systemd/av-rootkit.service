@@ -1,0 +1,17 @@
+# Rendered by `av-scan --install-rootkit-timer` (placeholder @BIN@ filled in).
+# Installed to /etc/systemd/system/<AV_ROOTKIT_TIMER_NAME>.service. Driven by the
+# generic av-scan.timer. Identical on Arch/Debian/Ubuntu (all use systemd).
+[Unit]
+Description=linux-av scheduled rootkit scan (rkhunter + chkrootkit)
+Documentation=https://github.com/danganhtu01/linux-av
+
+[Service]
+Type=oneshot
+# Runs as root; rootkit scanners need to read system files. AV_* overridable via
+# /etc/linux-av/av.env.
+Environment=HOME=/root
+Environment=AV_COLOR=never
+Environment=AV_LOG_DIR=/var/log/linux-av
+ExecStart=@BIN@ --rootkit
+Nice=15
+IOSchedulingClass=idle

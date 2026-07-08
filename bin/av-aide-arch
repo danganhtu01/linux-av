@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# av-aide-arch — build & install AIDE on Arch-based distros, linked against
+#                libgcrypt instead of nettle.
+#
+# Why: AIDE is AUR-only on Arch, and its 0.19.x release fails to compile against
+# nettle >= 3.10 (the nettle_hash_digest_func signature changed — it dropped the
+# 'length' argument). AIDE also supports libgcrypt, whose code path is
+# unaffected. This script fetches the AUR PKGBUILD, forces the crypto backend to
+# gcrypt (--without-nettle --with-gcrypt), and runs makepkg.
+#
+#   av-aide-arch             fetch, patch, build, install
+#   av-aide-arch --rebuild   force a clean rebuild even if aide is already present
+#
+# Run as your NORMAL user — makepkg refuses to run as root. It uses sudo only for
+# the dependency/package-install step, exactly like an AUR helper does.
+set -euo pipefail
+
+# --- locate repo + shared helpers (follow symlinks) ------------------------
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+    [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
+done
+AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# shellcheck source=../lib/common.sh
+. "$AV_HOME/lib/common.sh"
+av_detect_distro
+
+FORCE=0
+case "${1:-}" in
+    --rebuild) FORCE=1 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    "") : ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+esac
+
+# --- guards ----------------------------------------------------------------
+[ "$AV_FAMILY" = arch ] || die "Arch-only. On Debian/Ubuntu use:  sudo apt install aide aide-common"
+[ "$(id -u)" -ne 0 ]    || die "do NOT run as root — makepkg refuses. Run as your normal user (it calls sudo itself)."
+have makepkg || die "makepkg not found — install the toolchain:  sudo pacman -S --needed base-devel git"
+have git     || die "git not found — sudo pacman -S --needed git"
+
+# --- already good? (idempotent) --------------------------------------------
+if [ "$FORCE" -eq 0 ] && have aide; then
+    if ldd "$(command -v aide)" 2>/dev/null | grep -q gcrypt; then
+        log_info "aide already installed and linked against libgcrypt — nothing to do."
+        aide --version 2>/dev/null | head -1
+        exit 0
+    fi
+    log_warn "aide is present but not linked to gcrypt — rebuilding ..."
+fi
+
+# --- fetch the PKGBUILD ----------------------------------------------------
+BUILD_ROOT="${AV_AIDE_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/linux-av}"
+mkdir -p "$BUILD_ROOT"; cd "$BUILD_ROOT"
+rm -rf aide
+log_info "fetching AIDE PKGBUILD into $BUILD_ROOT/aide ..."
+if   have paru; then paru -G aide
+elif have yay;  then yay  -G aide
+else                 git clone --depth=1 https://aur.archlinux.org/aide.git
+fi
+cd aide
+[ -f PKGBUILD ] || die "PKGBUILD not found after fetch"
+
+# --- force the gcrypt backend (idempotent) ---------------------------------
+# Insert the flags right after `./configure` so it works regardless of which
+# flag the PKGBUILD lists last.
+if ! grep -q -- '--with-gcrypt' PKGBUILD; then
+    sed -i 's#\./configure \\#./configure --without-nettle --with-gcrypt \\#' PKGBUILD
+fi
+grep -q -- '--with-gcrypt' PKGBUILD \
+    || die "could not patch PKGBUILD — add '--without-nettle --with-gcrypt' to its ./configure, then run 'makepkg -si'"
+log_info "PKGBUILD patched: building --without-nettle --with-gcrypt"
+
+# --- build + install (makepkg as user; sudo only for pacman) ---------------
+log_info "running makepkg (compiles AIDE; sudo will be requested to install deps/pkg) ..."
+makepkg -sif
+
+# --- verify ----------------------------------------------------------------
+if have aide && ldd "$(command -v aide)" 2>/dev/null | grep -q gcrypt; then
+    log_info "success: $(aide --version 2>/dev/null | head -1) — linked against libgcrypt"
+    log_info "next:  sudo av-scan --integrity   (builds the baseline + runs a check)"
+else
+    die "build/install did not produce a gcrypt-linked aide — see makepkg output above"
+fi

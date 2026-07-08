@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p "$PREFIX_BIN"
-for tool in av-scan av-setup; do
+for tool in av-scan av-setup av-aide-arch; do
     chmod +x "$REPO/bin/$tool"
     ln -sfn "$REPO/bin/$tool" "$PREFIX_BIN/$tool"
     echo "linked $PREFIX_BIN/$tool -> $REPO/bin/$tool"

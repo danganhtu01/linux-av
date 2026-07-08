@@ -13,6 +13,14 @@
 [ -n "${_AV_COMMON_SH:-}" ] && return 0
 _AV_COMMON_SH=1
 
+# systemd services and cron run with a minimal environment — often no $HOME or
+# $USER. Scripts here use `set -u`, so derive sane values up front, otherwise the
+# first reference (e.g. $HOME below) aborts with "HOME: unbound variable".
+: "${HOME:=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
+: "${HOME:=/root}"
+: "${USER:=$(id -un 2>/dev/null || echo root)}"
+export HOME USER
+
 # ---------------------------------------------------------------------------
 # 0. Resolve AV_HOME (repo root) if the caller did not already.
 #    We follow symlinks so `av-scan` works when installed as a symlink in PATH.

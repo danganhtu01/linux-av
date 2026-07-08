@@ -10,7 +10,9 @@ After=clamav-daemon.service
 Type=oneshot
 # Runs as root so system paths are readable. AV_* env can be overridden in
 # /etc/linux-av/av.env (loaded by the script) or with systemd drop-ins.
+Environment=HOME=/root
 Environment=AV_COLOR=never
+Environment=AV_LOG_DIR=/var/log/linux-av
 Environment=AV_SCAN_PATHS=@PATHS@
 ExecStart=@BIN@ --now
 Nice=10

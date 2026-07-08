@@ -286,6 +286,25 @@ ClamAV / rkhunter / chkrootkit / auditd stack is fully functional without it.
 PKGBUILD and falls back to a direct `git clone` of the AUR repo. Override the
 build dir with `AV_AIDE_BUILD_DIR` (default `~/.cache/linux-av`).
 
+### `aide.wrapper` and scheduling — per distro
+
+`aide.wrapper` is a **Debian/Ubuntu-only** helper (from `aide-common`): Debian
+splits AIDE's config into `/etc/aide/aide.conf` + fragments under
+`/etc/aide/aide.conf.d/`, and `aide.wrapper` assembles them and calls the real
+`aide --config …`. So on Debian you run `aide.wrapper --init|--check|--update`;
+on **Arch there is no wrapper** — `aide` reads a single `/etc/aide.conf`. It is a
+command, not a service — nothing to "enable". `av-scan --integrity` picks the
+right one automatically.
+
+The *scheduled* daily check differs too, and `av-setup enable` turns it on for you:
+
+| | Arch (AUR) | Debian / Ubuntu (`aide-common`) |
+|---|---|---|
+| Runner | `aide --check` | `aide.wrapper --check` |
+| Schedule unit | `aidecheck.timer` (daily 05:00, `ConditionACPower=true`) | `dailyaidecheck.timer` or `/etc/cron.daily/aide` (per release) |
+| Enable | `sudo systemctl enable --now aidecheck.timer` | usually auto-enabled by the package; else enable the timer / set `CRON_DAILY_RUN=yes` in `/etc/default/aide` |
+| Init DB | `aide --init` → move to `/var/lib/aide/aide.db.gz` | `sudo aideinit` |
+
 ## 9. License
 
 MIT — see [LICENSE](LICENSE).

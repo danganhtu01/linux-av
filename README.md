@@ -183,6 +183,13 @@ sudo av-scan --remove-timer
 systemctl list-timers linux-av-scan.timer
 ```
 
+The installed timer also fires **`AV_TIMER_BOOT_DELAY` (default 1 min) after
+every boot** (`OnBootSec`), so a machine that's powered off unpredictably still
+gets scanned on each startup — then repeats at your interval (e.g. daily) while
+it stays on. `Persistent=true` additionally re-runs a scan that came due while
+the box was off. Change the boot delay with `AV_TIMER_BOOT_DELAY=30s` before
+`--install-timer`.
+
 **Rootkit scans** (rkhunter + chkrootkit) are *not* scheduled by anything on Arch
 (Debian wires a cron.daily; Arch doesn't). Give them their own timer — weekly is
 plenty:
@@ -218,6 +225,7 @@ Key vars (all optional, shown with defaults):
 | `AV_CLAMD_SOCKET` | auto-detected | override if detection fails |
 | `AV_ON_FOUND` | – | shell command run when threats are found (alert hook) |
 | `AV_TIMER_NAME` | `linux-av-scan` | basename of the installed systemd units |
+| `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for installed timers (scan after each boot) |
 
 ## 6. Cross-distro reference (the differences, in one place)
 

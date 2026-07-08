@@ -1,12 +1,16 @@
-# Rendered by `av-scan --install-timer` (placeholders @INTERVAL@ / @NAME@ filled in).
-# OnUnitActiveSec is derived from the millisecond interval you passed
-# (e.g. --install-timer 86400000  ->  OnUnitActiveSec=86400s = 1 day).
+# Rendered by `av-scan --install-timer` (placeholders @BOOTDELAY@/@INTERVAL@/@NAME@).
+#   OnBootSec       = @BOOTDELAY@ after every boot -> catches machines that are
+#                     powered off unpredictably (a scan runs on each startup).
+#   OnUnitActiveSec = @INTERVAL@, derived from the millisecond value you passed
+#                     (--install-timer 86400000 -> 86400s = 1 day) -> repeats
+#                     that often while the machine stays on.
+# Persistent=true also re-runs a run that came due while the box was off.
 [Unit]
 Description=linux-av scheduled scan timer
 Documentation=https://github.com/danganhtu01/linux-av
 
 [Timer]
-OnBootSec=2min
+OnBootSec=@BOOTDELAY@
 OnUnitActiveSec=@INTERVAL@
 AccuracySec=1s
 Persistent=true

@@ -24,40 +24,54 @@ av_detect_distro
 
 # ---------------------------------------------------------------------------
 do_install() {
-    reexec_root install
     log_info "distro=$AV_DISTRO_ID family=$AV_FAMILY pkg=$AV_PKG_MGR"
-    [ "$AV_PKG_MGR" = apt ] && apt-get update -y
 
-    # ClamAV, rkhunter, AIDE, auditd are in the official repos everywhere.
-    # shellcheck disable=SC2046
-    av_pkg_install $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
-                   $(av_pkg_names aide)   $(av_pkg_names audit)
-
-    # chkrootkit: official on Debian/Ubuntu, AUR on Arch.
     if [ "$AV_FAMILY" = debian ]; then
+        apt-get update -y
+        # All official on Debian/Ubuntu — a single transaction is fine.
         # shellcheck disable=SC2046
-        av_pkg_install $(av_pkg_names chkrootkit)
+        av_pkg_install $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
+                       $(av_pkg_names aide) $(av_pkg_names audit) \
+                       $(av_pkg_names chkrootkit)
     else
-        log_warn "chkrootkit is in the AUR on Arch — install with your AUR helper, e.g.:"
-        log_warn "    yay -S chkrootkit    (or: paru -S chkrootkit)"
+        # Arch: install official-repo packages ONE AT A TIME so an unavailable
+        # target can't abort the whole batch (clamav + rkhunter are in extra,
+        # audit in core). aide + chkrootkit are AUR-only and makepkg refuses to
+        # run as root, so they cannot be installed here — warn instead.
+        local p
+        for p in clamav rkhunter audit; do
+            log_info "installing $p ..."
+            pacman -S --needed --noconfirm "$p" \
+                || log_warn "could not install '$p' — try 'sudo pacman -Syu' then rerun"
+        done
+        for p in aide chkrootkit; do
+            if have "$p"; then
+                log_info "$p already present (AUR)"
+            else
+                log_warn "'$p' is AUR-only on Arch (can't build as root) — install as your normal user:  yay -S $p"
+            fi
+        done
     fi
-    log_info "packages installed."
+    log_info "package install step done."
 }
 
 # ---------------------------------------------------------------------------
 do_enable() {
-    reexec_root enable
     have systemctl || die "no systemd on this box (unexpected)"
 
     if [ "$AV_FAMILY" = arch ]; then
         # Arch enables NOTHING automatically and clamd won't start without a DB.
-        log_info "seeding virus DB (freshclam) — required before clamd starts ..."
-        freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
-        log_info "enabling clamav-freshclam + clamav-daemon ..."
-        systemctl enable --now clamav-freshclam.service
-        systemctl enable --now clamav-daemon.service
+        if ! have freshclam; then
+            log_warn "clamav not installed — skipping DB seed + service enable (fix 'av-setup install' first)"
+        else
+            log_info "seeding virus DB (freshclam) — required before clamd starts ..."
+            freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
+            log_info "enabling clamav-freshclam + clamav-daemon ..."
+            systemctl enable --now clamav-freshclam.service || log_warn "enable clamav-freshclam failed"
+            systemctl enable --now clamav-daemon.service    || log_warn "enable clamav-daemon failed"
+        fi
         log_info "enabling auditd ..."
-        systemctl enable --now auditd.service
+        systemctl enable --now auditd.service || log_warn "enable auditd failed (is the 'audit' package installed?)"
     else
         # Debian/Ubuntu auto-enable clamav-freshclam, clamav-daemon and auditd
         # at install time. Just make sure they're up and the DB is seeded.
@@ -84,7 +98,6 @@ do_enable() {
 
 # ---------------------------------------------------------------------------
 do_onaccess() {
-    reexec_root onaccess
     local conf=/etc/clamav/clamd.conf
     [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
     log_warn "on-access scanning watches ${AV_SCAN_PATHS} and needs these in $conf:"
@@ -123,6 +136,18 @@ do_status() {
         done
     fi
 }
+
+# Escalate to root ONCE, preserving the full command, so composite commands like
+# `all` run install AND enable as root. (A per-function re-exec with `exec` would
+# replace the process and silently drop the rest of the sequence.)
+case "${1:-}" in
+    install|enable|onaccess|all)
+        if [ "$(id -u)" -ne 0 ]; then
+            have sudo || die "must run as root and sudo not found"
+            log_warn "escalating with sudo ..."
+            exec sudo -E "$0" "$@"
+        fi ;;
+esac
 
 case "${1:-}" in
     install)  do_install ;;

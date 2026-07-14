@@ -22,6 +22,88 @@ AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
 . "$AV_HOME/lib/common.sh"
 av_detect_distro
 
+# Read one `--option=/absolute/path` argument from a packaged systemd unit.
+# Debian/Ubuntu's clamonacc unit owns its runtime paths, so discover them from
+# the unit instead of assuming they never change between distro releases.
+unit_exec_option() {
+    local unit="$1" option="$2" spec token
+    spec="$(systemctl show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+    for token in $spec; do
+        case "$token" in
+            "${option}="*) printf '%s\n' "${token#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Ubuntu's packaged clamav-clamonacc.service currently passes both
+# `--move=/root/quarantine` and `--log=/var/log/clamav/clamonacc.log`, but the
+# package does not create the quarantine directory. clamonacc then exits before
+# fanotify starts. Provision every absolute runtime path advertised by the unit
+# so this remains correct if Debian/Ubuntu change those locations later.
+prepare_onaccess_runtime() {
+    [ "$AV_FAMILY" = debian ] || return 0
+    have systemctl || return 0
+
+    local unit=clamav-clamonacc.service move_path="" log_path="" log_dir=""
+    local rotate_file=/etc/logrotate.d/linux-av-clamonacc
+    if ! systemctl cat "$unit" >/dev/null 2>&1; then
+        log_warn "$unit is not installed; on-access protection will be unavailable"
+        return 0
+    fi
+
+    move_path="$(unit_exec_option "$unit" --move || true)"
+    if [ -n "$move_path" ]; then
+        case "$move_path" in
+            /*) install -d -o root -g root -m 0700 "$move_path" ;;
+            *)  die "$unit uses a non-absolute quarantine path: $move_path" ;;
+        esac
+    fi
+
+    log_path="$(unit_exec_option "$unit" --log || true)"
+    if [ -n "$log_path" ]; then
+        case "$log_path" in
+            /*) log_dir="$(dirname "$log_path")"
+                [ -d "$log_dir" ] || install -d -o root -g root -m 0755 "$log_dir" ;;
+            *)  die "$unit uses a non-absolute log path: $log_path" ;;
+        esac
+
+        # Ubuntu's clamav-daemon logrotate policy does not include the separate
+        # clamonacc log. Add a small managed policy unless another package or
+        # administrator already covers this exact path.
+        if have logrotate && { [ -f "$rotate_file" ] \
+            || ! grep -RqsF "$log_path" /etc/logrotate.d 2>/dev/null; }; then
+            {
+                printf '%s {\n' "$log_path"
+                printf '    weekly\n'
+                printf '    rotate 12\n'
+                printf '    compress\n'
+                printf '    delaycompress\n'
+                printf '    missingok\n'
+                printf '    notifempty\n'
+                printf '    copytruncate\n'
+                printf '}\n'
+            } > "$rotate_file"
+            chmod 0644 "$rotate_file"
+        fi
+    fi
+}
+
+ensure_enabled_active() {
+    local unit="$1"
+    systemctl enable "$unit" >/dev/null 2>&1 \
+        || log_warn "could not enable $unit"
+    systemctl start "$unit" \
+        || log_warn "could not start $unit"
+    if systemctl is-active --quiet "$unit"; then
+        log_info "$unit is active"
+        return 0
+    fi
+    systemctl status "$unit" --no-pager --full >&2 || true
+    log_err "$unit is not active"
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 do_install() {
     log_info "distro=$AV_DISTRO_ID family=$AV_FAMILY pkg=$AV_PKG_MGR"
@@ -33,6 +115,7 @@ do_install() {
         av_pkg_install $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
                        $(av_pkg_names aide) $(av_pkg_names audit) \
                        $(av_pkg_names chkrootkit)
+        prepare_onaccess_runtime
     else
         # Arch: install official-repo packages ONE AT A TIME so an unavailable
         # target can't abort the whole batch (clamav + rkhunter are in extra,
@@ -84,12 +167,15 @@ do_enable() {
         systemctl enable --now auditd.service || log_warn "enable auditd failed (is the 'audit' package installed?)"
     else
         # Debian/Ubuntu auto-enable clamav-freshclam, clamav-daemon and auditd
-        # at install time. Just make sure they're up and the DB is seeded.
+        # at install time. Verify the resulting state instead of suppressing
+        # package/service failures and reporting a false successful install.
         log_info "Debian/Ubuntu auto-enable these at install; ensuring they are running ..."
-        systemctl enable --now clamav-freshclam.service 2>/dev/null || true
-        # clamd may be waiting on the first DB download; nudge it.
-        systemctl start clamav-daemon.service 2>/dev/null || true
-        systemctl enable --now auditd.service 2>/dev/null || true
+        local service_failed=0 service
+        for service in clamav-freshclam.service clamav-daemon.service auditd.service; do
+            ensure_enabled_active "$service" || service_failed=1
+        done
+        [ "$service_failed" -eq 0 ] \
+            || die "one or more required Debian/Ubuntu protection services failed"
     fi
 
     # AIDE baseline + the packaged periodic check.
@@ -137,6 +223,7 @@ do_enable() {
 do_onaccess() {
     local conf=/etc/clamav/clamd.conf
     [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
+    prepare_onaccess_runtime
 
     # On-access CANNOT watch the whole root filesystem — pick a sane target.
     # Prefer AV_ONACCESS_PATHS; else the scan paths; but never '/'.
@@ -147,31 +234,127 @@ do_onaccess() {
             log_warn "  set AV_ONACCESS_PATHS='/home /srv ...' to choose." ;;
     esac
 
+    # clamonacc requires every include path to exist at startup. Reject typos
+    # here with a useful error instead of letting systemd fail opaquely later.
+    local -a watch_paths=()
+    local p
+    for p in $watch; do
+        case "$p" in
+            /*) : ;;
+            *)  die "on-access path must be absolute: $p" ;;
+        esac
+        [ -d "$p" ] || die "on-access path does not exist: $p"
+        watch_paths+=("$p")
+    done
+    [ "${#watch_paths[@]}" -gt 0 ] || die "no valid on-access paths configured"
+    watch="${watch_paths[*]}"
+
     # clamd runs as this user; clamonacc REFUSES to start unless the scanner's own
     # user is excluded, or it loops forever (scanning its own reads). Required.
     local clamuser; clamuser="$(awk '/^User[ \t]/{print $2; exit}' "$conf")"
     : "${clamuser:=clamav}"
 
-    if grep -q '^OnAccessIncludePath' "$conf"; then
-        log_info "on-access already configured in $conf — leaving it as-is"
-    else
+    local config_changed=0 current_watch=""
+    current_watch="$(awk '/^OnAccessIncludePath[[:space:]]/{printf "%s%s", sep, $2; sep=" "}' "$conf")"
+    if [ "$current_watch" != "$watch" ]; then
+        sed -i '/^OnAccessIncludePath[[:space:]]/d' "$conf"
         {
             echo ""
             echo "# added by linux-av av-setup onaccess"
-            local p; for p in $watch; do echo "OnAccessIncludePath $p"; done
-            echo "OnAccessExcludeUname $clamuser"   # required: breaks the scan loop
-            echo "OnAccessPrevention yes"           # block access to infected files
+            for p in "${watch_paths[@]}"; do echo "OnAccessIncludePath $p"; done
         } >> "$conf"
-        log_info "configured on-access in $conf (watch: $watch, exclude user: $clamuser)"
+        config_changed=1
     fi
 
-    # clamd must re-read clamd.conf before clamonacc connects.
-    systemctl restart clamav-daemon.service 2>/dev/null || true
-    systemctl reset-failed clamav-clamonacc.service 2>/dev/null || true
-    if systemctl enable --now clamav-clamonacc.service; then
-        log_info "real-time scanning enabled (clamav-clamonacc.service), watching: $watch"
+    # Existing partial configurations still need the loop-prevention user and
+    # prevention mode. Ensure each directive independently instead of treating
+    # one OnAccessIncludePath line as proof that the setup is complete.
+    if ! grep -Eq "^OnAccessExcludeUname[[:space:]]+${clamuser}[[:space:]]*$" "$conf"; then
+        echo "OnAccessExcludeUname $clamuser" >> "$conf"
+        config_changed=1
+    fi
+    local prevention_values=""
+    prevention_values="$(awk '/^OnAccessPrevention[[:space:]]/{print $2}' "$conf")"
+    if [ "$prevention_values" = yes ]; then
+        :
+    elif [ -n "$prevention_values" ]; then
+        sed -i '/^OnAccessPrevention[[:space:]]/d' "$conf"
+        echo "OnAccessPrevention yes" >> "$conf"
+        config_changed=1
     else
-        log_warn "clamav-clamonacc failed — check: journalctl -u clamav-clamonacc"
+        echo "OnAccessPrevention yes" >> "$conf"
+        config_changed=1
+    fi
+
+    local configured_path effective_watch=""
+    while read -r configured_path; do
+        [ -n "$configured_path" ] || continue
+        [ -d "$configured_path" ] \
+            || die "configured OnAccessIncludePath does not exist: $configured_path"
+        effective_watch="${effective_watch:+$effective_watch }$configured_path"
+    done < <(awk '/^OnAccessIncludePath[[:space:]]/{print $2}' "$conf")
+    if [ -z "$effective_watch" ]; then
+        die "no OnAccessIncludePath remains in $conf"
+    fi
+    log_info "configured on-access in $conf (watch: $effective_watch, exclude user: $clamuser)"
+
+    # Restart clamd only when its configuration changed. An unconditional
+    # restart waits for active clamdscan clients and can interrupt a long scan
+    # during an otherwise idempotent setup rerun.
+    if [ "$config_changed" -eq 1 ]; then
+        if systemctl is-active --quiet "${AV_TIMER_NAME}.service" 2>/dev/null; then
+            die "on-access configuration changed while ${AV_TIMER_NAME}.service is scanning; retry after it finishes"
+        fi
+        systemctl restart clamav-daemon.service \
+            || die "could not restart clamav-daemon.service"
+    elif ! systemctl is-active --quiet clamav-daemon.service; then
+        systemctl start clamav-daemon.service \
+            || die "could not start clamav-daemon.service"
+    fi
+
+    local service_log="" log_start=0 init_log="" ready=0 attempt
+    service_log="$(unit_exec_option clamav-clamonacc.service --log || true)"
+    if [ -n "$service_log" ] && [ -f "$service_log" ]; then
+        log_start="$(wc -l < "$service_log")"
+    fi
+    systemctl reset-failed clamav-clamonacc.service 2>/dev/null || true
+    systemctl enable clamav-clamonacc.service \
+        || die "could not enable clamav-clamonacc.service"
+    systemctl restart clamav-clamonacc.service \
+        || die "could not start clamav-clamonacc.service"
+
+    # Type=simple units can return from `systemctl start` before the process
+    # exits—or remain active after failing to add its recursive watches. Wait
+    # for a positive watch line and reject any initialization ERROR from the
+    # packaged log so setup never reports false real-time protection.
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 1
+        if ! systemctl is-active --quiet clamav-clamonacc.service; then break; fi
+        if [ -n "$service_log" ] && [ -f "$service_log" ]; then
+            init_log="$(tail -n "+$((log_start + 1))" "$service_log")"
+            if grep -q 'ERROR:' <<<"$init_log"; then break; fi
+            ready=1
+            for configured_path in $effective_watch; do
+                if ! grep -Fq "watching '$configured_path'" <<<"$init_log"; then
+                    ready=0
+                    break
+                fi
+            done
+            [ "$ready" -eq 1 ] && break
+        else
+            # No packaged log argument to inspect: active for one full second
+            # is the strongest portable signal available.
+            ready=1
+            break
+        fi
+    done
+    if systemctl is-active --quiet clamav-clamonacc.service && [ "$ready" -eq 1 ]; then
+        log_info "real-time scanning enabled (clamav-clamonacc.service), watching: $effective_watch"
+    else
+        systemctl status clamav-clamonacc.service --no-pager --full >&2 || true
+        [ -n "$init_log" ] && printf '%s\n' "$init_log" >&2
+        systemctl stop clamav-clamonacc.service 2>/dev/null || true
+        die "clamav-clamonacc failed — check: journalctl -u clamav-clamonacc"
     fi
 }
 

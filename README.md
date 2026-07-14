@@ -63,13 +63,15 @@ git clone https://github.com/danganhtu01/linux-av.git ~/linux-av && cd ~/linux-a
 ```
 clamav / clamav-daemon / rkhunter / chkrootkit / aide / auditd all come from apt,
 the ClamAV + auditd services auto-enable on install, and AppArmor is already on.
+Bootstrap installs these with `--no-install-recommends` so AIDE's optional
+mail-reporting packages do not pull in and expose a full mail transport agent.
 
 **What each flag turns on:**
 
 | Flag | Effect |
 |---|---|
 | `--system` | commands in `/usr/local/bin` for all users |
-| `--full` | scan `/` (whole box); writes `/etc/linux-av/av.env` |
+| `--full` | scan `/` (whole box); updates `AV_SCAN_PATHS` in `/etc/linux-av/av.env` without replacing other settings |
 | `--onaccess` | ClamAV real-time protection (watches `/home` under `--full`) |
 | `--aide` | install AIDE (Arch: libgcrypt source build; Debian: apt) |
 | `--timer <ms>` | full-scan timer: ~1 min after boot, then every `<ms>` |
@@ -143,7 +145,11 @@ av-setup status     # what's installed / running
 
 So on **Arch**, `av-setup enable` runs `freshclam` first, then
 `systemctl enable --now` on each service. On **Debian/Ubuntu** it just makes sure
-the already-enabled services are up. Either way you end up in the same place.
+the already-enabled services are up and fails clearly if a required daemon is
+not actually active. It also provisions the runtime directories
+advertised by Ubuntu's packaged `clamav-clamonacc.service` (including its
+quarantine and log locations) and adds log rotation for the packaged on-access
+log when no existing policy covers it. Either way you end up in the same place.
 
 ### Real-time (on-access) scanning — optional
 ```bash
@@ -153,8 +159,21 @@ Not on by default anywhere. It watches `AV_ONACCESS_PATHS` (default: your scan
 paths, but **never `/`** — on-access can't watch the whole root fs, so it falls
 back to `/home`) and blocks access to infected files. It also auto-adds the
 `OnAccessExcludeUname` directive that clamonacc *requires* (excluding the
-scanner's own user) to avoid an infinite scan loop. Narrow it with
+scanner's own user) to avoid an infinite scan loop. Every configured watch path
+must already exist. On Debian/Ubuntu, setup discovers and creates the packaged
+unit's quarantine/log directories, then waits briefly and verifies that
+`clamav-clamonacc.service` both stays active and successfully establishes every
+requested watch instead of trusting an early `systemctl start` success. Setup
+also reconciles existing `OnAccessIncludePath` lines to this value, so narrowing
+and rerunning takes effect. If the scheduled ClamAV service is already scanning,
+a configuration-changing rerun exits clearly instead of restarting the daemon
+under that scan; rerun it after the scan finishes. Narrow it with
 `AV_ONACCESS_PATHS='/home /srv'`.
+
+Large build trees can exceed the host's inotify watch capacity even while the
+service process remains active. The readiness check treats those initialization
+errors as setup failures; choose narrower existing paths rather than assuming
+an active process means the whole tree is protected.
 
 ## 4. Using `av-scan`
 
@@ -172,7 +191,9 @@ av-scan --status                  # engine, socket, services, paths
 
 `av-scan` prefers **`clamdscan`** (talks to the running daemon — fast, low RAM)
 and falls back to **`clamscan`** (standalone) when no daemon socket is found.
-Force it with `--engine clamscan` or `AV_ENGINE=`.
+Because `clamdscan` cannot apply `AV_EXCLUDE_DIRS`, a whole-root (`/`) scan
+automatically switches to `clamscan`; narrower scans still prefer the daemon.
+Force either engine with `--engine clamscan|clamdscan` or `AV_ENGINE=`.
 
 ### 4.1 Scanning the whole box (all users + mounted drives)
 
@@ -269,6 +290,11 @@ Key vars (all optional, shown with defaults):
 | `AV_TIMER_NAME` | `linux-av-scan` | basename of the installed systemd units |
 | `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for the scan/rootkit timers (run after each boot) |
 | `AV_AIDE_BOOT_DELAY` | `15min` | `OnBootSec` drop-in for the AIDE check timer |
+
+`av-setup` installs and enables auditd, but deliberately does **not** invent an
+audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify
+them with `auditctl -l`; an active daemon with `No rules` records no useful
+policy events.
 
 ## 6. Cross-distro reference (the differences, in one place)
 

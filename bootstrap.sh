@@ -108,7 +108,16 @@ SCAN_TARGET="${AV_SCAN_PATHS:-$HOME}"   # $HOME here = the human's, before sudo
 if [ "$SCAN_ALL" -eq 1 ]; then
     say "configuring WHOLE-BOX scanning (/), system-wide"
     sudo mkdir -p /etc/linux-av
-    printf '# written by bootstrap.sh --full\nAV_SCAN_PATHS="/"\n' | sudo tee /etc/linux-av/av.env >/dev/null
+    if sudo test -f /etc/linux-av/av.env; then
+        if sudo grep -q '^AV_SCAN_PATHS=' /etc/linux-av/av.env; then
+            sudo sed -i 's|^AV_SCAN_PATHS=.*|AV_SCAN_PATHS="/"|' /etc/linux-av/av.env
+        else
+            printf 'AV_SCAN_PATHS="/"\n' | sudo tee -a /etc/linux-av/av.env >/dev/null
+        fi
+    else
+        printf '# written by bootstrap.sh --full\nAV_SCAN_PATHS="/"\n' \
+            | sudo tee /etc/linux-av/av.env >/dev/null
+    fi
     SCAN_TARGET="/"
 fi
 

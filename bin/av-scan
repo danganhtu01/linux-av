@@ -60,6 +60,26 @@ run_scan() {
     engine="$(choose_engine)"
     [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
 
+    # clamdscan has no --exclude-dir option. A whole-root scan through it would
+    # silently ignore AV_EXCLUDE_DIRS and descend into /proc, /sys, /dev, /run,
+    # and the signature database. Use standalone clamscan for `/`, where the
+    # documented exclusions matter most; keep the faster daemon for narrower
+    # paths. If clamscan is unavailable, continue but make the limitation loud.
+    if [ "$engine" = clamdscan ] && [ -n "$AV_EXCLUDE_DIRS" ]; then
+        local p
+        for p in "${paths[@]}"; do
+            if [ "$p" = / ]; then
+                if have clamscan; then
+                    log_info "whole-root exclusions require clamscan; switching from clamdscan"
+                    engine=clamscan
+                else
+                    log_warn "clamdscan cannot enforce AV_EXCLUDE_DIRS during a whole-root scan"
+                fi
+                break
+            fi
+        done
+    fi
+
     mkdir -p "$AV_QUARANTINE"
     local -a args=()
     if [ "$engine" = clamscan ]; then
@@ -122,12 +142,21 @@ show_status() {
     printf 'quarantine     : %s\n' "$AV_QUARANTINE"
     if have systemctl; then
         echo '--- services ---'
-        systemctl is-active clamav-daemon.service clamav-freshclam.service auditd.service 2>/dev/null \
-            | paste -d' ' <(printf 'clamav-daemon\nclamav-freshclam\nauditd\n') - || true
+        systemctl is-active clamav-daemon.service clamav-freshclam.service \
+            clamav-clamonacc.service auditd.service 2>/dev/null \
+            | paste -d' ' <(printf 'clamav-daemon\nclamav-freshclam\nclamav-clamonacc\nauditd\n') - || true
         systemctl is-active "${AV_TIMER_NAME}.timer" 2>/dev/null \
             | sed "s/^/${AV_TIMER_NAME}.timer /" || true
         systemctl is-active "${AV_ROOTKIT_TIMER_NAME}.timer" 2>/dev/null \
             | sed "s/^/${AV_ROOTKIT_TIMER_NAME}.timer /" || true
+        local aide_timer
+        for aide_timer in aidecheck.timer dailyaidecheck.timer; do
+            if systemctl cat "$aide_timer" >/dev/null 2>&1; then
+                systemctl is-active "$aide_timer" 2>/dev/null \
+                    | sed "s/^/$aide_timer /" || true
+                break
+            fi
+        done
     fi
 }
 

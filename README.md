@@ -63,6 +63,8 @@ git clone https://github.com/danganhtu01/linux-av.git ~/linux-av && cd ~/linux-a
 ```
 clamav / clamav-daemon / rkhunter / chkrootkit / aide / auditd all come from apt,
 the ClamAV + auditd services auto-enable on install, and AppArmor is already on.
+Bootstrap installs these with `--no-install-recommends` so AIDE's optional
+mail-reporting packages do not pull in and expose a full mail transport agent.
 
 **What each flag turns on:**
 

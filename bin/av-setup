@@ -112,7 +112,12 @@ do_install() {
         apt-get update -y
         # All official on Debian/Ubuntu — a single transaction is fine.
         # shellcheck disable=SC2046
-        av_pkg_install $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
+        # aide-common recommends mailx, which can pull in and enable a full MTA
+        # (Postfix on Ubuntu). The toolkit schedules and logs checks through
+        # systemd, so install only required dependencies and the protection
+        # packages explicitly listed here.
+        av_pkg_install --no-install-recommends \
+                       $(av_pkg_names clamav) $(av_pkg_names rkhunter) \
                        $(av_pkg_names aide) $(av_pkg_names audit) \
                        $(av_pkg_names chkrootkit)
         prepare_onaccess_runtime

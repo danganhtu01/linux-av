@@ -188,7 +188,10 @@ do_enable() {
     # which assembles /etc/aide/aide.conf.d/* into one config); on Arch there is
     # no wrapper — 'aide' reads /etc/aide.conf directly and the AUR package ships
     # aidecheck.timer instead.
-    if have aide || have aide.wrapper; then
+    if [ "${AV_AIDE_INIT:-1}" = 0 ]; then
+        log_warn "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement"
+        log_warn "  build the baseline later with: aideinit -y -f   (then rerun 'av-setup enable')"
+    elif have aide || have aide.wrapper; then
         log_info "building AIDE baseline (one-time, can be slow) ..."
         if [ "$AV_FAMILY" = debian ]; then
             aideinit -y -f || log_warn "aideinit failed"

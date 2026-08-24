@@ -94,7 +94,7 @@ linux-av/
 │   ├── av-rootkit.service # rootkit-timer service template
 │   └── av-scan.timer      # generic timer template (boot delay + interval)
 ├── config/
-│   └── av.env.example     # every tunable, with defaults — copy to av.env
+│   └── av.env.example     # the common tunables, with defaults — copy to av.env
 ├── bootstrap.sh           # one-shot per-box rollout (clone → install → enable)
 ├── install.sh             # symlinks the commands onto your PATH
 └── LICENSE                # MIT
@@ -121,9 +121,10 @@ it. After this, `av-scan` and `av-setup` work from anywhere.
 
 > **Doing it by hand instead?** That's all `install.sh` does:
 > ```bash
-> chmod +x ~/linux-av/bin/av-scan ~/linux-av/bin/av-setup
-> ln -s ~/linux-av/bin/av-scan  ~/.local/bin/av-scan
-> ln -s ~/linux-av/bin/av-setup ~/.local/bin/av-setup
+> chmod +x ~/linux-av/bin/av-scan ~/linux-av/bin/av-setup ~/linux-av/bin/av-aide-arch
+> ln -s ~/linux-av/bin/av-scan      ~/.local/bin/av-scan
+> ln -s ~/linux-av/bin/av-setup     ~/.local/bin/av-setup
+> ln -s ~/linux-av/bin/av-aide-arch ~/.local/bin/av-aide-arch
 > ```
 > Symlinking (not copying) means `git pull` updates every box in place.
 
@@ -146,7 +147,7 @@ av-setup status     # what's installed / running
 So on **Arch**, `av-setup enable` runs `freshclam` first, then
 `systemctl enable --now` on each service. On **Debian/Ubuntu** it just makes sure
 the already-enabled services are up and fails clearly if a required daemon is
-not actually active. It also provisions the runtime directories
+not actually active. `av-setup install` provisions the runtime directories
 advertised by Ubuntu's packaged `clamav-clamonacc.service` (including its
 quarantine and log locations) and adds log rotation for the packaged on-access
 log when no existing policy covers it. Either way you end up in the same place.
@@ -321,7 +322,7 @@ policy events.
 
 ```bash
 sudo av-scan --remove-timer          # drop the systemd timer
-rm ~/.local/bin/av-scan ~/.local/bin/av-setup   # or /usr/local/bin with sudo
+rm ~/.local/bin/av-scan ~/.local/bin/av-setup ~/.local/bin/av-aide-arch   # or /usr/local/bin with sudo
 # packages stay installed; remove with pacman -Rns / apt purge if you want them gone
 ```
 

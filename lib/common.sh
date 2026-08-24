@@ -111,14 +111,6 @@ die()      { log_err "$@"; exit 1; }
 have()      { command -v "$1" >/dev/null 2>&1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0 $*)"; }
 
-# Re-exec self through sudo when not already root (used by av-setup).
-reexec_root() {
-    [ "$(id -u)" -eq 0 ] && return 0
-    have sudo || die "not root and sudo not found"
-    log_warn "escalating with sudo ..."
-    exec sudo -E "$0" "$@"
-}
-
 # ---------------------------------------------------------------------------
 # 5. Distro detection.  Sets:
 #      AV_DISTRO_ID     e.g. arch | debian | ubuntu

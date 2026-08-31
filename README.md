@@ -17,6 +17,9 @@ sane defaults** and **relative, symlink-following path resolution**, so the same
 git checkout works for any user on any of the three distros without editing a
 line.
 
+See [MASTER.md](MASTER.md) for the repo's entry point: its position in the fleet, the
+commands and their flags, and where state lives on a provisioned box.
+
 ---
 
 ## 0. Fastest path — `bootstrap.sh`

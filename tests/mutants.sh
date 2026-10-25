@@ -16,6 +16,7 @@ REPO="$(cd -P "$HERE/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
+# shellcheck disable=SC2016
 MUTANTS=(
 'mailer_guard~lib/reports.sh~s/^    if av_have_mailer; then/    if false; then/~mail_untouched_with_mail mail_untouched_with_sendmail'
 'mail_tool_mail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have sendmail; }/~mail_untouched_with_mail'

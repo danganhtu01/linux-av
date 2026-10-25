@@ -34,18 +34,35 @@ av_get_var() {
 
 # av_set_var FILE VAR VALUE   (VALUE is the text after '=', quotes included)
 # Edits only the one variable line: rewrites it, or appends it when the file has
-# no uncommented assignment. Keeps FILE.linux-av.bak the first time. No-op when
-# the effective line is already right. Logs what changed.
+# no uncommented assignment. Keeps FILE.linux-av.bak the first time and edits
+# nothing when that copy cannot be made. Leaves a symlink alone (sed -i would
+# replace it with a regular file) and a file the edit would leave unparsable (a
+# value spread over lines). No-op when the effective line is already right.
+# Logs what changed.
 av_set_var() {
-    local file="$1" var="$2" want="$3" line cur
+    local file="$1" var="$2" want="$3" line cur new
     line="${var}=${want}"
     if [ ! -f "$file" ]; then
         log_info "$file is not present; $var left alone"
         return 0
     fi
+    if [ -L "$file" ]; then
+        log_warn "$file is a symlink; $var left alone (set $line in its target by hand)"
+        return 1
+    fi
     cur="$(grep -E "^[[:space:]]*${var}=" "$file" | tail -n 1)" || true
     [ "$cur" = "$line" ] && return 0
-    [ -e "$file.linux-av.bak" ] || cp -p "$file" "$file.linux-av.bak"
+    if [ -n "$cur" ]; then
+        new="$(sed "s|^[[:space:]]*${var}=.*|${line}|" "$file")"
+    else
+        new="$(cat "$file")"$'\n'"$line"
+    fi
+    if ! "${BASH:-bash}" -n <<<"$new" 2>/dev/null; then
+        log_warn "$file: $line would not parse there (a value spread over lines?); $var left alone"
+        return 1
+    fi
+    [ -e "$file.linux-av.bak" ] || cp -p "$file" "$file.linux-av.bak" \
+        || { log_warn "$file: could not keep $file.linux-av.bak; $var left alone"; return 1; }
     if [ -n "$cur" ]; then
         sed -i "s|^[[:space:]]*${var}=.*|${line}|" "$file"
         log_info "$file: set $line (was: $cur); original kept in $file.linux-av.bak"
@@ -132,7 +149,7 @@ av_aide_baseline() {
         log_info "the AIDE baseline is already building ($unit.service) — not starting a second"
     elif have systemd-run; then
         log_info "building the AIDE baseline in its own unit, detached from this terminal ..."
-        if systemd-run --unit="$unit" --property=TimeoutStartSec="$limit" --collect "${cmd[@]}"; then
+        if systemd-run --unit="$unit" --property=RuntimeMaxSec="$limit" --collect "${cmd[@]}"; then
             log_info "baseline started as $unit.service (limit $limit)"
         else
             log_warn "could not start $unit.service; build the baseline by hand: ${cmd[*]}"
@@ -150,7 +167,7 @@ av_aide_baseline() {
 # Step 4 — chkrootkit's expected output. av-setup does not run chkrootkit, so it
 # cannot know a clean run happened by itself; it reads the nightly run's own
 # log.today instead, and adopts it as log.expected only when that file exists,
-# is not empty, and has no INFECTED and no Vulnerable line, and log.expected does
+# is not empty, and has no INFECTED, Vulnerable, WARNING or Warning line (otherwise it lists them and prints the cp -a command for after reading), and log.expected does
 # not exist yet. Run by `av-setup chkrootkit-baseline`, and at the end of `enable`.
 # Returns 1 when log.today holds a finding (nothing is copied).
 av_chkrootkit_baseline() {
@@ -165,8 +182,12 @@ av_chkrootkit_baseline() {
         log_info "chkrootkit has not produced $today yet; after its first nightly run: av-setup chkrootkit-baseline"
         return 0
     fi
-    if grep -Eq 'INFECTED|Vulnerable' "$today"; then
-        log_warn "$today holds an INFECTED or Vulnerable line — not adopted as the baseline; read it first"
+    # chkrootkit 0.58b prints most rootkit findings as "WARNING: Possible ... installed"
+    # (its _warn/_report), a few as "Warning: ..."; neither says INFECTED.
+    if grep -Eq 'INFECTED|Vulnerable|WARNING|Warning' "$today"; then
+        log_warn "$today holds an INFECTED, Vulnerable or WARNING line — not adopted as the baseline:"
+        grep -nE 'INFECTED|Vulnerable|WARNING|Warning' "$today" | head -n 20 >&2
+        log_warn "read it; if every line is expected, adopt it by hand: cp -a $today $expected"
         return 1
     fi
     cp -a "$today" "$expected"

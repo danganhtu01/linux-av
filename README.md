@@ -170,7 +170,7 @@ or to the log the package already writes, and reads nothing from a mailer.
 
 Each edit touches only that one variable line, keeps a `<file>.linux-av.bak` copy the
 first time, logs what it changed, and does nothing on a second run. On a machine that
-has a mailer the files are left alone. `AV_QUIET_REPORTS=0` turns all of this off.
+has a mailer the files are left alone. A symlinked file, a file whose backup cannot be made, and an edit that would leave the file unparsable are left alone with a warning. `AV_QUIET_REPORTS=0` turns all of this off.
 
 **rkhunter runs nightly** on Debian/Ubuntu: `enable` sets `CRON_DAILY_RUN="true"` and
 `CRON_DB_UPDATE="true"` in `/etc/default/rkhunter`, then runs `rkhunter --propupd` once if
@@ -179,7 +179,7 @@ has a mailer the files are left alone. `AV_QUIET_REPORTS=0` turns all of this of
 finds none. `AV_RKHUNTER_DAILY=0` turns this off.
 
 **The AIDE baseline builds in its own systemd unit** (`linux-av-aide-init`, `systemd-run
---collect`, `TimeoutStartSec=$AV_AIDE_INIT_TIMEOUT`), so closing the terminal does not kill it
+--collect`, `RuntimeMaxSec=$AV_AIDE_INIT_TIMEOUT`; systemd stops a longer build), so closing the terminal does not kill it
 (raspberrypi5's `aideinit` died with its terminal at 22:57 and left no database). It runs the
 same command as before: `aideinit -y -f` on Debian/Ubuntu, `aide --init` then the move on Arch.
 Watch it with `systemctl status linux-av-aide-init` and `journalctl -u linux-av-aide-init -f`.
@@ -190,7 +190,7 @@ A unit already running is not started twice. `AV_AIDE_INIT=0` still skips the ba
 chkrootkit reports its whole output every night. `av-setup` does not run chkrootkit, so it
 cannot know a clean run happened by itself. It reads the nightly run's `log.today` instead:
 `sudo av-setup chkrootkit-baseline` (also run at the end of `enable`) copies it to
-`log.expected` only when `log.today` is not empty, has no `INFECTED` and no `Vulnerable` line,
+`log.expected` only when `log.today` is not empty, has no `INFECTED`, `Vulnerable`, `WARNING` or `Warning` line (otherwise it lists them and prints the `cp -a` command for after reading),
 and `log.expected` does not exist. After the first night, that one command is all it takes.
 
 `av-setup status` reports the baseline (present, building or absent), where each scanner's
@@ -350,9 +350,9 @@ Key vars (all optional, shown with defaults):
 | `AV_QUIET_REPORTS` | `1` | `0` leaves chkrootkit's, AIDE's and rkhunter's mail settings alone (otherwise, with no `mail` or `sendmail` on `PATH`, their reports go to the journal and logs) |
 | `AV_RKHUNTER_DAILY` | `1` | `0` leaves rkhunter's nightly run and weekly update as the package has them |
 | `AV_AIDE_INIT` | `1` | `0` skips the AIDE baseline and the periodic-check enablement |
-| `AV_AIDE_INIT_TIMEOUT` | `4h` | `TimeoutStartSec` of the baseline unit |
+| `AV_AIDE_INIT_TIMEOUT` | `4h` | `RuntimeMaxSec` of the baseline unit (systemd stops a longer build) |
 | `AV_AIDE_INIT_UNIT` | `linux-av-aide-init` | name of the baseline unit |
-| `AV_ROOT` | empty | path prefix for the `/etc` and `/var` paths `enable` edits; for tests only |
+| `AV_ROOT` | empty | path prefix for the `/etc` and `/var` paths `enable` edits; for tests only; refused (exit 1) when running as root |
 
 `av-setup` installs and enables auditd, but deliberately does **not** invent an
 audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify

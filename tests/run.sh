@@ -222,7 +222,7 @@ row_baseline_detached_debian() {
     new_fixture "$ROW"
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=TimeoutStartSec=4h --collect aideinit -y -f" "systemd-run command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "systemd-run command line"
     assert_lacks "$(calls)" "
 aideinit" "aideinit not run directly"
     assert_has "$OUT" "systemctl status linux-av-aide-init" "how to watch (status)"
@@ -234,7 +234,7 @@ row_baseline_detached_arch() {
     new_fixture "$ROW" arch
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=TimeoutStartSec=4h --collect sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
     assert_lacks "$(calls)" "aideinit" "no aideinit on arch"
     assert_has "$(cat "$(conf default/rkhunter)")" 'CRON_DAILY_RUN=""' "arch: rkhunter cron setting not touched"
 }
@@ -249,7 +249,7 @@ row_baseline_running_not_twice() {
 row_baseline_timeout_env() {
     new_fixture "$ROW"
     SETUP_ENV=(AV_AIDE_INIT_TIMEOUT=90min AV_AIDE_INIT_UNIT=my-aide); setup enable; SETUP_ENV=()
-    assert_has "$(calls)" "systemd-run --unit=my-aide --property=TimeoutStartSec=90min --collect aideinit -y -f" "unit and limit from env"
+    assert_has "$(calls)" "systemd-run --unit=my-aide --property=RuntimeMaxSec=90min --collect aideinit -y -f" "unit and limit from env"
 }
 
 row_baseline_skip_aide_init_0() {
@@ -428,6 +428,61 @@ row_status_chkrootkit_baseline() {
     : > "$R/var/log/chkrootkit/log.expected"
     setup status
     assert_has "$OUT" "chkrootkit baseline: present" "present"
+}
+
+row_chkrootkit_baseline_warning() {
+    new_fixture "$ROW"; clean_today
+    printf 'Searching for Showtee rootkit... WARNING\n\nWARNING: Possible Showtee rootkit installed:\n/usr/lib/.egcs\n' >> "$R/var/log/chkrootkit/log.today"
+    setup enable
+    assert_nofile "$R/var/log/chkrootkit/log.expected" "a WARNING finding is not adopted"
+    assert_has "$OUT" "cp -a $R/var/log/chkrootkit/log.today $R/var/log/chkrootkit/log.expected" "gives the command for after reading"
+}
+
+row_mail_symlink_left_alone() {
+    new_fixture "$ROW"; mkdir -p "$D/managed"
+    mv "$R/etc/default/rkhunter" "$D/managed/rkhunter"; cp "$D/managed/rkhunter" "$D/rk.orig"
+    ln -s "$D/managed/rkhunter" "$R/etc/default/rkhunter"
+    setup enable
+    [ -L "$R/etc/default/rkhunter" ] || fail "symlink replaced by a regular file"
+    assert_same "$D/managed/rkhunter" "$D/rk.orig" "symlink target untouched"
+    assert_has "$OUT" "is a symlink" "says why"
+}
+
+row_mail_bak_failure_left_alone() {
+    new_fixture "$ROW"; cp "$R/etc/chkrootkit/chkrootkit.conf" "$D/c0"
+    ln -s "$D/nowhere/bak" "$R/etc/chkrootkit/chkrootkit.conf.linux-av.bak"   # dangling: cp will not write through it
+    setup enable
+    assert_same "$R/etc/chkrootkit/chkrootkit.conf" "$D/c0" "no edit without a backup"
+    assert_nofile "$D/nowhere/bak" "nothing written through the symlink"
+    assert_has "$OUT" "could not keep" "says why"
+}
+
+row_mail_multiline_value_left_alone() {
+    new_fixture "$ROW"
+    printf 'RUN_DAILY="true"\nMAILTO="root,\\\nadmin"\n' > "$R/etc/chkrootkit/chkrootkit.conf"
+    cp "$R/etc/chkrootkit/chkrootkit.conf" "$D/c0"
+    setup enable
+    assert_same "$R/etc/chkrootkit/chkrootkit.conf" "$D/c0" "file left as it was"
+    assert_nofile "$R/etc/chkrootkit/chkrootkit.conf.linux-av.bak" "no backup for an edit not made"
+    assert_has "$OUT" "would not parse" "says why"
+}
+
+row_mail_absent_file_not_created() {
+    new_fixture "$ROW"; mv "$R/etc/default/aide" "$D/aide.away"
+    setup enable
+    assert_nofile "$R/etc/default/aide" "an absent /etc/default/aide is not created"
+    assert_has "$OUT" "/etc/default/aide is not present" "says why"
+}
+
+row_av_root_refused_as_root() {
+    new_fixture "$ROW"
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" AV_COLOR=never \
+        XDG_STATE_HOME="$H/state" "$BASH_BIN" -c '. "$1/lib/common.sh"; av_refuse_root_prefix 0; echo reached' \
+        sh "$REPO" 2>&1)"; RC=$?
+    assert_eq "$RC" 1 "exit status with AV_ROOT as root"
+    assert_has "$OUT" "AV_ROOT=$R is for tests only" "says why"
+    assert_lacks "$OUT" "reached" "stops there"
+    assert_eq "$(grep -c '^av_refuse_root_prefix "${EUID:-$(id -u)}"$' "$REPO/lib/common.sh")" 1 "called when common.sh is sourced"
 }
 
 # ---------------------------------------------------------------------------

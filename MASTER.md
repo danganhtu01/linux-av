@@ -150,13 +150,13 @@ and points you at `av-aide-arch` and your AUR helper.
 `MAILTO=""` in `/etc/chkrootkit/chkrootkit.conf`, `MAILCMD=":"` in `/etc/default/aide` (an empty
 `MAILTO` would not work there: `dailyaidecheck` defaults it to `root`) and `REPORT_EMAIL=""` in
 `/etc/default/rkhunter`; each edit is one variable line, backed up once as `<file>.linux-av.bak`,
-idempotent, and skipped when a mailer exists or `AV_QUIET_REPORTS=0`. On Debian/Ubuntu it turns on
+idempotent, and skipped when a mailer exists or `AV_QUIET_REPORTS=0`. A symlinked file, a file whose backup cannot be made, and an edit that would leave the file unparsable are left alone with a warning. On Debian/Ubuntu it turns on
 rkhunter's nightly run (`CRON_DAILY_RUN` and `CRON_DB_UPDATE` set to `"true"`, then
 `rkhunter --propupd` once when `rkhunter.dat` is missing; `AV_RKHUNTER_DAILY=0` skips it). The AIDE
 baseline builds in a systemd unit of its own (`linux-av-aide-init`, started with `systemd-run
 --collect`), so it outlives the terminal; a unit already running is not started again.
 `av-setup chkrootkit-baseline` (also run by `enable`) copies chkrootkit's `log.today` to
-`log.expected` when it is not empty, has no `INFECTED` and no `Vulnerable` line, and `log.expected`
+`log.expected` when it is not empty, has no `INFECTED`, `Vulnerable`, `WARNING` or `Warning` line (otherwise it lists them and prints the `cp -a` command for after reading), and `log.expected`
 is absent. `av-setup status` prints each scanner's report location and mail state, the AIDE baseline
 (present, building, absent), the chkrootkit baseline and whether rkhunter's daily run is on.
 
@@ -172,7 +172,7 @@ is absent. `av-setup status` prints each scanner's report location and mail stat
 ### Tests — `tests/run.sh`, `tests/mutants.sh`
 
 ```bash
-tests/run.sh                  # every row, 33 at the time of writing; or name rows to run
+tests/run.sh                  # every row, 39 at the time of writing; or name rows to run
 tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
 ```
 
@@ -242,7 +242,7 @@ Every tracked file in this repository.
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit. Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
-| `tests/run.sh` | The suite: 33 rows, bash only, no root. |
+| `tests/run.sh` | The suite: 39 rows, bash only, no root. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |

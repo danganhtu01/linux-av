@@ -5,8 +5,9 @@
 #   av-setup install     install packages: clamav rkhunter chkrootkit aide audit
 #   av-setup enable       seed signatures + enable the systemd services
 #   av-setup onaccess     enable ClamAV real-time (on-access) scanning
-#   av-setup status       show what is installed / running
-#   av-setup all          install + enable (the usual first-run)
+#   av-setup status       show what is installed / running, and where reports go
+#   av-setup chkrootkit-baseline   adopt the last clean chkrootkit run as log.expected
+#   av-setup all         install + enable (the usual first-run)
 #
 # Needs root; it will re-exec itself through sudo if you forget.
 
@@ -20,6 +21,8 @@ done
 AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
 # shellcheck source=../lib/common.sh
 . "$AV_HOME/lib/common.sh"
+# shellcheck source=../lib/reports.sh
+. "$AV_HOME/lib/reports.sh"
 av_detect_distro
 
 # Read one `--option=/absolute/path` argument from a packaged systemd unit.
@@ -192,13 +195,9 @@ do_enable() {
         log_warn "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement"
         log_warn "  build the baseline later with: aideinit -y -f   (then rerun 'av-setup enable')"
     elif have aide || have aide.wrapper; then
-        log_info "building AIDE baseline (one-time, can be slow) ..."
-        if [ "$AV_FAMILY" = debian ]; then
-            aideinit -y -f || log_warn "aideinit failed"
-        else
-            aide --init && mv -f /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz \
-                || log_warn "aide --init failed"
-        fi
+        # One-time and slow (raspberrypi5: 23 min). Run as its own systemd unit so it
+        # survives the caller's terminal closing; see av_aide_baseline.
+        av_aide_baseline
         # Enable the distro's scheduled integrity check if one is shipped, and add
         # a drop-in so it also runs after every boot. The packaged timers fire at a
         # fixed OnCalendar time (Arch 05:00, Debian daily) which is skipped entirely
@@ -207,7 +206,7 @@ do_enable() {
         local t dropdir
         for t in aidecheck.timer dailyaidecheck.timer; do
             if systemctl cat "$t" >/dev/null 2>&1; then
-                dropdir="/etc/systemd/system/${t}.d"
+                dropdir="$(av_path /etc/systemd/system)/${t}.d"
                 mkdir -p "$dropdir"
                 {
                     echo "# added by linux-av: also run after every boot, and catch up a missed run"
@@ -223,6 +222,11 @@ do_enable() {
             fi
         done
     fi
+
+    # Where the scanners' reports go, rkhunter's nightly run, chkrootkit's baseline.
+    av_quiet_reports
+    av_rkhunter_daily
+    av_chkrootkit_baseline || true
 
     log_info "done. Check with: av-setup status"
 }
@@ -380,13 +384,14 @@ do_status() {
             printf '  %-20s %s\n' "$s" "$(systemctl is-active "$s.service" 2>/dev/null || true)"
         done
     fi
+    av_report_status
 }
 
 # Escalate to root ONCE, preserving the full command, so composite commands like
 # `all` run install AND enable as root. (A per-function re-exec with `exec` would
 # replace the process and silently drop the rest of the sequence.)
 case "${1:-}" in
-    install|enable|onaccess|all)
+    install|enable|onaccess|chkrootkit-baseline|all)
         if [ "$(id -u)" -ne 0 ]; then
             have sudo || die "must run as root and sudo not found"
             log_warn "escalating with sudo ..."
@@ -399,8 +404,9 @@ case "${1:-}" in
     enable)   do_enable ;;
     onaccess) do_onaccess ;;
     status)   do_status ;;
+    chkrootkit-baseline) av_chkrootkit_baseline ;;
     all)      do_install; do_enable ;;
     ""|-h|--help)
-        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) die "unknown command: $1 (try: install | enable | onaccess | status | all)" ;;
 esac

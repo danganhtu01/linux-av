@@ -70,9 +70,15 @@ done
 : "${AV_TIMER_BOOT_DELAY:=1min}"                              # OnBootSec for scan/rootkit timers
 : "${AV_AIDE_BOOT_DELAY:=15min}"                              # OnBootSec drop-in for the AIDE check
 : "${AV_COLOR:=auto}"                                         # auto | always | never
+: "${AV_ROOT:=}"                                               # path prefix for /etc and /var (tests only; empty = the real system)
+: "${AV_QUIET_REPORTS:=1}"                                     # 0 = leave chkrootkit/AIDE/rkhunter mail settings alone
+: "${AV_RKHUNTER_DAILY:=1}"                                    # 0 = leave rkhunter's daily run and weekly update off/as is
+: "${AV_AIDE_INIT_UNIT:=linux-av-aide-init}"                   # systemd unit that builds the AIDE baseline
+: "${AV_AIDE_INIT_TIMEOUT:=4h}"                                # TimeoutStartSec of that unit
 export AV_SCAN_PATHS AV_EXCLUDE_DIRS AV_ENGINE AV_LOG_DIR AV_QUARANTINE \
        AV_LOG_FILE AV_TIMER_NAME AV_ROOTKIT_TIMER_NAME AV_TIMER_BOOT_DELAY \
-       AV_AIDE_BOOT_DELAY AV_COLOR
+       AV_AIDE_BOOT_DELAY AV_COLOR AV_ROOT AV_QUIET_REPORTS AV_RKHUNTER_DAILY \
+       AV_AIDE_INIT_UNIT AV_AIDE_INIT_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # 3. Logging (colored to stderr, plain to $AV_LOG_FILE).
@@ -120,9 +126,9 @@ need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0 $*)"; 
 # ---------------------------------------------------------------------------
 av_detect_distro() {
     AV_DISTRO_ID="unknown"; local like=""
-    if [ -r /etc/os-release ]; then
+    if [ -r "${AV_ROOT:-}/etc/os-release" ]; then
         # shellcheck disable=SC1091
-        . /etc/os-release
+        . "${AV_ROOT:-}/etc/os-release"
         AV_DISTRO_ID="${ID:-unknown}"; like="${ID_LIKE:-}"
     fi
     case "$AV_DISTRO_ID $like" in

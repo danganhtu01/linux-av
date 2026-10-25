@@ -145,6 +145,44 @@ time, so `enable` there verifies rather than starts. On Arch, `aide` and `chkroo
 AUR-only and `av-setup` cannot install them — makepkg refuses to run as root — so it warns
 and points you at `av-aide-arch` and your AUR helper.
 
+
+`enable` also decides where the scanners' reports go. With no `mail` or `sendmail` on `PATH` it sets
+`MAILTO=""` in `/etc/chkrootkit/chkrootkit.conf`, `MAILCMD=":"` in `/etc/default/aide` (an empty
+`MAILTO` would not work there: `dailyaidecheck` defaults it to `root`) and `REPORT_EMAIL=""` in
+`/etc/default/rkhunter`; each edit is one variable line, backed up once as `<file>.linux-av.bak`,
+idempotent, and skipped when a mailer exists or `AV_QUIET_REPORTS=0`. On Debian/Ubuntu it turns on
+rkhunter's nightly run (`CRON_DAILY_RUN` and `CRON_DB_UPDATE` set to `"true"`, then
+`rkhunter --propupd` once when `rkhunter.dat` is missing; `AV_RKHUNTER_DAILY=0` skips it). The AIDE
+baseline builds in a systemd unit of its own (`linux-av-aide-init`, started with `systemd-run
+--collect`), so it outlives the terminal; a unit already running is not started again.
+`av-setup chkrootkit-baseline` (also run by `enable`) copies chkrootkit's `log.today` to
+`log.expected` when it is not empty, has no `INFECTED` and no `Vulnerable` line, and `log.expected`
+is absent. `av-setup status` prints each scanner's report location and mail state, the AIDE baseline
+(present, building, absent), the chkrootkit baseline and whether rkhunter's daily run is on.
+
+**Where each report lands** (what device-health's planned `av-status` check reads, R-2762):
+
+| Scanner | Report | Baseline |
+|---|---|---|
+| AIDE | `/var/log/aide/aide.log` (and `journalctl -u dailyaidecheck`) | `/var/lib/aide/aide.db` (`.gz` on Arch); building: `systemctl status linux-av-aide-init` |
+| chkrootkit | `journalctl -u chkrootkit` and `/var/log/chkrootkit/log.today` | `/var/log/chkrootkit/log.expected` |
+| rkhunter | `/var/log/rkhunter.log` (the cron job runs `rkhunter --cronjob --report-warnings-only --appendlog`; nothing is mailed) | `/var/lib/rkhunter/db/rkhunter.dat` |
+| ClamAV scans | `/var/log/linux-av/` (the timers' logs) | none |
+
+### Tests — `tests/run.sh`, `tests/mutants.sh`
+
+```bash
+tests/run.sh                  # every row, 33 at the time of writing; or name rows to run
+tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
+```
+
+Bash, no root, no dependencies. `AV_ROOT` (empty by default) prefixes every `/etc` and `/var`
+path the new code reads or edits; each row builds a scratch root and a `PATH` of symlinks to plain
+tools plus stubs for `systemctl`, `systemd-run`, `rkhunter`, `aideinit`, `aide` and `id`
+(and `mail` / `sendmail` where a row wants a mailer). `tests/mutants.sh` copies the checkout, applies
+one sed per guard, checks the copy still parses, and reports `killed` or `SURVIVED`; it exits 1 on a
+survivor. Set `TMPDIR` to a scratch directory; `AV_TEST_KEEP=1` keeps the rows' scratch trees.
+
 ### Scanning — `av-scan`
 
 ```bash
@@ -202,7 +240,10 @@ Every tracked file in this repository.
 | `bootstrap.sh` | One-shot per-box rollout: locate or clone the checkout, run `install.sh`, run `av-setup all`, then optionally AIDE, whole-box config, on-access and both timers. Run as a normal user; escalates itself. |
 | `install.sh` | Symlinks the three `bin/` commands onto `PATH`. Copies nothing. |
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
-| `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning and the AIDE check timer's boot-delay drop-in. Needs root. |
+| `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit. Needs root (`status` does not). |
+| `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
+| `tests/run.sh` | The suite: 33 rows, bash only, no root. |
+| `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |
 | `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@` and `@PATHS@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |
@@ -230,7 +271,9 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | `/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf` (or under `dailyaidecheck.timer.d/`) | drop-in adding `OnBootSec` + `Persistent=true`, so the packaged AIDE check also runs after boot instead of only at a fixed clock time | `av-setup enable` |
 | `/etc/clamav/clamd.conf` | `OnAccess*` directives appended and reconciled | `av-setup onaccess` |
 | `/etc/logrotate.d/linux-av-clamonacc` | rotation for the packaged on-access log, added only when no existing policy covers it | `av-setup install` |
-| `/var/lib/aide/aide.db` (`.gz` on Arch) | the AIDE baseline database | `av-setup enable` |
+| `/var/lib/aide/aide.db` (`.gz` on Arch) | the AIDE baseline database, built by the `linux-av-aide-init` unit | `av-setup enable` |
+| `<file>.linux-av.bak` beside `/etc/chkrootkit/chkrootkit.conf`, `/etc/default/aide`, `/etc/default/rkhunter` | the file as it was before the first report-destination edit | `av-setup enable` |
+| `/var/log/chkrootkit/log.expected` | chkrootkit's expected output, adopted from `log.today` | `av-setup chkrootkit-baseline` |
 | `~/.cache/linux-av/` | `av-aide-arch` build tree — `AV_AIDE_BUILD_DIR` | `av-aide-arch` |
 
 Config lookup, first found wins:

@@ -135,7 +135,7 @@ it. After this, `av-scan` and `av-setup` work from anywhere.
 
 ```bash
 av-setup all        # = av-setup install  +  av-setup enable   (re-execs via sudo)
-av-setup status     # what's installed / running
+av-setup status     # what's installed / running, where reports go, baselines
 ```
 
 `av-setup` hides the biggest cross-distro trap for you:
@@ -154,6 +154,59 @@ not actually active. `av-setup install` provisions the runtime directories
 advertised by Ubuntu's packaged `clamav-clamonacc.service` (including its
 quarantine and log locations) and adds log rotation for the packaged on-access
 log when no existing policy covers it. Either way you end up in the same place.
+
+
+### Where the reports go, and the baselines (`av-setup enable`)
+
+No machine in the fleet has a mailer, and a report mailed to nobody is a finding that
+reaches no one. `av-setup enable` therefore sends each scanner's report to the journal
+or to the log the package already writes, and reads nothing from a mailer.
+
+| Scanner | Report lands in | What `enable` changes (only when neither `mail` nor `sendmail` is on `PATH`) |
+|---|---|---|
+| AIDE (`dailyaidecheck`) | `/var/log/aide/` (`aide.log`) | `MAILCMD=":"` in `/etc/default/aide`. `MAILTO=""` would not do: `dailyaidecheck` reads `MAILTO="${MAILTO:-root}"`, so an empty value becomes `root`. `send_mail()` evals `$MAILCMD` when it is set, and `:` is a no-op. An existing `MAILCMD` of yours is kept. |
+| chkrootkit (`chkrootkit.service`) | the journal (`journalctl -u chkrootkit`) and `/var/log/chkrootkit/log.today` | `MAILTO=""` in `/etc/chkrootkit/chkrootkit.conf`; `chkrootkit-daily` then prints the report instead of calling `mail`. |
+| rkhunter (`/etc/cron.daily/rkhunter`) | `/var/log/rkhunter.log` | `REPORT_EMAIL=""` in `/etc/default/rkhunter`; the cron job then does not call `sendmail`. |
+
+Each edit touches only that one variable line, keeps a `<file>.linux-av.bak` copy the
+first time, logs what it changed, and does nothing on a second run. On a machine that
+has a mailer the files are left alone. `AV_QUIET_REPORTS=0` turns all of this off.
+
+**rkhunter runs nightly** on Debian/Ubuntu: `enable` sets `CRON_DAILY_RUN="true"` and
+`CRON_DB_UPDATE="true"` in `/etc/default/rkhunter`, then runs `rkhunter --propupd` once if
+`/var/lib/rkhunter/db/rkhunter.dat` does not exist. The job is `/etc/cron.daily/rkhunter`
+(the package ships no systemd timer), so it needs a cron service; `enable` warns when it
+finds none. `AV_RKHUNTER_DAILY=0` turns this off.
+
+**The AIDE baseline builds in its own systemd unit** (`linux-av-aide-init`, `systemd-run
+--collect`, `TimeoutStartSec=$AV_AIDE_INIT_TIMEOUT`), so closing the terminal does not kill it
+(raspberrypi5's `aideinit` died with its terminal at 22:57 and left no database). It runs the
+same command as before: `aideinit -y -f` on Debian/Ubuntu, `aide --init` then the move on Arch.
+Watch it with `systemctl status linux-av-aide-init` and `journalctl -u linux-av-aide-init -f`.
+The periodic check is enabled at once but reports "no database" until the baseline finishes.
+A unit already running is not started twice. `AV_AIDE_INIT=0` still skips the baseline.
+
+**chkrootkit's baseline.** With `DIFF_MODE="true"` and no `/var/log/chkrootkit/log.expected`,
+chkrootkit reports its whole output every night. `av-setup` does not run chkrootkit, so it
+cannot know a clean run happened by itself. It reads the nightly run's `log.today` instead:
+`sudo av-setup chkrootkit-baseline` (also run at the end of `enable`) copies it to
+`log.expected` only when `log.today` is not empty, has no `INFECTED` and no `Vulnerable` line,
+and `log.expected` does not exist. After the first night, that one command is all it takes.
+
+`av-setup status` reports the baseline (present, building or absent), where each scanner's
+report goes and whether its mail is off, and whether rkhunter's daily run is on.
+
+### Tests
+
+```bash
+tests/run.sh          # every row; or: tests/run.sh mail_edits_applied status_reports_quiet
+tests/mutants.sh      # removes each guard in a scratch copy and shows its row go red
+```
+
+Bash only, no root, no dependencies. `AV_ROOT` is a path prefix (empty by default) for every
+path the new code reads or edits under `/etc` and `/var`; the rows point it at a scratch tree and
+put stubs for `systemctl`, `systemd-run`, `rkhunter`, `aideinit`, `aide` and `id` first on a
+`PATH` that holds nothing else.
 
 ### Real-time (on-access) scanning — optional
 ```bash
@@ -294,6 +347,12 @@ Key vars (all optional, shown with defaults):
 | `AV_TIMER_NAME` | `linux-av-scan` | basename of the installed systemd units |
 | `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for the scan/rootkit timers (run after each boot) |
 | `AV_AIDE_BOOT_DELAY` | `15min` | `OnBootSec` drop-in for the AIDE check timer |
+| `AV_QUIET_REPORTS` | `1` | `0` leaves chkrootkit's, AIDE's and rkhunter's mail settings alone (otherwise, with no `mail` or `sendmail` on `PATH`, their reports go to the journal and logs) |
+| `AV_RKHUNTER_DAILY` | `1` | `0` leaves rkhunter's nightly run and weekly update as the package has them |
+| `AV_AIDE_INIT` | `1` | `0` skips the AIDE baseline and the periodic-check enablement |
+| `AV_AIDE_INIT_TIMEOUT` | `4h` | `TimeoutStartSec` of the baseline unit |
+| `AV_AIDE_INIT_UNIT` | `linux-av-aide-init` | name of the baseline unit |
+| `AV_ROOT` | empty | path prefix for the `/etc` and `/var` paths `enable` edits; for tests only |
 
 `av-setup` installs and enables auditd, but deliberately does **not** invent an
 audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify
@@ -396,6 +455,8 @@ The *scheduled* daily check differs too, and `av-setup enable` turns it on for y
 | Schedule unit | `aidecheck.timer` (daily 05:00, `ConditionACPower=true`) | `dailyaidecheck.timer` or `/etc/cron.daily/aide` (per release) |
 | Enable | `sudo systemctl enable --now aidecheck.timer` | usually auto-enabled by the package; else enable the timer / set `CRON_DAILY_RUN=yes` in `/etc/default/aide` |
 | Init DB | `aide --init` → move to `/var/lib/aide/aide.db.gz` | `sudo aideinit` |
+
+`av-setup enable` runs that init command in its own systemd unit (see "Where the reports go"), not in your terminal.
 
 Those packaged timers fire at a fixed clock time, so a box that's powered off then
 never runs the check. `av-setup enable` drops in

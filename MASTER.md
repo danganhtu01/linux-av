@@ -132,11 +132,12 @@ enables no service. Because they are symlinks, `git pull` updates every box in p
 av-setup all        # install + enable — the usual first run
 av-setup install
 av-setup enable
+av-setup enable --keep-aide-baseline   # keep the AIDE database already there instead of rebuilding it
 av-setup onaccess
 av-setup status
 ```
 
-Needs root and re-execs itself through `sudo -E` if you forget. An unknown subcommand is fatal.
+Needs root and re-execs itself through `sudo -E` if you forget. An unknown subcommand is fatal; `enable` and `all` take `--keep-aide-baseline` and refuse any other option.
 
 The cross-distro trap this command exists to hide: **Arch auto-enables nothing, and
 `freshclam` must seed the signature database once before `clamav-daemon` will start at all.**
@@ -155,6 +156,11 @@ rkhunter's nightly run (`CRON_DAILY_RUN` and `CRON_DB_UPDATE` set to `"true"`, t
 `rkhunter --propupd` once when `rkhunter.dat` is missing; `AV_RKHUNTER_DAILY=0` skips it). The AIDE
 baseline builds in a systemd unit of its own (`linux-av-aide-init`, started with `systemd-run
 --collect`), so it outlives the terminal; a unit already running is not started again.
+`av-setup enable --keep-aide-baseline` (also `all`) keeps a database that is already there instead: before
+anything changes it looks for a non-empty `/var/lib/aide/aide.db` or `aide.db.gz` (either, on either distro) and
+exits 1 naming both paths when neither exists. When one does, `enable` does not start the baseline unit, still
+enables the periodic check and its boot drop-in, and warns once, naming the database it kept. `AV_AIDE_INIT=0`
+wins over the option (AIDE is skipped altogether) and warns once to say so.
 `av-setup chkrootkit-baseline` (also run by `enable`) copies chkrootkit's `log.today` to
 `log.expected` when it is not empty, has no `INFECTED`, `Vulnerable`, `WARNING` or `Warning` line (otherwise it lists them and prints the `cp -a` command for after reading), and `log.expected`
 is absent. `av-setup status` prints each scanner's report location and mail state, the AIDE baseline
@@ -172,7 +178,7 @@ is absent. `av-setup status` prints each scanner's report location and mail stat
 ### Tests — `tests/run.sh`, `tests/mutants.sh`
 
 ```bash
-tests/run.sh                  # every row, 39 at the time of writing; or name rows to run
+tests/run.sh                  # every row, 51 at the time of writing; or name rows to run
 tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
 ```
 
@@ -240,7 +246,7 @@ Every tracked file in this repository.
 | `bootstrap.sh` | One-shot per-box rollout: locate or clone the checkout, run `install.sh`, run `av-setup all`, then optionally AIDE, whole-box config, on-access and both timers. Run as a normal user; escalates itself. |
 | `install.sh` | Symlinks the three `bin/` commands onto `PATH`. Copies nothing. |
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
-| `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit. Needs root (`status` does not). |
+| `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
 | `tests/run.sh` | The suite: 39 rows, bash only, no root. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
@@ -271,7 +277,7 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | `/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf` (or under `dailyaidecheck.timer.d/`) | drop-in adding `OnBootSec` + `Persistent=true`, so the packaged AIDE check also runs after boot instead of only at a fixed clock time | `av-setup enable` |
 | `/etc/clamav/clamd.conf` | `OnAccess*` directives appended and reconciled | `av-setup onaccess` |
 | `/etc/logrotate.d/linux-av-clamonacc` | rotation for the packaged on-access log, added only when no existing policy covers it | `av-setup install` |
-| `/var/lib/aide/aide.db` (`.gz` on Arch) | the AIDE baseline database, built by the `linux-av-aide-init` unit | `av-setup enable` |
+| `/var/lib/aide/aide.db` (`.gz` on Arch) | the AIDE baseline database, built by the `linux-av-aide-init` unit, or left as it is by `av-setup enable --keep-aide-baseline` | `av-setup enable` |
 | `<file>.linux-av.bak` beside `/etc/chkrootkit/chkrootkit.conf`, `/etc/default/aide`, `/etc/default/rkhunter` | the file as it was before the first report-destination edit | `av-setup enable` |
 | `/var/log/chkrootkit/log.expected` | chkrootkit's expected output, adopted from `log.today` | `av-setup chkrootkit-baseline` |
 | `~/.cache/linux-av/` | `av-aide-arch` build tree — `AV_AIDE_BUILD_DIR` | `av-aide-arch` |

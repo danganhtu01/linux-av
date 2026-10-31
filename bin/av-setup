@@ -4,12 +4,18 @@
 #
 #   av-setup install     install packages: clamav rkhunter chkrootkit aide audit
 #   av-setup enable       seed signatures + enable the systemd services
+#   av-setup enable --keep-aide-baseline
+#                        the same, but keep the AIDE database already on this box
+#                        (/var/lib/aide/aide.db or aide.db.gz) instead of rebuilding
+#                        it; refused, before anything changes, when there is none.
+#                        AV_AIDE_INIT=0 still wins (it skips AIDE altogether).
 #   av-setup onaccess     enable ClamAV real-time (on-access) scanning
 #   av-setup status       show what is installed / running, and where reports go
 #   av-setup chkrootkit-baseline   adopt the last clean chkrootkit run as log.expected
-#   av-setup all         install + enable (the usual first-run)
+#   av-setup all [--keep-aide-baseline]   install + enable (the usual first-run)
 #
-# Needs root; it will re-exec itself through sudo if you forget.
+# enable and all take no other option. Needs root; it will re-exec itself
+# through sudo if you forget.
 
 set -uo pipefail
 
@@ -194,10 +200,19 @@ do_enable() {
     if [ "${AV_AIDE_INIT:-1}" = 0 ]; then
         log_warn "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement"
         log_warn "  build the baseline later with: aideinit -y -f   (then rerun 'av-setup enable')"
+        if [ "$KEEP_AIDE_BASELINE" = 1 ]; then
+            log_warn "--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins and skips AIDE altogether"
+        fi
     elif have aide || have aide.wrapper; then
-        # One-time and slow (raspberrypi5: 23 min). Run as its own systemd unit so it
-        # survives the caller's terminal closing; see av_aide_baseline.
-        av_aide_baseline
+        if [ -n "$KEPT_AIDE_DB" ]; then
+            # --keep-aide-baseline: check_kept_aide_baseline found a database before
+            # anything changed. The periodic check below is still enabled.
+            log_warn "--keep-aide-baseline: keeping the existing AIDE database $KEPT_AIDE_DB; not rebuilding"
+        else
+            # One-time and slow (raspberrypi5: 23 min). Run as its own systemd unit so it
+            # survives the caller's terminal closing; see av_aide_baseline.
+            av_aide_baseline
+        fi
         # Enable the distro's scheduled integrity check if one is shipped, and add
         # a drop-in so it also runs after every boot. The packaged timers fire at a
         # fixed OnCalendar time (Arch 05:00, Debian daily) which is skipped entirely
@@ -387,6 +402,36 @@ do_status() {
     av_report_status
 }
 
+# The options of `enable` and `all`: --keep-aide-baseline, nothing else. (`enable` used
+# to ignore every argument; a typo such as --keep-aide-basline would then have rebuilt
+# a long AIDE database build, so any other word is refused.)
+KEEP_AIDE_BASELINE=0   # 1 = --keep-aide-baseline was given
+KEPT_AIDE_DB=""        # the database --keep-aide-baseline keeps (set by check_kept_aide_baseline)
+parse_enable_options() { # command option...
+    local cmd="$1" opt; shift
+    for opt in "$@"; do
+        case "$opt" in
+            --keep-aide-baseline) KEEP_AIDE_BASELINE=1 ;;
+            *) die "unknown option for $cmd: $opt (it takes: --keep-aide-baseline)" ;;
+        esac
+    done
+}
+
+# --keep-aide-baseline needs a database to keep. Look BEFORE anything changes (for
+# `all`, before the packages are installed), so a box without one is refused with
+# nothing touched. AV_AIDE_INIT=0 wins: it skips AIDE altogether, so there is nothing
+# to look for (do_enable says so).
+check_kept_aide_baseline() {
+    [ "$KEEP_AIDE_BASELINE" = 1 ] || return 0
+    [ "${AV_AIDE_INIT:-1}" = 0 ] && return 0
+    KEPT_AIDE_DB="$(av_aide_existing_db)" \
+        || die "--keep-aide-baseline: no AIDE database to keep ($(av_path /var/lib/aide)/aide.db or $(av_path /var/lib/aide)/aide.db.gz); run without --keep-aide-baseline to build one"
+}
+
+case "${1:-}" in
+    enable|all) parse_enable_options "$@" ;;   # a typo is refused before sudo asks anything
+esac
+
 # Escalate to root ONCE, preserving the full command, so composite commands like
 # `all` run install AND enable as root. (A per-function re-exec with `exec` would
 # replace the process and silently drop the rest of the sequence.)
@@ -401,12 +446,12 @@ esac
 
 case "${1:-}" in
     install)  do_install ;;
-    enable)   do_enable ;;
+    enable)   check_kept_aide_baseline; do_enable ;;
     onaccess) do_onaccess ;;
     status)   do_status ;;
     chkrootkit-baseline) av_chkrootkit_baseline ;;
-    all)      do_install; do_enable ;;
+    all)      check_kept_aide_baseline; do_install; do_enable ;;
     ""|-h|--help)
-        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '2,/^$/{/^#/p}' "$0" | sed 's/^# \{0,1\}//' ;;
     *) die "unknown command: $1 (try: install | enable | onaccess | status | all)" ;;
 esac

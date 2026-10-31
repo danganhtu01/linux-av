@@ -248,7 +248,7 @@ Every tracked file in this repository.
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
-| `tests/run.sh` | The suite: 39 rows, bash only, no root. |
+| `tests/run.sh` | The suite: 51 rows, bash only, no root. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |

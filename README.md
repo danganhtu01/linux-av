@@ -135,6 +135,7 @@ it. After this, `av-scan` and `av-setup` work from anywhere.
 
 ```bash
 av-setup all        # = av-setup install  +  av-setup enable   (re-execs via sudo)
+av-setup enable --keep-aide-baseline   # enable, but keep the AIDE database already there
 av-setup status     # what's installed / running, where reports go, baselines
 ```
 
@@ -185,6 +186,19 @@ same command as before: `aideinit -y -f` on Debian/Ubuntu, `aide --init` then th
 Watch it with `systemctl status linux-av-aide-init` and `journalctl -u linux-av-aide-init -f`.
 The periodic check is enabled at once but reports "no database" until the baseline finishes.
 A unit already running is not started twice. `AV_AIDE_INIT=0` still skips the baseline.
+
+**Keeping an AIDE database you already have: `av-setup enable --keep-aide-baseline`.** The
+build above is slow (tens of minutes on a Raspberry Pi), and a plain `enable` starts it again
+even when a database exists. With the option, `enable` first looks, before it changes anything,
+for `/var/lib/aide/aide.db` (what Debian's `aideinit` writes) or `/var/lib/aide/aide.db.gz`
+(Arch's flow); either counts on either distro, and an empty file does not. When one exists,
+`enable` does everything it always does except start the baseline unit: it still enables the
+periodic check and adds its boot drop-in, and prints one warning naming the database it kept
+(`--keep-aide-baseline: keeping the existing AIDE database <path>; not rebuilding`). When
+neither exists, it stops with an error that names both paths, and nothing has been changed; run
+it without the option to build one. `av-setup all --keep-aide-baseline` takes the option too and
+looks before it installs any package. `AV_AIDE_INIT=0` wins over the option (it skips AIDE
+altogether) and one warning says so. `enable` and `all` refuse any other option.
 
 **chkrootkit's baseline.** With `DIFF_MODE="true"` and no `/var/log/chkrootkit/log.expected`,
 chkrootkit reports its whole output every night. `av-setup` does not run chkrootkit, so it
@@ -349,7 +363,7 @@ Key vars (all optional, shown with defaults):
 | `AV_AIDE_BOOT_DELAY` | `15min` | `OnBootSec` drop-in for the AIDE check timer |
 | `AV_QUIET_REPORTS` | `1` | `0` leaves chkrootkit's, AIDE's and rkhunter's mail settings alone (otherwise, with no `mail` or `sendmail` on `PATH`, their reports go to the journal and logs) |
 | `AV_RKHUNTER_DAILY` | `1` | `0` leaves rkhunter's nightly run and weekly update as the package has them |
-| `AV_AIDE_INIT` | `1` | `0` skips the AIDE baseline and the periodic-check enablement |
+| `AV_AIDE_INIT` | `1` | `0` skips the AIDE baseline and the periodic-check enablement (and wins over `av-setup enable --keep-aide-baseline`) |
 | `AV_AIDE_INIT_TIMEOUT` | `4h` | `RuntimeMaxSec` of the baseline unit (systemd stops a longer build) |
 | `AV_AIDE_INIT_UNIT` | `linux-av-aide-init` | name of the baseline unit |
 | `AV_ROOT` | empty | path prefix for the `/etc` and `/var` paths `enable` edits; for tests only; refused (exit 1) when running as root |

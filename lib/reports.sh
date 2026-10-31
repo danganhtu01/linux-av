@@ -131,6 +131,20 @@ av_rkhunter_daily() {
     fi
 }
 
+# Step 1 — the AIDE database that is already there, if any. Debian's aideinit writes
+# aide.db; the Arch flow in av_aide_baseline writes aide.db.gz; either counts, on
+# either distro. Prints the path of the first one that exists and is not empty and
+# returns 0, or prints nothing and returns 1. Used by `av-setup enable
+# --keep-aide-baseline` (before anything changes) and by av_report_status.
+av_aide_existing_db() {
+    local dir f
+    dir="$(av_path /var/lib/aide)"
+    for f in "$dir/aide.db" "$dir/aide.db.gz"; do
+        [ -s "$f" ] && { printf '%s\n' "$f"; return 0; }
+    done
+    return 1
+}
+
 # Step 1 — the AIDE baseline in its own systemd unit, so it does not die with the
 # caller's terminal (raspberrypi5: aideinit killed with the terminal, no database,
 # dailyaidecheck failed). The same command av-setup always ran.
@@ -196,12 +210,10 @@ av_chkrootkit_baseline() {
 
 # Step 5 — status lines.
 av_report_status() {
-    local unit="${AV_AIDE_INIT_UNIT:-linux-av-aide-init}" db="" f v
+    local unit="${AV_AIDE_INIT_UNIT:-linux-av-aide-init}" db="" v
     echo
     printf '== reports and baselines ==\n'
-    for f in "$(av_path /var/lib/aide)/aide.db" "$(av_path /var/lib/aide)/aide.db.gz"; do
-        [ -s "$f" ] && { db="$f"; break; }
-    done
+    db="$(av_aide_existing_db || true)"
     if have systemctl && systemctl is-active --quiet "$unit.service" 2>/dev/null; then
         printf '  aide baseline:       building (systemctl status %s)\n' "$unit"
     elif [ -n "$db" ]; then

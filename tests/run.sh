@@ -275,6 +275,146 @@ row_baseline_timer_dropin_in_root() {
 }
 
 # ---------------------------------------------------------------------------
+# rows: step 1b, --keep-aide-baseline keeps the AIDE database that is already there
+# ---------------------------------------------------------------------------
+# listing -> every path under the scratch root with its type, size and mtime
+listing() { find "$R" -printf '%P %y %s %T@\n' | sort; }
+
+# assert_kept DB-PATH  (after setup: the database was kept, the periodic check is on)
+assert_kept() {
+    assert_eq "$RC" 0 "enable exit status"
+    assert_lacks "$(calls)" "systemd-run" "no baseline unit started"
+    assert_lacks "$(calls)" "aideinit" "no aideinit"
+    assert_lacks "$(calls)" "aide --init" "no aide --init"
+    assert_eq "$(printf '%s\n' "$OUT" | grep -c "WARN .*--keep-aide-baseline: keeping the existing AIDE database $1; not rebuilding")" 1 "one keep warning naming $1"
+    assert_lacks "$OUT" "building the AIDE baseline" "no build announced"
+    assert_file "$R/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf" "periodic-check drop-in written"
+    assert_has "$(calls)" "systemctl enable --now aidecheck.timer" "periodic check enabled"
+}
+
+row_keep_aide_baseline_db() {
+    new_fixture "$ROW"; printf 'db\n' > "$R/var/lib/aide/aide.db"; cp "$R/var/lib/aide/aide.db" "$D/db0"
+    setup enable --keep-aide-baseline
+    assert_kept "$R/var/lib/aide/aide.db"
+    assert_same "$R/var/lib/aide/aide.db" "$D/db0" "the database is left as it was"
+}
+
+row_keep_aide_baseline_db_gz() {
+    new_fixture "$ROW" arch; printf 'db\n' > "$R/var/lib/aide/aide.db.gz"; cp "$R/var/lib/aide/aide.db.gz" "$D/db0"
+    setup enable --keep-aide-baseline
+    assert_kept "$R/var/lib/aide/aide.db.gz"
+    assert_same "$R/var/lib/aide/aide.db.gz" "$D/db0" "the database is left as it was"
+}
+
+# no database (or only an empty file): refused, and nothing under the root is written
+row_keep_aide_baseline_no_db_refused() {
+    new_fixture "$ROW"; listing > "$D/before"
+    setup enable --keep-aide-baseline
+    assert_eq "$RC" 1 "exit status"
+    assert_has "$OUT" "$R/var/lib/aide/aide.db or $R/var/lib/aide/aide.db.gz" "names both paths"
+    assert_has "$OUT" "run without --keep-aide-baseline to build one" "says what to do"
+    assert_eq "$(listing)" "$(cat "$D/before")" "nothing under the root was written"
+    assert_eq "$(grep -vc '^id ' "$CALLS")" 0 "nothing but id was called"
+}
+
+row_keep_aide_baseline_empty_db_refused() {
+    new_fixture "$ROW"; : > "$R/var/lib/aide/aide.db"; : > "$R/var/lib/aide/aide.db.gz"; listing > "$D/before"
+    setup enable --keep-aide-baseline
+    assert_eq "$RC" 1 "exit status with empty database files"
+    assert_has "$OUT" "no AIDE database to keep" "an empty file is not a database"
+    assert_eq "$(listing)" "$(cat "$D/before")" "nothing under the root was written"
+}
+
+# AV_AIDE_INIT=0 wins over the option, with one warning that says so
+row_keep_aide_baseline_aide_init_0() {
+    new_fixture "$ROW"; printf 'db\n' > "$R/var/lib/aide/aide.db"
+    SETUP_ENV=(AV_AIDE_INIT=0); setup enable --keep-aide-baseline; SETUP_ENV=()
+    assert_eq "$RC" 0 "enable exit status"
+    assert_lacks "$(calls)" "systemd-run" "no baseline with AV_AIDE_INIT=0"
+    assert_lacks "$(calls)" "aideinit" "no aideinit with AV_AIDE_INIT=0"
+    assert_has "$OUT" "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement" "the AV_AIDE_INIT=0 skip is announced"
+    assert_eq "$(printf '%s\n' "$OUT" | grep -c "WARN .*--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins")" 1 "one warning says AV_AIDE_INIT=0 wins"
+    assert_lacks "$OUT" "keeping the existing" "the database is not reported kept"
+    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d" "no timer drop-in with AV_AIDE_INIT=0"
+}
+
+row_keep_aide_baseline_aide_init_0_no_db() {
+    new_fixture "$ROW"
+    SETUP_ENV=(AV_AIDE_INIT=0); setup enable --keep-aide-baseline; SETUP_ENV=()
+    assert_eq "$RC" 0 "no database is no error when AV_AIDE_INIT=0 skips AIDE"
+    assert_lacks "$OUT" "no AIDE database to keep" "not refused"
+    assert_has "$OUT" "--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins" "the warning"
+}
+
+# without the option nothing changes: a database that is there is rebuilt, as before
+row_keep_aide_baseline_option_off() {
+    new_fixture "$ROW"; printf 'db\n' > "$R/var/lib/aide/aide.db"
+    setup enable
+    assert_eq "$RC" 0 "enable exit status"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "rebuilt without the option"
+    assert_lacks "$OUT" "--keep-aide-baseline" "no mention of the option"
+}
+
+# any other option to enable or all is refused, before sudo is asked and before any change
+row_keep_aide_baseline_unknown_option() {
+    new_fixture "$ROW"; listing > "$D/before"
+    setup enable --keep-aide-basline
+    assert_eq "$RC" 1 "exit status"
+    assert_has "$OUT" "unknown option for enable: --keep-aide-basline" "names the option"
+    setup enable --keep-aide-baseline --bogus
+    assert_eq "$RC" 1 "exit status with a good option and a bad one"
+    assert_has "$OUT" "unknown option for enable: --bogus" "names the bad one"
+    setup all stray
+    assert_eq "$RC" 1 "exit status of all with a stray word"
+    assert_has "$OUT" "unknown option for all: stray" "all refuses it too"
+    assert_eq "$(listing)" "$(cat "$D/before")" "nothing under the root was written"
+    assert_eq "$(grep -vc '^id ' "$CALLS")" 0 "nothing but id was called"
+}
+
+row_keep_aide_baseline_sudo() {
+    new_fixture "$ROW"
+    stub id <<'EOS'
+case "${1:-}" in -u) echo 1000 ;; -un) echo tester ;; *) echo "uid=1000(tester)" ;; esac
+EOS
+    stub sudo </dev/null
+    setup enable --bogus
+    assert_eq "$RC" 1 "a typo is refused"
+    assert_lacks "$(calls)" "sudo" "sudo is not asked for a typo"
+    setup enable --keep-aide-baseline
+    assert_has "$(calls)" "sudo -E $REPO/bin/av-setup enable --keep-aide-baseline" "the option goes through sudo"
+}
+
+# all: the database is looked for before the packages are installed
+row_keep_aide_baseline_all_no_db_refused() {
+    new_fixture "$ROW"; stub apt-get </dev/null; listing > "$D/before"
+    setup all --keep-aide-baseline
+    assert_eq "$RC" 1 "exit status"
+    assert_has "$OUT" "no AIDE database to keep" "says why"
+    assert_lacks "$(calls)" "apt-get" "no package installed"
+    assert_eq "$(listing)" "$(cat "$D/before")" "nothing under the root was written"
+}
+
+row_keep_aide_baseline_all_db() {
+    new_fixture "$ROW"; stub apt-get </dev/null; printf 'db\n' > "$R/var/lib/aide/aide.db"
+    setup all --keep-aide-baseline
+    assert_kept "$R/var/lib/aide/aide.db"
+    assert_has "$(calls)" "apt-get install" "all still installs"
+}
+
+row_keep_aide_baseline_documented() {
+    new_fixture "$ROW"
+    setup --help
+    assert_eq "$RC" 0 "--help exit status"
+    assert_has "$OUT" "av-setup enable --keep-aide-baseline" "usage names the option on enable"
+    assert_has "$OUT" "av-setup all [--keep-aide-baseline]" "usage names the option on all"
+    assert_has "$OUT" "AV_AIDE_INIT=0 still wins" "usage says AV_AIDE_INIT=0 wins"
+    assert_has "$OUT" "Needs root" "usage ends with its last header line"
+    assert_lacks "$OUT" "set -uo pipefail" "usage stops at the header, not at line 18"
+    assert_has "$(cat "$REPO/README.md")" "av-setup enable --keep-aide-baseline" "README documents the option"
+    assert_has "$(cat "$REPO/MASTER.md")" "av-setup enable --keep-aide-baseline" "MASTER documents the option"
+}
+
+# ---------------------------------------------------------------------------
 # rows: step 3, rkhunter nightly
 # ---------------------------------------------------------------------------
 row_rkhunter_daily_on() {

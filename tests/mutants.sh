@@ -73,6 +73,29 @@ MUTANTS=(
 'status_mail_kept~lib/reports.sh~s/^    if \[ -f "$(av_path \/etc\/chkrootkit\/chkrootkit.conf)" \] \&\& \[ -z "$v" \]; then/    if true; then/~status_reports_mail_kept'
 'status_chk_baseline~lib/reports.sh~s/^    if \[ -e "$(av_path \/var\/log\/chkrootkit\/log.expected)" \]; then/    if false; then/~status_chkrootkit_baseline'
 'status_rkhunter_db~lib/reports.sh~s/^    if \[ -e "$(av_path \/var\/lib\/rkhunter\/db\/rkhunter.dat)" \]; then/    if false; then/~status_rkhunter_off'
+'keep_check_call~bin/av-setup~s/^    enable)   check_kept_aide_baseline; do_enable ;;/    enable)   do_enable ;;/~keep_aide_baseline_db keep_aide_baseline_db_gz keep_aide_baseline_no_db_refused'
+'keep_check_call_all~bin/av-setup~s/^    all)      check_kept_aide_baseline; do_install; do_enable ;;/    all)      do_install; do_enable ;;/~keep_aide_baseline_all_db keep_aide_baseline_all_no_db_refused'
+'keep_check_before_install~bin/av-setup~s/check_kept_aide_baseline; do_install; do_enable/do_install; check_kept_aide_baseline; do_enable/~keep_aide_baseline_all_no_db_refused'
+'keep_check_before_changes~bin/av-setup~s/^    enable)   check_kept_aide_baseline; do_enable ;;/    enable)   do_enable ;;/;s/^    elif have aide || have aide.wrapper; then$/    elif have aide || have aide.wrapper; then check_kept_aide_baseline/~keep_aide_baseline_no_db_refused'
+'keep_refusal~bin/av-setup~s/^        || die "--keep-aide-baseline: no AIDE database to keep/        || : "--keep-aide-baseline: no AIDE database to keep/~keep_aide_baseline_no_db_refused keep_aide_baseline_empty_db_refused keep_aide_baseline_all_no_db_refused'
+'keep_refusal_paths~bin/av-setup~s/ or $(av_path \/var\/lib\/aide)\/aide.db.gz)//~keep_aide_baseline_no_db_refused'
+'keep_refusal_advice~bin/av-setup~s/; run without --keep-aide-baseline to build one"/"/~keep_aide_baseline_no_db_refused'
+'keep_skips_build~bin/av-setup~s/^        if \[ -n "$KEPT_AIDE_DB" \]; then/        if false; then/~keep_aide_baseline_db keep_aide_baseline_db_gz keep_aide_baseline_all_db'
+'keep_warning~bin/av-setup~s/^            log_warn "--keep-aide-baseline: keeping the existing AIDE database $KEPT_AIDE_DB; not rebuilding"/            :/~keep_aide_baseline_db keep_aide_baseline_db_gz'
+'keep_still_enables_check~bin/av-setup~s/\(not rebuilding"\)$/\1; return 0/~keep_aide_baseline_db keep_aide_baseline_db_gz'
+'keep_db_path_only~lib/reports.sh~s/^    for f in "$dir\/aide.db" "$dir\/aide.db.gz"; do/    for f in "$dir\/aide.db"; do/~keep_aide_baseline_db_gz'
+'keep_gz_path_only~lib/reports.sh~s/^    for f in "$dir\/aide.db" "$dir\/aide.db.gz"; do/    for f in "$dir\/aide.db.gz"; do/~keep_aide_baseline_db'
+'keep_empty_counts~lib/reports.sh~s/^        \[ -s "$f" \] \&\& { printf/        [ -e "$f" ] \&\& { printf/~keep_aide_baseline_empty_db_refused'
+'keep_without_option~bin/av-setup~s/^    \[ "$KEEP_AIDE_BASELINE" = 1 \] || return 0/    :/~keep_aide_baseline_option_off'
+'keep_init_0_wins~bin/av-setup~s/^    \[ "${AV_AIDE_INIT:-1}" = 0 \] \&\& return 0/    :/~keep_aide_baseline_aide_init_0_no_db'
+'keep_init_0_warning~bin/av-setup~s/^            log_warn "--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins and skips AIDE altogether"/            :/~keep_aide_baseline_aide_init_0 keep_aide_baseline_aide_init_0_no_db'
+'keep_unknown_option~bin/av-setup~s/^            \*) die "unknown option for $cmd: $opt .*$/            *) : ;;/~keep_aide_baseline_unknown_option'
+'keep_parse_before_sudo~bin/av-setup~/^    enable|all) parse_enable_options "$@" ;;/d~keep_aide_baseline_sudo keep_aide_baseline_unknown_option'
+'keep_option_sets_flag~bin/av-setup~s/^            --keep-aide-baseline) KEEP_AIDE_BASELINE=1 ;;/            --keep-aide-baseline) : ;;/~keep_aide_baseline_db keep_aide_baseline_db_gz keep_aide_baseline_no_db_refused'
+'keep_usage_header~bin/av-setup~/^# .*--keep-aide-baseline/d~keep_aide_baseline_documented'
+'keep_usage_range~bin/av-setup~s/sed -n .2,\/^$\/{\/^#\/p}. "$0"/sed -n "2,30p" "$0"/~keep_aide_baseline_documented'
+'keep_readme~README.md~/--keep-aide-baseline/d~keep_aide_baseline_documented'
+'keep_master~MASTER.md~/--keep-aide-baseline/d~keep_aide_baseline_documented'
 )
 
 SELECT=" $* "
@@ -83,6 +106,7 @@ copy_to() { # dir
     mkdir -p "$1"
     cp -r "$REPO/bin" "$REPO/lib" "$REPO/tests" "$1/"
     [ -d "$REPO/config" ] && cp -r "$REPO/config" "$1/"
+    cp "$REPO/README.md" "$REPO/MASTER.md" "$1/"
 }
 run_rows() { # dir rows...
     local dir="$1"; shift
@@ -105,7 +129,7 @@ EOF
     dir="$WORK/m-$name"
     copy_to "$dir"
     sed -i "$expr" "$dir/$file"
-    if ! bash -n "$dir/$file"; then
+    if [ "${file%.md}" = "$file" ] && ! bash -n "$dir/$file"; then
         printf 'INVALID      %s (the mutant does not parse)\n' "$name"
         SURVIVED=$((SURVIVED + 1)); continue
     fi

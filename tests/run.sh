@@ -107,8 +107,11 @@ EOF
 }
 
 # stub NAME  (body on stdin; a stub always records "NAME args" in $CALLS first)
+# It removes NAME first: a fixture may hold NAME as a link to the real tool, and writing through
+# the link would overwrite that tool (as root, a system binary).
 stub() {
     local body; body="$(cat)"
+    rm -f -- "${B:?}/$1"
     # shellcheck disable=SC2016
     { printf '#!%s\n' "$BASH_BIN"
       printf 'echo "%s $*" >> "$CALLS"\n' "$1"
@@ -809,11 +812,11 @@ row_scan_mount_reread() {
     assert_scan_arg '--exclude-dir=^/srv/new(/|$)'
 }
 row_scan_timeout() {
-    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=4)
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=30)
     local started=$SECONDS
     scan --path /scratch
     assert_eq "$RC" 124 "timeout exit distinct from threats"
-    [ "$((SECONDS - started))" -lt 4 ] || fail "scanner was not stopped early"
+    [ "$((SECONDS - started))" -lt 20 ] || fail "scanner was not stopped early (a 30 s scan, a 2 s limit)"
     assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "one unfinished warning"
     assert_lacks "$OUT" 'THREATS FOUND' "timeout is not a finding"
 }

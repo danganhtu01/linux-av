@@ -26,7 +26,7 @@ MUTANTS=(
 'scan_below_path~bin/av-scan~s/\[\[ $p = \/ || $mount = "$p" || $mount = "$p\/"\* \]\]/true/~scan_mount_outside'
 'scan_daemon_switch~bin/av-scan~s/\[ "${#mount_excludes\[@\]}" -gt 0 \]/false/~scan_mount_switch'
 'scan_fstype_optout~bin/av-scan~s/\[ -n "$AV_EXCLUDE_FSTYPES" \]/true/;s/"${fstype_patterns\[@\]}"/"cifs"/~scan_mount_disabled'
-'scan_missing_standalone~bin/av-scan~/log_warn "clamdscan cannot enforce mount exclusions/d~scan_mount_no_standalone'
+'scan_missing_standalone~bin/av-scan~s/log_warn "clamdscan cannot enforce mount exclusions/: "clamdscan cannot enforce mount exclusions/~scan_mount_no_standalone'
 'scan_mountinfo_guard~bin/av-scan~/^        \[ -r "$AV_MOUNTINFO" \]/d~scan_mount_unreadable'
 'scan_timeout_wrap~bin/av-scan~s/runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")/runner=()/~scan_timeout'
 'scan_timeout_optout~bin/av-scan~s/\[ "$AV_SCAN_TIMEOUT" != 0 \]/true/~scan_timeout_disabled'

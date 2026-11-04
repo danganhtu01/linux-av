@@ -91,6 +91,8 @@ run_scan() {
             mount="${fields[4]}"; fstype="${line#* - }"; fstype="${fstype%% *}"
             matched=0
             for pattern in "${fstype_patterns[@]}"; do
+                # The patterns are globs (fuse.* covers fuse.sshfs), so the right side stays unquoted.
+                # shellcheck disable=SC2053
                 [[ $fstype = $pattern ]] && matched=1
             done
             [ "$matched" = 1 ] || continue

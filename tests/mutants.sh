@@ -18,6 +18,19 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'scan_fstype_match~bin/av-scan~s/\[\[ $fstype = $pattern \]\]/false/~scan_mount_cifs'
+'scan_local_type_guard~bin/av-scan~s/\[\[ $fstype = $pattern \]\]/true/~scan_mount_local_types'
+'scan_octal_decode~bin/av-scan~/^            mount="${mount\/\//d~scan_mount_escapes'
+'scan_ere_escape~bin/av-scan~s/escaped+="\\\\"/escaped+=""/~scan_mount_escapes'
+'scan_exact_anchor~bin/av-scan~s/(\/|\$)//~scan_mount_cifs'
+'scan_below_path~bin/av-scan~s/\[\[ $p = \/ || $mount = "$p" || $mount = "$p\/"\* \]\]/true/~scan_mount_outside'
+'scan_daemon_switch~bin/av-scan~s/\[ "${#mount_excludes\[@\]}" -gt 0 \]/false/~scan_mount_switch'
+'scan_fstype_optout~bin/av-scan~s/\[ -n "$AV_EXCLUDE_FSTYPES" \]/true/;s/"${fstype_patterns\[@\]}"/"cifs"/~scan_mount_disabled'
+'scan_missing_standalone~bin/av-scan~/log_warn "clamdscan cannot enforce mount exclusions/d~scan_mount_no_standalone'
+'scan_mountinfo_guard~bin/av-scan~/^        \[ -r "$AV_MOUNTINFO" \]/d~scan_mount_unreadable'
+'scan_timeout_wrap~bin/av-scan~s/runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")/runner=()/~scan_timeout'
+'scan_timeout_optout~bin/av-scan~s/\[ "$AV_SCAN_TIMEOUT" != 0 \]/true/~scan_timeout_disabled'
+'scan_timeout_status~bin/av-scan~/^        124|137) log_warn/d~scan_timeout scan_timeout_killed'
 'mailer_guard~lib/reports.sh~s/^    if av_have_mailer; then/    if false; then/~mail_untouched_with_mail mail_untouched_with_sendmail'
 'mail_tool_mail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have sendmail; }/~mail_untouched_with_mail'
 'mail_tool_sendmail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have mail; }/~mail_untouched_with_sendmail'

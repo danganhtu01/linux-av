@@ -61,6 +61,9 @@ done
 # ---------------------------------------------------------------------------
 : "${AV_SCAN_PATHS:=$HOME}"                                   # space-separated list
 : "${AV_EXCLUDE_DIRS:=/proc /sys /dev /run /var/lib/clamav}"  # never descend into these
+: "${AV_EXCLUDE_FSTYPES=autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.*}"
+: "${AV_MOUNTINFO:=/proc/self/mountinfo}"                     # read without probing mounts
+: "${AV_SCAN_TIMEOUT:=12h}"                                  # 0 disables the scan time limit
 : "${AV_ENGINE:=auto}"                                        # auto | clamdscan | clamscan
 : "${AV_LOG_DIR:=$XDG_STATE_HOME/linux-av}"
 : "${AV_QUARANTINE:=$AV_LOG_DIR/quarantine}"
@@ -78,7 +81,7 @@ done
 export AV_SCAN_PATHS AV_EXCLUDE_DIRS AV_ENGINE AV_LOG_DIR AV_QUARANTINE \
        AV_LOG_FILE AV_TIMER_NAME AV_ROOTKIT_TIMER_NAME AV_TIMER_BOOT_DELAY \
        AV_AIDE_BOOT_DELAY AV_COLOR AV_ROOT AV_QUIET_REPORTS AV_RKHUNTER_DAILY \
-       AV_AIDE_INIT_UNIT AV_AIDE_INIT_TIMEOUT
+       AV_AIDE_INIT_UNIT AV_AIDE_INIT_TIMEOUT AV_EXCLUDE_FSTYPES AV_MOUNTINFO AV_SCAN_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # 3. Logging (colored to stderr, plain to $AV_LOG_FILE).

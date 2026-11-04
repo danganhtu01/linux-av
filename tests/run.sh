@@ -24,7 +24,7 @@ BASH_BIN="$(command -v bash)"
 ENV_BIN="$(command -v env)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-test.XXXXXX")" || exit 2
 if [ "${AV_TEST_KEEP:-0}" != 1 ]; then
-    trap 'rm -rf "$WORK"' EXIT
+    trap 'rm -rf "${WORK:?}"' EXIT
 else
     echo "scratch kept: $WORK"
 fi
@@ -626,6 +626,236 @@ row_av_root_refused_as_root() {
 }
 
 # ---------------------------------------------------------------------------
+# Scan fixtures: neither scanner touches the supplied paths, even for /.
+# Arguments are NUL-delimited to preserve spaces, tabs, and newlines.
+scan_fixture() {
+    new_fixture "$ROW"
+    ln -s "$(command -v timeout)" "$B/timeout"
+    : > "$D/mountinfo"
+    printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
+    stub clamscan <<'EOF'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+exec sleep "${STUB_SCAN_SLEEP:-0}"
+EOF
+    stub clamdscan <<'EOF'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+exit 0
+EOF
+    SCAN_ENV=()
+}
+scan() {
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+        AV_COLOR=never XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
+        AV_MOUNTINFO="$D/mountinfo" AV_ENGINE=clamscan SCAN_ARGS="$D/args" \
+        CALLS="$CALLS" "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" "$@" --now 2>&1)"
+    RC=$?
+    ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
+}
+assert_scan_arg() {
+    local arg count=0
+    for arg in "${ARGS[@]}"; do [ "$arg" != "$1" ] || count=$((count + 1)); done
+    assert_eq "$count" 1 "scanner argument $1"
+}
+assert_mount_count() {
+    local arg count=0
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in --exclude-dir=*) count=$((count + 1)) ;; esac
+    done
+    # One unchanged AV_EXCLUDE_DIRS argument, plus the mount exclusions.
+    assert_eq "$count" "$(($1 + 1))" "mount exclusion count"
+    assert_scan_arg '--exclude-dir=^/legacy'
+}
+mount_entry() {
+    printf '42 1 0:42 / %s rw shared:1 - %s source rw\n' "$1" "$2" >> "$D/mountinfo"
+}
+
+row_scan_mount_cifs() {
+    scan_fixture; mount_entry /srv/onedrive-corsair cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg '--exclude-dir=^/srv/onedrive-corsair(/|$)'
+    assert_mount_count 1
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/onedrive-corsair (type=cifs)' <<< "$OUT")" 1 "one INFO per mount"
+}
+row_scan_mount_fstypes() {
+    scan_fixture
+    local type
+    for type in autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.sshfs fuse.rclone fuse.gvfsd-fuse; do
+        mount_entry "/net/$type" "$type"
+    done
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 14
+    for type in autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.sshfs fuse.rclone fuse.gvfsd-fuse; do
+        assert_has "$OUT" "(type=$type)" "skipped $type"
+    done
+    assert_scan_arg '--exclude-dir=^/net/autofs(/|$)'
+    assert_scan_arg '--exclude-dir=^/net/nfs4(/|$)'
+    assert_scan_arg '--exclude-dir=^/net/fuse\.sshfs(/|$)'
+}
+row_scan_mount_local_types() {
+    scan_fixture
+    local type
+    for type in overlay ext4 fuseblk xfs btrfs tmpfs; do mount_entry "/local/$type" "$type"; done
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "local mounts retained"
+}
+row_scan_mount_escapes() {
+    scan_fixture
+    mount_entry '/srv/cloud\040files' cifs
+    mount_entry '/srv/a.b+c[1](x){y}^$|?*' nfs4
+    mount_entry '/srv/tab\011name' autofs
+    mount_entry '/srv/new\012line' fuse.sshfs
+    mount_entry '/srv/back\134slash\134040' cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 5
+    assert_scan_arg '--exclude-dir=^/srv/cloud files(/|$)'
+    assert_scan_arg '--exclude-dir=^/srv/a\.b\+c\[1\]\(x\)\{y\}\^\$\|\?\*(/|$)'
+    assert_scan_arg $'--exclude-dir=^/srv/tab\tname(/|$)'
+    assert_scan_arg $'--exclude-dir=^/srv/new\nline(/|$)'
+    assert_scan_arg '--exclude-dir=^/srv/back\\slash\\040(/|$)'
+    assert_eq "$(grep -c 'INFO.*skipping mount' <<< "$OUT")" 5 "one log line per encoded mount"
+}
+row_scan_mount_outside() {
+    scan_fixture; mount_entry /srv2/share cifs; mount_entry /other autofs
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "outside mounts not logged"
+}
+row_scan_mount_switch() {
+    scan_fixture; mount_entry /srv/cloud cifs
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$OUT" 'INFO' "switch logged"
+    assert_has "$OUT" 'mount exclusions require clamscan; switching from clamdscan' "switch reason"
+    assert_has "$(calls)" 'clamscan ' "standalone called"
+    assert_lacks "$(calls)" 'clamdscan ' "daemon not called"
+    assert_scan_arg '--exclude-dir=^/srv/cloud(/|$)'
+}
+row_scan_mount_daemon_kept() {
+    scan_fixture; mount_entry /other/cloud cifs
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$(calls)" 'clamdscan ' "daemon retained"
+    assert_lacks "$OUT" 'switching' "no switch"
+    assert_lacks "$OUT" 'skipping mount' "outside mount ignored"
+}
+row_scan_mount_disabled() {
+    scan_fixture; mount_entry /srv/cloud cifs
+    SCAN_ENV=(AV_EXCLUDE_FSTYPES= AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$(calls)" 'clamdscan ' "opt-out keeps daemon"
+    assert_lacks "$OUT" 'skipping mount' "opt-out"
+    SCAN_ENV=(AV_EXCLUDE_FSTYPES=)
+    scan --full
+    assert_eq "$RC" 0 "standalone exit"
+    assert_mount_count 0
+}
+row_scan_mount_custom_types() {
+    scan_fixture; mount_entry /srv/cloud cifs; mount_entry /srv/remote custom.remote
+    SCAN_ENV=('AV_EXCLUDE_FSTYPES=custom.*')
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/remote(/|$)'
+}
+row_scan_mount_paths() {
+    scan_fixture; mount_entry "$PWD/cloud" cifs; mount_entry /srv/exact nfs4
+    mount_entry /unselected fuse
+    scan --path ./dummy/../ --path /srv/exact/
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 2
+    assert_scan_arg '--exclude-dir=^/srv/exact(/|$)'
+}
+row_scan_mount_no_standalone() {
+    scan_fixture; mount_entry /srv/cloud cifs; unstub clamscan
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "existing fallback exit"
+    assert_has "$OUT" 'WARN' "warning severity"
+    assert_has "$OUT" 'clamdscan cannot enforce mount exclusions' "limitation loud"
+}
+row_scan_mount_unreadable() {
+    scan_fixture; SCAN_ENV=(AV_MOUNTINFO="$D/missing")
+    scan --full
+    assert_eq "$RC" 2 "cannot safely build exclusions"
+    assert_has "$OUT" 'cannot read mount table' "reason"
+    assert_lacks "$(calls)" 'clamscan ' "scanner not started"
+}
+row_scan_mount_reread() {
+    scan_fixture
+    # The foreground loop calls run_scan repeatedly; exercise that function in
+    # one shell so cached mountinfo would fail the second scan.
+    sed '/^# Default scan target/,$d' "$REPO/bin/av-scan" > "$D/functions"
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+        AV_COLOR=never XDG_STATE_HOME="$H/state" AV_MOUNTINFO="$D/mountinfo" \
+        CALLS="$CALLS" SCAN_ARGS="$D/args" AV_ENGINE=clamscan \
+        "$BASH_BIN" -c '
+            source <(sed "/^# --- locate/,/^av_detect_distro/d" "$1") --now
+            AV_HOME="$2"; source "$2/lib/common.sh"
+            run_scan /srv || exit
+            printf "42 1 0:42 / /srv/new rw - cifs source rw\n" > "$AV_MOUNTINFO"
+            run_scan /srv
+        ' sh "$D/functions" "$REPO" 2>&1)"; RC=$?
+    ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
+    assert_eq "$RC" 0 "two scans exit"
+    assert_scan_arg '--exclude-dir=^/srv/new(/|$)'
+}
+row_scan_timeout() {
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=4)
+    local started=$SECONDS
+    scan --path /scratch
+    assert_eq "$RC" 124 "timeout exit distinct from threats"
+    [ "$((SECONDS - started))" -lt 4 ] || fail "scanner was not stopped early"
+    assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "one unfinished warning"
+    assert_lacks "$OUT" 'THREATS FOUND' "timeout is not a finding"
+}
+row_scan_timeout_disabled() {
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=0)
+    stub timeout <<'EOF'
+exit 99
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 0 "no timeout exit"
+    assert_has "$(calls)" 'clamscan ' "scanner ran"
+    assert_lacks "$(calls)" 'timeout ' "timeout not invoked"
+}
+row_scan_timeout_defaults() {
+    scan_fixture
+    stub timeout <<'EOF'
+shift 2
+exec "$@"
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 0 "wrapped exit"
+    assert_has "$(calls)" 'timeout --kill-after=5m 12h clamscan ' "default timeout and kill grace"
+}
+row_scan_timeout_killed() {
+    scan_fixture
+    stub timeout <<'EOF'
+exit 137
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 137 "kill exit distinct from threats"
+    assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "killed unfinished warning"
+}
+row_scan_threats() {
+    scan_fixture
+    stub clamscan <<'EOF'
+exit 1
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 1 "finding exit preserved"
+    assert_has "$OUT" 'THREATS FOUND' "finding logged"
+}
+
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

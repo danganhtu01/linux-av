@@ -213,7 +213,7 @@ report goes and whether its mail is off, and whether rkhunter's daily run is on.
 ### Tests
 
 ```bash
-tests/run.sh          # every row; or: tests/run.sh mail_edits_applied status_reports_quiet
+tests/run.sh          # 69 rows; or: tests/run.sh mail_edits_applied status_reports_quiet
 tests/mutants.sh      # removes each guard in a scratch copy and shows its row go red
 ```
 
@@ -263,8 +263,22 @@ av-scan --status                  # engine, socket, services, paths
 `av-scan` prefers **`clamdscan`** (talks to the running daemon — fast, low RAM)
 and falls back to **`clamscan`** (standalone) when no daemon socket is found.
 Because `clamdscan` cannot apply `AV_EXCLUDE_DIRS`, a whole-root (`/`) scan
-automatically switches to `clamscan`; narrower scans still prefer the daemon.
+automatically switches to `clamscan`. A narrower scan also switches when it contains
+a mount excluded by `AV_EXCLUDE_FSTYPES`. If `clamscan` is missing, it warns that
+the daemon cannot enforce those exclusions.
 Force either engine with `--engine clamscan|clamdscan` or `AV_ENGINE=`.
+
+Each scan reads `/proc/self/mountinfo` (`AV_MOUNTINFO` overrides it) without probing
+the mounts. Remote filesystems, automounts, `fuse`, and `fuse.*` are skipped by
+default, preventing dead-mount stalls and cloud file downloads. Only mount points
+at or below a selected scan path add exclusions. Each is logged and excluded with
+an escaped, anchored directory regex, so excluding `/srv/cloud` keeps `/srv/cloud2`.
+`AV_EXCLUDE_FSTYPES` accepts space-separated shell patterns; an empty value disables
+this feature. Local `fuseblk` disks and other local filesystems remain included.
+
+`AV_SCAN_TIMEOUT=12h` bounds each scanner invocation with `timeout --kill-after=5m`.
+`AV_SCAN_TIMEOUT=0` removes the limit. A timeout logs that the scan did not finish
+and returns 124 (137 if killed after the grace period), distinct from threats (1).
 
 ### 4.1 Scanning the whole box (all users + mounted drives)
 
@@ -287,10 +301,9 @@ What a root `--full` scan **does** and **does not** cover:
 
 - ✅ **Other users' home directories** — yes, when run as root.
 - ✅ **Mounted drives** (USB, extra disks, bind mounts) — yes; ClamAV crosses
-  filesystem boundaries by default, so anything mounted under `/` at scan time is
-  included.
-- ⚠️ **Network mounts** (NFS/SMB) — also included, and can be *very* slow. Skip
-  them by adding their mountpoints to `AV_EXCLUDE_DIRS`.
+  filesystem boundaries by default, so mounted local filesystems are included.
+- ❌ **Network mounts, automounts, and FUSE mounts** are skipped by default through
+  `AV_EXCLUDE_FSTYPES`; local `fuseblk` disks remain included.
 - ❌ **Unmounted / disconnected drives** — a scan only sees what's mounted when
   it runs. Mount it first, or scan explicitly: `sudo av-scan --path /mnt/disk --now`.
 - ❌ **Real-time coverage** — a periodic full scan is a snapshot in time. For
@@ -352,6 +365,9 @@ Key vars (all optional, shown with defaults):
 | Var | Default | Meaning |
 |---|---|---|
 | `AV_SCAN_PATHS` | `$HOME` | what `--now` scans |
+| `AV_EXCLUDE_FSTYPES` | `autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.*` | skip these filesystem types (shell patterns); empty disables |
+| `AV_MOUNTINFO` | `/proc/self/mountinfo` | mount table read at each scan, without probing mounts |
+| `AV_SCAN_TIMEOUT` | `12h` | scanner time limit; `0` disables; kill grace is 5 minutes |
 | `AV_ONACCESS_PATHS` | scan paths (never `/`) | what real-time scanning watches |
 | `AV_ENGINE` | `auto` | `auto` \| `clamdscan` \| `clamscan` |
 | `AV_LOG_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/linux-av` | logs + state |
@@ -408,7 +424,7 @@ rm ~/.local/bin/av-scan ~/.local/bin/av-setup ~/.local/bin/av-aide-arch   # or /
 - `av-setup` needs **root** (re-execs via `sudo`); `av-scan --now/--scheduled`
   only needs enough rights to read the paths you scan.
 - ClamAV exit codes are handled: `0` clean, `1` **threats found** (logged, not a
-  crash), `2` scanner error.
+  crash), `2` scanner error, `124` scan timed out, `137` killed after timeout.
 - Logs go to `$AV_LOG_FILE` (default under `~/.local/state/linux-av/`).
 
 ## 8.1 Installing AIDE on Arch (`av-aide-arch`)

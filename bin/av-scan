@@ -54,17 +54,86 @@ choose_engine() {
     else echo ""; fi
 }
 
+# Lexical absolute path for containment checks, without stat/readlink on mounts.
+# REPLY preserves even trailing newlines in a pathname.
+scan_path_absolute() {
+    local path="$1" part
+    [[ $path = /* ]] || path="$PWD/$path"
+    path="$path/"; REPLY=""
+    while [ -n "$path" ]; do
+        part="${path%%/*}"; path="${path#*/}"
+        case "$part" in
+            ''|.) ;;
+            ..) REPLY="${REPLY%/*}" ;;
+            *) REPLY="$REPLY/$part" ;;
+        esac
+    done
+    REPLY="${REPLY:-/}"
+}
+
 # Build the per-engine exclude args and run one scan of "$@" (paths).
 run_scan() {
     local engine paths=("$@")
     engine="$(choose_engine)"
     [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
 
+    local -a mount_excludes=() scan_paths=() fstype_patterns=() fields=()
+    local p line mount fstype pattern matched escaped char label REPLY i
+    for p in "${paths[@]}"; do
+        scan_path_absolute "$p"; scan_paths+=("$REPLY")
+    done
+    if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
+        [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
+        read -r -a fstype_patterns <<< "$AV_EXCLUDE_FSTYPES"
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ $line = *' - '* ]] || continue
+            read -r -a fields <<< "$line"
+            mount="${fields[4]}"; fstype="${line#* - }"; fstype="${fstype%% *}"
+            matched=0
+            for pattern in "${fstype_patterns[@]}"; do
+                [[ $fstype = $pattern ]] && matched=1
+            done
+            [ "$matched" = 1 ] || continue
+            # Decode backslash last, so an encoded literal \\040 stays literal.
+            mount="${mount//\\040/ }"
+            mount="${mount//\\011/$'\t'}"
+            mount="${mount//\\012/$'\n'}"
+            mount="${mount//\\134/\\}"
+            matched=0
+            for p in "${scan_paths[@]}"; do
+                if [[ $p = / || $mount = "$p" || $mount = "$p/"* ]]; then
+                    matched=1; break
+                fi
+            done
+            [ "$matched" = 1 ] || continue
+            escaped=""
+            for ((i=0; i<${#mount}; i++)); do
+                char="${mount:i:1}"
+                case "$char" in
+                    '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
+                esac
+                escaped+="$char"
+            done
+            mount_excludes+=("--exclude-dir=^${escaped}(/|$)")
+            printf -v label '%q' "$mount"
+            log_info "skipping mount $label (type=$fstype)"
+        done < "$AV_MOUNTINFO"
+    fi
+
+    if [ "$engine" = clamdscan ] && [ "${#mount_excludes[@]}" -gt 0 ]; then
+        if have clamscan; then
+            log_info "mount exclusions require clamscan; switching from clamdscan"
+            engine=clamscan
+        else
+            log_warn "clamdscan cannot enforce mount exclusions; network and automount filesystems may be scanned"
+        fi
+    fi
+
     # clamdscan has no --exclude-dir option. A whole-root scan through it would
     # silently ignore AV_EXCLUDE_DIRS and descend into /proc, /sys, /dev, /run,
     # and the signature database. Use standalone clamscan for `/`, where the
-    # documented exclusions matter most; keep the faster daemon for narrower
-    # paths. If clamscan is unavailable, continue but make the limitation loud.
+    # documented exclusions matter most. If clamscan is unavailable, continue
+    # but make the limitation loud.
     if [ "$engine" = clamdscan ] && [ -n "$AV_EXCLUDE_DIRS" ]; then
         local p
         for p in "${paths[@]}"; do
@@ -85,6 +154,7 @@ run_scan() {
     if [ "$engine" = clamscan ]; then
         args+=( --recursive --infected --stdout )
         local d; for d in $AV_EXCLUDE_DIRS; do args+=( "--exclude-dir=^${d}" ); done
+        args+=( "${mount_excludes[@]}" )
         [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
     else
         # clamdscan: the daemon holds the DB; fewer knobs, much faster.
@@ -94,11 +164,16 @@ run_scan() {
 
     log_info "engine=$engine scanning: ${paths[*]}"
     local rc=0
-    "$engine" "${args[@]}" "${paths[@]}"; rc=$?
+    local -a runner=()
+    if [ "$AV_SCAN_TIMEOUT" != 0 ]; then
+        runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")
+    fi
+    "${runner[@]}" "$engine" "${args[@]}" "${paths[@]}"; rc=$?
     case $rc in
         0) log_info "clean — no threats in ${paths[*]}" ;;
         1) log_warn "THREATS FOUND in ${paths[*]} (see $AV_LOG_FILE / quarantine)"
            [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" || true ;;
+        124|137) log_warn "scan stopped at its time limit ($AV_SCAN_TIMEOUT) and did not finish" ;;
         *) log_err  "scanner error (rc=$rc) on ${paths[*]}" ;;
     esac
     return $rc

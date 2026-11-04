@@ -268,17 +268,22 @@ a mount excluded by `AV_EXCLUDE_FSTYPES`. If `clamscan` is missing, it warns tha
 the daemon cannot enforce those exclusions.
 Force either engine with `--engine clamscan|clamdscan` or `AV_ENGINE=`.
 
-Each scan reads `/proc/self/mountinfo` (`AV_MOUNTINFO` overrides it) without probing
-the mounts. Remote filesystems, automounts, `fuse`, and `fuse.*` are skipped by
-default, preventing dead-mount stalls and cloud file downloads. Only mount points
-at or below a selected scan path add exclusions. Each is logged and excluded with
-an escaped, anchored directory regex, so excluding `/srv/cloud` keeps `/srv/cloud2`.
-`AV_EXCLUDE_FSTYPES` accepts space-separated shell patterns; an empty value disables
-this feature. Local `fuseblk` disks and other local filesystems remain included.
+Each scan resolves existing scan paths with `realpath -e` and passes those physical,
+absolute paths to the scanner; missing paths keep their lexical absolute form.
+It reads `/proc/self/mountinfo` (`AV_MOUNTINFO` overrides it), using mount IDs and
+parent IDs to ignore entries covered at the same mount point. Remote filesystems,
+automounts, `fuse`, and `fuse.*` are skipped by default. A scan path on a skipped
+mount is dropped with a warning; if none remain, the scan returns 0 without
+starting a scanner. Mount points below a selected path add escaped, anchored
+`--exclude-dir` and `--exclude` regexes, covering directories and file mounts,
+so excluding `/srv/cloud` keeps `/srv/cloud2`.
+`AV_EXCLUDE_FSTYPES` accepts space-separated shell patterns. Local `fuseblk` disks
+and other local filesystems remain included unless reached through a skipped mount.
 
 `AV_SCAN_TIMEOUT=12h` bounds each scanner invocation with `timeout --kill-after=5m`.
 `AV_SCAN_TIMEOUT=0` removes the limit. A timeout logs that the scan did not finish
-and returns 124 (137 if killed after the grace period), distinct from threats (1).
+and returns 124, distinct from threats (1). Status 137 reports SIGKILL: either
+the time limit's kill-after or another killer, such as the OOM killer.
 
 ### 4.1 Scanning the whole box (all users + mounted drives)
 
@@ -383,6 +388,15 @@ Key vars (all optional, shown with defaults):
 | `AV_AIDE_INIT_TIMEOUT` | `4h` | `RuntimeMaxSec` of the baseline unit (systemd stops a longer build) |
 | `AV_AIDE_INIT_UNIT` | `linux-av-aide-init` | name of the baseline unit |
 | `AV_ROOT` | empty | path prefix for the `/etc` and `/var` paths `enable` edits; for tests only; refused (exit 1) when running as root |
+
+A local disk mounted inside a network mount is skipped with it: reaching that disk
+requires path lookups through the network mount. A local disk covering a network
+or autofs entry at the same mount point is scanned instead, since only the top
+mount counts.
+
+`clamscan` cuts a path to 512 characters before matching `--exclude-dir`, so a
+deeper mount point is not excluded. Set `AV_EXCLUDE_FSTYPES=` to scan network
+mounts on purpose.
 
 `av-setup` installs and enables auditd, but deliberately does **not** invent an
 audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify

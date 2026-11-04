@@ -634,6 +634,7 @@ row_av_root_refused_as_root() {
 scan_fixture() {
     new_fixture "$ROW"
     ln -s "$(command -v timeout)" "$B/timeout"
+    ln -s "$(command -v realpath)" "$B/realpath"
     : > "$D/mountinfo"
     printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
     stub clamscan <<'EOF'
@@ -669,7 +670,116 @@ assert_mount_count() {
     assert_scan_arg '--exclude-dir=^/legacy'
 }
 mount_entry() {
-    printf '42 1 0:42 / %s rw shared:1 - %s source rw\n' "$1" "$2" >> "$D/mountinfo"
+    printf '%s %s 0:42 / %s rw shared:1 - %s source rw\n' "${3:-42}" "${4:-1}" "$1" "$2" >> "$D/mountinfo"
+}
+
+row_scan_path_symlink() {
+    scan_fixture
+    mkdir -p "$D/tree/cloud"; ln -s "$D/tree" "$D/link"
+    mount_entry "$D/tree/cloud" cifs
+    scan --path "$D/link"
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg "$D/tree"
+    local escaped="${D//./\\.}"
+    assert_scan_arg "--exclude-dir=^$escaped/tree/cloud(/|$)"
+    assert_mount_count 1
+    assert_lacks "$(calls)" "$D/link" "scanner walks the physical path"
+}
+row_scan_path_relative() {
+    scan_fixture; mkdir -p "$D/tree"
+    (
+        cd "$D" || exit 1
+        scan --path ./tree/../tree
+        assert_eq "$RC" 0 "scan exit"
+        assert_scan_arg "$D/tree"
+        [ "$ROW_FAILED" = 0 ]
+    ) || fail "relative path row failed"
+}
+row_scan_path_missing() {
+    scan_fixture
+    scan --path "$D/missing/../absent"
+    assert_eq "$RC" 0 "missing path still passed to scanner"
+    assert_scan_arg "$D/absent"
+}
+row_scan_path_on_mount() {
+    scan_fixture; mount_entry /srv/net cifs
+    scan --path /srv/net/sub --path /scratch
+    assert_eq "$RC" 0 "remaining path scanned"
+    assert_scan_arg /scratch
+    assert_lacks "$(calls)" '/srv/net/sub' "network path dropped"
+    assert_eq "$(grep -c 'WARN.*not scanning /srv/net/sub: it is on a cifs mount at /srv/net (set AV_EXCLUDE_FSTYPES= to scan it)' <<< "$OUT")" 1 "one path warning"
+}
+row_scan_paths_all_dropped() {
+    scan_fixture; mount_entry /srv/net cifs
+    scan --path /srv/net --path /srv/net/sub
+    assert_eq "$RC" 0 "nothing left is a successful no-op"
+    assert_lacks "$(calls)" 'clamscan ' "standalone not run"
+    assert_lacks "$(calls)" 'clamdscan ' "daemon not run"
+    assert_lacks "$(calls)" 'timeout ' "timeout not run"
+    assert_eq "$(grep -c 'WARN.*no scan paths remain after mount exclusions; scan not started' <<< "$OUT")" 1 "one empty-list warning"
+    assert_eq "$(grep -c 'WARN.*not scanning' <<< "$OUT")" 2 "one warning per dropped path"
+}
+row_scan_covered_cifs_ext4() {
+    scan_fixture
+    mount_entry /srv/stack ext4 43 42
+    mount_entry /srv/stack cifs 42 1
+    scan --path /srv/stack/sub
+    assert_eq "$RC" 0 "local top mount scanned"
+    assert_scan_arg /srv/stack/sub
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "covered cifs ignored"
+}
+row_scan_covered_ext4_cifs() {
+    scan_fixture
+    mount_entry /srv/stack ext4 42 1
+    mount_entry /srv/stack cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/stack(/|$)'
+}
+row_scan_covered_autofs_ext4() {
+    scan_fixture
+    mount_entry /srv/stack autofs 42 1
+    mount_entry /srv/stack ext4 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "local disk on autofs scanned"
+}
+row_scan_covered_autofs_cifs() {
+    scan_fixture
+    mount_entry /srv/stack autofs 42 1
+    mount_entry /srv/stack cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/stack (type=cifs)' <<< "$OUT")" 1 "top cifs logged once"
+    assert_lacks "$OUT" '(type=autofs)' "covered autofs ignored"
+}
+row_scan_mount_file() {
+    scan_fixture; mount_entry '/srv/a.b' cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg '--exclude-dir=^/srv/a\.b(/|$)'
+    assert_scan_arg '--exclude=^/srv/a\.b(/|$)'
+}
+row_scan_mount_separator() {
+    scan_fixture
+    SCAN_ENV=('AV_EXCLUDE_FSTYPES=*')
+    printf '42 1 0:42 / /srv/bogus rw cifs source rw\n' > "$D/mountinfo"
+    scan --full
+    assert_eq "$RC" 0 "malformed line ignored"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "no bogus exclusion"
+}
+row_scan_mount_last_line() {
+    scan_fixture
+    printf '42 1 0:42 / /srv/last rw - cifs source rw' > "$D/mountinfo"
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/last(/|$)'
 }
 
 row_scan_mount_cifs() {
@@ -774,8 +884,10 @@ row_scan_mount_paths() {
     mount_entry /unselected fuse
     scan --path ./dummy/../ --path /srv/exact/
     assert_eq "$RC" 0 "scan exit"
-    assert_mount_count 2
-    assert_scan_arg '--exclude-dir=^/srv/exact(/|$)'
+    assert_mount_count 1
+    assert_scan_arg "$PWD"
+    assert_lacks "$(calls)" '/srv/exact' "exact network mount path dropped"
+    assert_has "$OUT" 'not scanning /srv/exact:' "exact mount warning"
 }
 row_scan_mount_no_standalone() {
     scan_fixture; mount_entry /srv/cloud cifs; unstub clamscan
@@ -847,7 +959,8 @@ exit 137
 EOF
     scan --path /scratch
     assert_eq "$RC" 137 "kill exit distinct from threats"
-    assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "killed unfinished warning"
+    assert_eq "$(grep -c "WARN.*scan was killed (SIGKILL: its time limit's kill-after, or another killer such as the OOM killer) and did not finish" <<< "$OUT")" 1 "killed unfinished warning"
+    assert_lacks "$OUT" 'stopped at its time limit' "SIGKILL cause is uncertain"
 }
 row_scan_threats() {
     scan_fixture
@@ -857,6 +970,93 @@ EOF
     scan --path /scratch
     assert_eq "$RC" 1 "finding exit preserved"
     assert_has "$OUT" 'THREATS FOUND' "finding logged"
+}
+
+# Read only the installer's functions or config fragment, never its root entrypoint.
+root_install_fixture() {
+    new_fixture "$ROW"
+    sed -n '/^put() {/,/^keep "\$dst\/bin\/av-scan"/{ /^keep "\$dst\/bin\/av-scan"/d; p; }' \
+        "$REPO/root-install.sh" > "$D/functions"
+}
+root_functions() {
+    OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
+        die() { echo "$*" >&2; exit 1; }
+        source "$1"; shift; "$@"
+    ' sh "$D/functions" "$@" 2>&1)"; RC=$?
+}
+row_root_install_unchanged() {
+    root_install_fixture
+    printf 'same bytes\n' > "$D/source"; cp "$D/source" "$D/dest"
+    local mode
+    for mode in 755 644; do
+        stub stat <<< "echo '0 0 $mode'"
+        root_functions put "$D/source" "0$mode" "$D/dest"
+        assert_eq "$RC" 0 "unchanged exit ($mode)"
+        assert_has "$OUT" "unchanged: $D/dest" "no rewrite ($mode)"
+        assert_nofile "$D/dest.new" "no temporary install ($mode)"
+    done
+}
+row_root_install_backup_failure() {
+    root_install_fixture; printf 'original\n' > "$D/dest"
+    stub cp <<'EOF'
+exit 1
+EOF
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 1 "backup failure is fatal"
+    assert_has "$OUT" 'could not keep' "backup failure reason"
+    assert_nofile "$D/dest.before-R-3377" "no false backup"
+}
+row_root_install_backup_optional() {
+    root_install_fixture
+    stub cp <<'EOF'
+exit 1
+EOF
+    root_functions keep "$D/absent"
+    assert_eq "$RC" 0 "missing file needs no backup"
+    printf 'new\n' > "$D/dest"; printf 'old\n' > "$D/dest.before-R-3377"
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 0 "existing backup kept"
+    assert_eq "$(cat "$D/dest.before-R-3377")" old "first backup unchanged"
+    assert_lacks "$(calls)" 'cp ' "no copy attempted"
+}
+row_root_install_backup_saved() {
+    root_install_fixture; printf 'original\n' > "$D/dest"
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 0 "backup exit"
+    assert_same "$D/dest" "$D/dest.before-R-3377" "backup contents"
+}
+row_root_install_perl_guard() {
+    new_fixture "$ROW"
+    sed -n '/^# The single quotes/,/^put "\$t\/linux-av.conf"/p' \
+        "$REPO/root-install.sh" > "$D/config-fragment"
+    local status
+    for status in 1 0; do
+        stub perl <<< "exit $status"
+        OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
+            die() { echo "$*" >&2; exit 1; }
+            put() { cp "$1" "$t/installed"; }
+            t="$1"; source "$t/config-fragment"
+        ' sh "$D" 2>&1)"; RC=$?
+        assert_eq "$RC" "$status" "Perl status $status"
+        if [ "$status" = 1 ]; then
+            assert_nofile "$D/installed" "invalid Perl never installed"
+            assert_has "$OUT" 'does not parse' "parse refusal reason"
+        else
+            assert_same "$D/linux-av.conf" "$D/installed" "valid Perl installed"
+        fi
+    done
+    assert_has "$(calls)" "perl -c $D/linux-av.conf" "checks the temporary file"
+}
+row_root_install_library_first() {
+    new_fixture "$ROW"
+    # Run just the two put calls with a recording function, without installing anything.
+    sed -n '/^put "\$here\/.*" .*"\$dst\//p' "$REPO/root-install.sh" > "$D/puts"
+    OUT="$("$BASH_BIN" -c '
+        here=tree; dst=dest
+        put() { echo "$1"; }
+        source "$1"
+    ' sh "$D/puts")"
+    assert_eq "$OUT" $'tree/lib/common.sh\ntree/bin/av-scan' "library installed before its consumer"
 }
 
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"

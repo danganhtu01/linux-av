@@ -1059,6 +1059,19 @@ row_root_install_library_first() {
     assert_eq "$OUT" $'tree/lib/common.sh\ntree/bin/av-scan' "library installed before its consumer"
 }
 
+# The runner refuses root-install.sh unless each "# sha256 <hex> <relpath>" line names its file's
+# current SHA-256; a stale line would only show up on his card. Check them here.
+row_root_install_hashes() {
+    new_fixture "$ROW"
+    local hash sum hex rel n=0
+    while read -r hash sum hex rel; do
+        [ "$hash $sum" = '# sha256' ] || continue
+        n=$((n+1))
+        assert_eq "$(sha256sum < "$REPO/$rel" | cut -c1-64)" "$hex" "root-install.sh lists the SHA-256 of $rel"
+    done < "$REPO/root-install.sh"
+    assert_eq "$n" 2 "root-install.sh lists two files"
+}
+
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

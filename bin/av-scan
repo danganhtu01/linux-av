@@ -54,17 +54,152 @@ choose_engine() {
     else echo ""; fi
 }
 
+# Lexical absolute path, without stat/readlink on mounts.
+# REPLY preserves even trailing newlines in a pathname.
+scan_path_absolute() {
+    local path="$1" part
+    [[ $path = /* ]] || path="$PWD/$path"
+    path="$path/"; REPLY=""
+    while [ -n "$path" ]; do
+        part="${path%%/*}"; path="${path#*/}"
+        case "$part" in
+            ''|.) ;;
+            ..) REPLY="${REPLY%/*}" ;;
+            *) REPLY="$REPLY/$part" ;;
+        esac
+    done
+    REPLY="${REPLY:-/}"
+}
+
 # Build the per-engine exclude args and run one scan of "$@" (paths).
 run_scan() {
     local engine paths=("$@")
+    local -a mount_excludes=() scan_paths=() fstype_patterns=() fields=()
+    local -a mount_ids=() mount_parents=() mount_points=() mount_types=()
+    local -a skipped_points=() skipped_types=()
+    local -A covered=() mount_index=()
+    local p line mount fstype pattern matched escaped char label path_label REPLY i idx
+    local cursor parent parent_idx steps reachable stage resolved
+    if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
+        [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
+        read -r -a fstype_patterns <<< "$AV_EXCLUDE_FSTYPES"
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ $line = *' - '* ]] || continue
+            read -r -a fields <<< "$line"
+            mount="${fields[4]}"; fstype="${line#* - }"; fstype="${fstype%% *}"
+            mount_index["${fields[0]}"]="${#mount_ids[@]}"
+            mount_ids+=("${fields[0]}"); mount_parents+=("${fields[1]}")
+            mount_points+=("$mount"); mount_types+=("$fstype")
+            if [ "${fields[1]}" != "${fields[0]}" ]; then
+                covered["${fields[1]}:$mount"]=1
+            fi
+        done < "$AV_MOUNTINFO"
+        for idx in "${!mount_ids[@]}"; do
+            mount="${mount_points[idx]}"; fstype="${mount_types[idx]}"
+            [ "${covered["${mount_ids[idx]}:$mount"]:-0}" = 1 ] && continue
+            # Stacked entries can reach their parent even when it is covered;
+            # entries inside a parent need that parent to be the top at its point.
+            reachable=0; cursor="$idx"
+            for ((steps=0; steps<${#mount_ids[@]}; steps++)); do
+                parent="${mount_parents[cursor]}"
+                parent_idx="${mount_index[$parent]:-}"
+                if [ "$parent" = "${mount_ids[cursor]}" ] || [ -z "$parent_idx" ]; then
+                    reachable=1; break
+                fi
+                if [ "${mount_points[cursor]}" != "${mount_points[parent_idx]}" ] &&
+                    [ "${covered["$parent:${mount_points[parent_idx]}"]:-0}" = 1 ]; then
+                    break
+                fi
+                cursor="$parent_idx"
+            done
+            [ "$reachable" = 1 ] || continue
+            matched=0
+            for pattern in "${fstype_patterns[@]}"; do
+                # The patterns are globs (fuse.* covers fuse.sshfs), so the right side stays unquoted.
+                # shellcheck disable=SC2053
+                [[ $fstype = $pattern ]] && matched=1
+            done
+            [ "$matched" = 1 ] || continue
+            # Decode backslash last, so an encoded literal \\040 stays literal.
+            mount="${mount//\\040/ }"
+            mount="${mount//\\011/$'\t'}"
+            mount="${mount//\\012/$'\n'}"
+            mount="${mount//\\134/\\}"
+            skipped_points+=("$mount"); skipped_types+=("$fstype")
+        done
+    fi
+
+    # Check paths before collecting any exclusions for the paths that survive.
+    for p in "${paths[@]}"; do
+        scan_path_absolute "$p"; p="$REPLY"
+        matched=0
+        for stage in lexical physical; do
+            if [ "$stage" = physical ]; then
+                # The sentinel preserves trailing newlines in the resolved pathname.
+                if resolved="$(realpath -m -- "$p" 2>/dev/null && printf '.')"; then
+                    p="${resolved%$'\n.'}"
+                fi
+            fi
+            for idx in "${!skipped_points[@]}"; do
+                mount="${skipped_points[idx]}"; fstype="${skipped_types[idx]}"
+                if [[ $mount = / || $p = "$mount" || $p = "$mount/"* ]]; then
+                    printf -v label '%q' "$mount"
+                    printf -v path_label '%q' "$p"
+                    log_warn "not scanning $path_label: it is on a $fstype mount at $label (set AV_EXCLUDE_FSTYPES= to scan it)"
+                    matched=1; break
+                fi
+            done
+            [ "$matched" = 0 ] || break
+        done
+        [ "$matched" = 0 ] && scan_paths+=("$p")
+    done
+    paths=("${scan_paths[@]}")
+    if [ "${#paths[@]}" -eq 0 ]; then
+        log_warn "no scan paths remain after mount exclusions; scan not started"
+        return 0
+    fi
+
+    # Exclude mounts only below the kept paths.
+    for idx in "${!skipped_points[@]}"; do
+        mount="${skipped_points[idx]}"; fstype="${skipped_types[idx]}"
+        matched=0
+        for p in "${paths[@]}"; do
+            if [[ $p = / || $mount = "$p" || $mount = "$p/"* ]]; then
+                matched=1; break
+            fi
+        done
+        [ "$matched" = 1 ] || continue
+        escaped=""
+        for ((i=0; i<${#mount}; i++)); do
+            char="${mount:i:1}"
+            case "$char" in
+                '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
+            esac
+            escaped+="$char"
+        done
+        mount_excludes+=("--exclude-dir=^${escaped}(/|$)")
+        mount_excludes+=("--exclude=^${escaped}(/|$)")
+        printf -v label '%q' "$mount"
+        log_info "skipping mount $label (type=$fstype)"
+    done
+    # End mount exclusions.
     engine="$(choose_engine)"
     [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
+
+    if [ "$engine" = clamdscan ] && [ "${#mount_excludes[@]}" -gt 0 ]; then
+        if have clamscan; then
+            log_info "mount exclusions require clamscan; switching from clamdscan"
+            engine=clamscan
+        else
+            log_warn "clamdscan cannot enforce mount exclusions; network and automount filesystems may be scanned"
+        fi
+    fi
 
     # clamdscan has no --exclude-dir option. A whole-root scan through it would
     # silently ignore AV_EXCLUDE_DIRS and descend into /proc, /sys, /dev, /run,
     # and the signature database. Use standalone clamscan for `/`, where the
-    # documented exclusions matter most; keep the faster daemon for narrower
-    # paths. If clamscan is unavailable, continue but make the limitation loud.
+    # documented exclusions matter most. If clamscan is unavailable, continue
+    # but make the limitation loud.
     if [ "$engine" = clamdscan ] && [ -n "$AV_EXCLUDE_DIRS" ]; then
         local p
         for p in "${paths[@]}"; do
@@ -85,6 +220,7 @@ run_scan() {
     if [ "$engine" = clamscan ]; then
         args+=( --recursive --infected --stdout )
         local d; for d in $AV_EXCLUDE_DIRS; do args+=( "--exclude-dir=^${d}" ); done
+        args+=( "${mount_excludes[@]}" )
         [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
     else
         # clamdscan: the daemon holds the DB; fewer knobs, much faster.
@@ -94,11 +230,17 @@ run_scan() {
 
     log_info "engine=$engine scanning: ${paths[*]}"
     local rc=0
-    "$engine" "${args[@]}" "${paths[@]}"; rc=$?
+    local -a runner=()
+    if [ "$AV_SCAN_TIMEOUT" != 0 ]; then
+        runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")
+    fi
+    "${runner[@]}" "$engine" "${args[@]}" "${paths[@]}"; rc=$?
     case $rc in
         0) log_info "clean — no threats in ${paths[*]}" ;;
         1) log_warn "THREATS FOUND in ${paths[*]} (see $AV_LOG_FILE / quarantine)"
            [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" || true ;;
+        124) log_warn "scan stopped at its time limit ($AV_SCAN_TIMEOUT) and did not finish" ;;
+        137) log_warn "scan was killed (SIGKILL: its time limit's kill-after, or another killer such as the OOM killer) and did not finish" ;;
         *) log_err  "scanner error (rc=$rc) on ${paths[*]}" ;;
     esac
     return $rc

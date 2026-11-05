@@ -178,7 +178,7 @@ is absent. `av-setup status` prints each scanner's report location and mail stat
 ### Tests — `tests/run.sh`, `tests/mutants.sh`
 
 ```bash
-tests/run.sh                  # every row, 51 at the time of writing; or name rows to run
+tests/run.sh                  # every row, 94 at the time of writing; or name rows to run
 tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
 ```
 
@@ -220,7 +220,24 @@ timer already runs as root.
 
 Engine selection is automatic: `clamdscan` when a daemon socket is found, `clamscan`
 otherwise, and always `clamscan` for a whole-root scan, because `clamdscan` cannot apply
-`AV_EXCLUDE_DIRS`. Force it with `--engine clamscan|clamdscan` or `AV_ENGINE`.
+`AV_EXCLUDE_DIRS`. A narrower scan also switches when it contains an excluded mount;
+without `clamscan`, a warning names the limitation. Force it with
+`--engine clamscan|clamdscan` or `AV_ENGINE`.
+
+Every scan resolves existing scan paths physically and uses those absolute paths
+for mount checks and the scanner. It reads `AV_MOUNTINFO` (default
+`/proc/self/mountinfo`), ignoring mounts covered at the same point according to
+mount IDs and parent IDs. `AV_EXCLUDE_FSTYPES` defaults to `autofs cifs smb3 smbfs nfs nfs4 9p
+ceph glusterfs afs fuse fuse.*` (space-separated shell patterns). Matching mount
+points below a scan path are logged and excluded with exact, escaped directory
+and file regexes. Scan paths on skipped mounts are dropped with a warning; no
+remaining paths means a successful no-op. Local filesystems, including `fuseblk`,
+remain included unless reached through a skipped mount. An empty setting
+disables this feature. `AV_SCAN_TIMEOUT` defaults to `12h`; `timeout` stops a longer
+scan, with a 5-minute kill grace, and logs that it did not finish (exit 124).
+Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
+the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
+for no limit. See README's settings section for exclusion limits.
 
 ### AIDE on Arch — `av-aide-arch`
 
@@ -245,10 +262,11 @@ Every tracked file in this repository.
 | `README.md` | **The full manual, and the only other Markdown file here.** Holds the per-distro reference tables (package names, which services auto-enable, AIDE database paths and check binaries, AppArmor defaults), the long-form on-access and whole-box scanning notes, the makepkg-versus-packaged-install comparison behind `av-aide-arch`, and the uninstall steps. Go there when you need the *reasoning* behind a distro branch or the exact per-distro prerequisite commands — this file carries the interface, the README carries the detail. |
 | `bootstrap.sh` | One-shot per-box rollout: locate or clone the checkout, run `install.sh`, run `av-setup all`, then optionally AIDE, whole-box config, on-access and both timers. Run as a normal user; escalates itself. |
 | `install.sh` | Symlinks the three `bin/` commands onto `PATH`. Copies nothing. |
+| `root-install.sh` | OVH's root-owned copy, run as root by `/usr/local/sbin/ovh-root-run` from a run card (C-10; OC-T-0046, R-3377): installs `bin/av-scan` and `lib/common.sh` into `/usr/local/lib/linux-av`, the scan unit's 12h30min `TimeoutStartSec` drop-in and needrestart's `override_rc` for `linux-av-*`; starts nothing. Its two `# sha256` lines bind the files it installs. |
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
-| `tests/run.sh` | The suite: 51 rows, bash only, no root. |
+| `tests/run.sh` | The suite: 94 rows, bash only, no root. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |

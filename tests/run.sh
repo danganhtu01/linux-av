@@ -24,7 +24,7 @@ BASH_BIN="$(command -v bash)"
 ENV_BIN="$(command -v env)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-test.XXXXXX")" || exit 2
 if [ "${AV_TEST_KEEP:-0}" != 1 ]; then
-    trap 'rm -rf "$WORK"' EXIT
+    trap 'rm -rf "${WORK:?}"' EXIT
 else
     echo "scratch kept: $WORK"
 fi
@@ -107,8 +107,11 @@ EOF
 }
 
 # stub NAME  (body on stdin; a stub always records "NAME args" in $CALLS first)
+# It removes NAME first: a fixture may hold NAME as a link to the real tool, and writing through
+# the link would overwrite that tool (as root, a system binary).
 stub() {
     local body; body="$(cat)"
+    rm -f -- "${B:?}/$1"
     # shellcheck disable=SC2016
     { printf '#!%s\n' "$BASH_BIN"
       printf 'echo "%s $*" >> "$CALLS"\n' "$1"
@@ -626,6 +629,522 @@ row_av_root_refused_as_root() {
 }
 
 # ---------------------------------------------------------------------------
+# Scan fixtures: neither scanner touches the supplied paths, even for /.
+# Arguments are NUL-delimited to preserve spaces, tabs, and newlines.
+scan_fixture() {
+    new_fixture "$ROW"
+    ln -s "$(command -v timeout)" "$B/timeout"
+    ln -s "$(command -v realpath)" "$B/realpath"
+    MOUNT_NEXT=42; : > "$D/mountinfo"
+    printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
+    stub clamscan <<'EOF'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+exec sleep "${STUB_SCAN_SLEEP:-0}"
+EOF
+    stub clamdscan <<'EOF'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+exit 0
+EOF
+    SCAN_ENV=()
+}
+scan() {
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+        AV_COLOR=never XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
+        AV_MOUNTINFO="$D/mountinfo" AV_ENGINE=clamscan SCAN_ARGS="$D/args" \
+        CALLS="$CALLS" "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" "$@" --now 2>&1)"
+    RC=$?
+    ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
+}
+assert_scan_arg() {
+    local arg count=0
+    for arg in "${ARGS[@]}"; do [ "$arg" != "$1" ] || count=$((count + 1)); done
+    assert_eq "$count" 1 "scanner argument $1"
+}
+assert_mount_count() {
+    local arg count=0
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in --exclude-dir=*) count=$((count + 1)) ;; esac
+    done
+    # One unchanged AV_EXCLUDE_DIRS argument, plus the mount exclusions.
+    assert_eq "$count" "$(($1 + 1))" "mount exclusion count"
+    assert_scan_arg '--exclude-dir=^/legacy'
+}
+mount_entry() {
+    local id="${3:-$MOUNT_NEXT}"
+    MOUNT_NEXT=$((id + 1))
+    printf '%s %s 0:42 / %s rw shared:1 - %s source rw\n' "$id" "${4:-1}" "$1" "$2" >> "$D/mountinfo"
+}
+
+row_scan_path_dead_mount() {
+    scan_fixture; mount_entry /srv/net cifs
+    stub realpath <<'EOF'
+exit 99
+EOF
+    scan --path /srv/net/sub
+    assert_eq "$RC" 0 "dead mount is a successful no-op"
+    assert_lacks "$(calls)" 'realpath ' "no path lookup on the dead mount"
+    assert_lacks "$(calls)" 'clamscan ' "scanner not called"
+    assert_has "$OUT" 'not scanning /srv/net/sub:' "lexical path dropped"
+}
+row_scan_path_missing_symlink() {
+    scan_fixture; mount_entry /srv/net cifs
+    ln -s /srv/net "$D/alias"
+    scan --path "$D/alias/missing/../kept"
+    assert_eq "$RC" 0 "missing component through a symlink is a no-op"
+    assert_lacks "$(calls)" 'clamscan ' "resolved network path not scanned"
+    assert_has "$OUT" 'not scanning /srv/net/kept:' "link resolved with a missing component"
+}
+row_scan_mount_self_parent() {
+    scan_fixture
+    printf '42 42 0:42 / / rw - nfs src rw\n' > "$D/mountinfo"
+    scan --path /scratch
+    assert_eq "$RC" 0 "network root is a successful no-op"
+    assert_lacks "$(calls)" 'clamscan ' "network root not scanned"
+    assert_has "$OUT" 'not scanning /scratch: it is on a nfs mount at / ' "self-parent root counts"
+}
+row_scan_mount_hidden_child() {
+    scan_fixture
+    mount_entry /srv/net cifs 42 1
+    mount_entry /srv/net/sub nfs 43 42
+    mount_entry /srv/net ext4 44 42
+    scan --path /srv/net/sub
+    assert_eq "$RC" 0 "local covering mount scanned"
+    assert_scan_arg /srv/net/sub
+    assert_mount_count 0
+    assert_lacks "$OUT" 'not scanning' "hidden child cannot drop a path"
+    scan --full
+    assert_eq "$RC" 0 "full scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "hidden child cannot add exclusions"
+}
+row_scan_mount_dropped_parent() {
+    scan_fixture
+    mount_entry /srv/net/sub nfs 43 42
+    mount_entry /srv/net cifs 42 1
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv/net --path /safe
+    assert_eq "$RC" 0 "safe path scanned"
+    assert_scan_arg /safe
+    assert_has "$(calls)" 'clamdscan ' "daemon retained for safe path"
+    assert_lacks "$(calls)" 'clamscan ' "no unnecessary switch"
+    assert_lacks "$OUT" 'skipping mount' "dropped path adds no exclusions"
+    local arg
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in --exclude-dir=*|--exclude=*) fail "stale mount exclusion: $arg" ;; esac
+    done
+}
+row_scan_mount_ovh_stack() {
+    scan_fixture
+    mount_entry /srv/onedrive-corsair autofs 42 1
+    mount_entry /srv/onedrive-corsair cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "full scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/onedrive-corsair(/|$)'
+    assert_scan_arg '--exclude=^/srv/onedrive-corsair(/|$)'
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/onedrive-corsair (type=cifs)' <<< "$OUT")" 1 "visible cifs logged once"
+    assert_lacks "$OUT" '(type=autofs)' "covered autofs ignored"
+}
+
+row_scan_path_symlink() {
+    scan_fixture
+    mkdir -p "$D/tree/cloud"; ln -s "$D/tree" "$D/link"
+    mount_entry "$D/tree/cloud" cifs
+    scan --path "$D/link"
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg "$D/tree"
+    local escaped="${D//./\\.}"
+    assert_scan_arg "--exclude-dir=^$escaped/tree/cloud(/|$)"
+    assert_mount_count 1
+    assert_lacks "$(calls)" "$D/link" "scanner walks the physical path"
+}
+row_scan_path_relative() {
+    scan_fixture; mkdir -p "$D/tree"
+    (
+        cd "$D" || exit 1
+        scan --path ./tree/../tree
+        assert_eq "$RC" 0 "scan exit"
+        assert_scan_arg "$D/tree"
+        [ "$ROW_FAILED" = 0 ]
+    ) || fail "relative path row failed"
+}
+row_scan_path_missing() {
+    scan_fixture
+    scan --path "$D/missing/../absent"
+    assert_eq "$RC" 0 "missing path still passed to scanner"
+    assert_scan_arg "$D/absent"
+}
+row_scan_path_on_mount() {
+    scan_fixture; mount_entry /srv/net cifs
+    scan --path /srv/net/sub --path /scratch
+    assert_eq "$RC" 0 "remaining path scanned"
+    assert_scan_arg /scratch
+    assert_lacks "$(calls)" '/srv/net/sub' "network path dropped"
+    assert_eq "$(grep -c 'WARN.*not scanning /srv/net/sub: it is on a cifs mount at /srv/net (set AV_EXCLUDE_FSTYPES= to scan it)' <<< "$OUT")" 1 "one path warning"
+}
+row_scan_paths_all_dropped() {
+    scan_fixture; mount_entry /srv/net cifs
+    scan --path /srv/net --path /srv/net/sub
+    assert_eq "$RC" 0 "nothing left is a successful no-op"
+    assert_lacks "$(calls)" 'clamscan ' "standalone not run"
+    assert_lacks "$(calls)" 'clamdscan ' "daemon not run"
+    assert_lacks "$(calls)" 'timeout ' "timeout not run"
+    assert_eq "$(grep -c 'WARN.*no scan paths remain after mount exclusions; scan not started' <<< "$OUT")" 1 "one empty-list warning"
+    assert_eq "$(grep -c 'WARN.*not scanning' <<< "$OUT")" 2 "one warning per dropped path"
+}
+row_scan_covered_cifs_ext4() {
+    scan_fixture
+    mount_entry /srv/stack ext4 43 42
+    mount_entry /srv/stack cifs 42 1
+    scan --path /srv/stack/sub
+    assert_eq "$RC" 0 "local top mount scanned"
+    assert_scan_arg /srv/stack/sub
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "covered cifs ignored"
+}
+row_scan_covered_ext4_cifs() {
+    scan_fixture
+    mount_entry /srv/stack ext4 42 1
+    mount_entry /srv/stack cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/stack(/|$)'
+}
+row_scan_covered_autofs_ext4() {
+    scan_fixture
+    mount_entry /srv/stack autofs 42 1
+    mount_entry /srv/stack ext4 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "local disk on autofs scanned"
+}
+row_scan_covered_autofs_cifs() {
+    scan_fixture
+    mount_entry /srv/stack autofs 42 1
+    mount_entry /srv/stack cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/stack (type=cifs)' <<< "$OUT")" 1 "top cifs logged once"
+    assert_lacks "$OUT" '(type=autofs)' "covered autofs ignored"
+}
+row_scan_mount_file() {
+    scan_fixture; mount_entry '/srv/a.b' cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg '--exclude-dir=^/srv/a\.b(/|$)'
+    assert_scan_arg '--exclude=^/srv/a\.b(/|$)'
+}
+row_scan_mount_separator() {
+    scan_fixture
+    SCAN_ENV=('AV_EXCLUDE_FSTYPES=*')
+    printf '42 1 0:42 / /srv/bogus rw cifs source rw\n' > "$D/mountinfo"
+    scan --full
+    assert_eq "$RC" 0 "malformed line ignored"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "no bogus exclusion"
+}
+row_scan_mount_last_line() {
+    scan_fixture
+    printf '42 1 0:42 / /srv/last rw - cifs source rw' > "$D/mountinfo"
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/last(/|$)'
+}
+
+row_scan_mount_cifs() {
+    scan_fixture; mount_entry /srv/onedrive-corsair cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_scan_arg '--exclude-dir=^/srv/onedrive-corsair(/|$)'
+    assert_mount_count 1
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/onedrive-corsair (type=cifs)' <<< "$OUT")" 1 "one INFO per mount"
+}
+row_scan_mount_fstypes() {
+    scan_fixture
+    local type
+    for type in autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.sshfs fuse.rclone fuse.gvfsd-fuse; do
+        mount_entry "/net/$type" "$type"
+    done
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 14
+    for type in autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.sshfs fuse.rclone fuse.gvfsd-fuse; do
+        assert_has "$OUT" "(type=$type)" "skipped $type"
+    done
+    assert_scan_arg '--exclude-dir=^/net/autofs(/|$)'
+    assert_scan_arg '--exclude-dir=^/net/nfs4(/|$)'
+    assert_scan_arg '--exclude-dir=^/net/fuse\.sshfs(/|$)'
+}
+row_scan_mount_local_types() {
+    scan_fixture
+    local type
+    for type in overlay ext4 fuseblk xfs btrfs tmpfs; do mount_entry "/local/$type" "$type"; done
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "local mounts retained"
+}
+row_scan_mount_escapes() {
+    scan_fixture
+    mount_entry '/srv/cloud\040files' cifs
+    mount_entry '/srv/a.b+c[1](x){y}^$|?*' nfs4
+    mount_entry '/srv/tab\011name' autofs
+    mount_entry '/srv/new\012line' fuse.sshfs
+    mount_entry '/srv/back\134slash\134040' cifs
+    scan --full
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 5
+    assert_scan_arg '--exclude-dir=^/srv/cloud files(/|$)'
+    assert_scan_arg '--exclude-dir=^/srv/a\.b\+c\[1\]\(x\)\{y\}\^\$\|\?\*(/|$)'
+    assert_scan_arg $'--exclude-dir=^/srv/tab\tname(/|$)'
+    assert_scan_arg $'--exclude-dir=^/srv/new\nline(/|$)'
+    assert_scan_arg '--exclude-dir=^/srv/back\\slash\\040(/|$)'
+    assert_eq "$(grep -c 'INFO.*skipping mount' <<< "$OUT")" 5 "one log line per encoded mount"
+}
+row_scan_mount_outside() {
+    scan_fixture; mount_entry /srv2/share cifs; mount_entry /other autofs
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "outside mounts not logged"
+}
+row_scan_mount_switch() {
+    scan_fixture; mount_entry /srv/cloud cifs
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$OUT" 'INFO' "switch logged"
+    assert_has "$OUT" 'mount exclusions require clamscan; switching from clamdscan' "switch reason"
+    assert_has "$(calls)" 'clamscan ' "standalone called"
+    assert_lacks "$(calls)" 'clamdscan ' "daemon not called"
+    assert_scan_arg '--exclude-dir=^/srv/cloud(/|$)'
+}
+row_scan_mount_daemon_kept() {
+    scan_fixture; mount_entry /other/cloud cifs
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$(calls)" 'clamdscan ' "daemon retained"
+    assert_lacks "$OUT" 'switching' "no switch"
+    assert_lacks "$OUT" 'skipping mount' "outside mount ignored"
+}
+row_scan_mount_disabled() {
+    scan_fixture; mount_entry /srv/cloud cifs
+    SCAN_ENV=(AV_EXCLUDE_FSTYPES= AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_has "$(calls)" 'clamdscan ' "opt-out keeps daemon"
+    assert_lacks "$OUT" 'skipping mount' "opt-out"
+    SCAN_ENV=(AV_EXCLUDE_FSTYPES=)
+    scan --full
+    assert_eq "$RC" 0 "standalone exit"
+    assert_mount_count 0
+}
+row_scan_mount_custom_types() {
+    scan_fixture; mount_entry /srv/cloud cifs; mount_entry /srv/remote custom.remote
+    SCAN_ENV=('AV_EXCLUDE_FSTYPES=custom.*')
+    scan --path /srv
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/remote(/|$)'
+}
+row_scan_mount_paths() {
+    scan_fixture; mount_entry "$PWD/cloud" cifs; mount_entry /srv/exact nfs4
+    mount_entry /unselected fuse
+    scan --path ./dummy/../ --path /srv/exact/
+    assert_eq "$RC" 0 "scan exit"
+    assert_mount_count 1
+    assert_scan_arg "$PWD"
+    assert_lacks "$(calls)" '/srv/exact' "exact network mount path dropped"
+    assert_has "$OUT" 'not scanning /srv/exact:' "exact mount warning"
+}
+row_scan_mount_no_standalone() {
+    scan_fixture; mount_entry /srv/cloud cifs; unstub clamscan
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv
+    assert_eq "$RC" 0 "existing fallback exit"
+    assert_has "$OUT" 'WARN' "warning severity"
+    assert_has "$OUT" 'clamdscan cannot enforce mount exclusions' "limitation loud"
+}
+row_scan_mount_unreadable() {
+    scan_fixture; SCAN_ENV=(AV_MOUNTINFO="$D/missing")
+    scan --full
+    assert_eq "$RC" 2 "cannot safely build exclusions"
+    assert_has "$OUT" 'cannot read mount table' "reason"
+    assert_lacks "$(calls)" 'clamscan ' "scanner not started"
+}
+row_scan_mount_reread() {
+    scan_fixture
+    # The foreground loop calls run_scan repeatedly; exercise that function in
+    # one shell so cached mountinfo would fail the second scan.
+    sed '/^# Default scan target/,$d' "$REPO/bin/av-scan" > "$D/functions"
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+        AV_COLOR=never XDG_STATE_HOME="$H/state" AV_MOUNTINFO="$D/mountinfo" \
+        CALLS="$CALLS" SCAN_ARGS="$D/args" AV_ENGINE=clamscan \
+        "$BASH_BIN" -c '
+            source <(sed "/^# --- locate/,/^av_detect_distro/d" "$1") --now
+            AV_HOME="$2"; source "$2/lib/common.sh"
+            run_scan /srv || exit
+            printf "42 1 0:42 / /srv/new rw - cifs source rw\n" > "$AV_MOUNTINFO"
+            run_scan /srv
+        ' sh "$D/functions" "$REPO" 2>&1)"; RC=$?
+    ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
+    assert_eq "$RC" 0 "two scans exit"
+    assert_scan_arg '--exclude-dir=^/srv/new(/|$)'
+}
+row_scan_timeout() {
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=30)
+    local started=$SECONDS
+    scan --path /scratch
+    assert_eq "$RC" 124 "timeout exit distinct from threats"
+    [ "$((SECONDS - started))" -lt 20 ] || fail "scanner was not stopped early (a 30 s scan, a 2 s limit)"
+    assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "one unfinished warning"
+    assert_lacks "$OUT" 'THREATS FOUND' "timeout is not a finding"
+}
+row_scan_timeout_disabled() {
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=0)
+    stub timeout <<'EOF'
+exit 99
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 0 "no timeout exit"
+    assert_has "$(calls)" 'clamscan ' "scanner ran"
+    assert_lacks "$(calls)" 'timeout ' "timeout not invoked"
+}
+row_scan_timeout_defaults() {
+    scan_fixture
+    stub timeout <<'EOF'
+shift 2
+exec "$@"
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 0 "wrapped exit"
+    assert_has "$(calls)" 'timeout --kill-after=5m 12h clamscan ' "default timeout and kill grace"
+}
+row_scan_timeout_killed() {
+    scan_fixture
+    stub timeout <<'EOF'
+exit 137
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 137 "kill exit distinct from threats"
+    assert_eq "$(grep -c "WARN.*scan was killed (SIGKILL: its time limit's kill-after, or another killer such as the OOM killer) and did not finish" <<< "$OUT")" 1 "killed unfinished warning"
+    assert_lacks "$OUT" 'stopped at its time limit' "SIGKILL cause is uncertain"
+}
+row_scan_threats() {
+    scan_fixture
+    stub clamscan <<'EOF'
+exit 1
+EOF
+    scan --path /scratch
+    assert_eq "$RC" 1 "finding exit preserved"
+    assert_has "$OUT" 'THREATS FOUND' "finding logged"
+}
+
+# Read only the installer's functions or config fragment, never its root entrypoint.
+root_install_fixture() {
+    new_fixture "$ROW"
+    sed -n '/^put() {/,/^keep "\$dst\/bin\/av-scan"/{ /^keep "\$dst\/bin\/av-scan"/d; p; }' \
+        "$REPO/root-install.sh" > "$D/functions"
+}
+root_functions() {
+    OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
+        die() { echo "$*" >&2; exit 1; }
+        source "$1"; shift; "$@"
+    ' sh "$D/functions" "$@" 2>&1)"; RC=$?
+}
+row_root_install_unchanged() {
+    root_install_fixture
+    printf 'same bytes\n' > "$D/source"; cp "$D/source" "$D/dest"
+    local mode
+    for mode in 755 644; do
+        stub stat <<< "echo '0 0 $mode'"
+        root_functions put "$D/source" "0$mode" "$D/dest"
+        assert_eq "$RC" 0 "unchanged exit ($mode)"
+        assert_has "$OUT" "unchanged: $D/dest" "no rewrite ($mode)"
+        assert_nofile "$D/dest.new" "no temporary install ($mode)"
+    done
+}
+row_root_install_backup_failure() {
+    root_install_fixture; printf 'original\n' > "$D/dest"
+    stub cp <<'EOF'
+exit 1
+EOF
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 1 "backup failure is fatal"
+    assert_has "$OUT" 'could not keep' "backup failure reason"
+    assert_nofile "$D/dest.before-R-3377" "no false backup"
+}
+row_root_install_backup_optional() {
+    root_install_fixture
+    stub cp <<'EOF'
+exit 1
+EOF
+    root_functions keep "$D/absent"
+    assert_eq "$RC" 0 "missing file needs no backup"
+    printf 'new\n' > "$D/dest"; printf 'old\n' > "$D/dest.before-R-3377"
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 0 "existing backup kept"
+    assert_eq "$(cat "$D/dest.before-R-3377")" old "first backup unchanged"
+    assert_lacks "$(calls)" 'cp ' "no copy attempted"
+}
+row_root_install_backup_saved() {
+    root_install_fixture; printf 'original\n' > "$D/dest"
+    root_functions keep "$D/dest"
+    assert_eq "$RC" 0 "backup exit"
+    assert_same "$D/dest" "$D/dest.before-R-3377" "backup contents"
+}
+row_root_install_perl_guard() {
+    new_fixture "$ROW"
+    sed -n '/^# The single quotes/,/^put "\$t\/linux-av.conf"/p' \
+        "$REPO/root-install.sh" > "$D/config-fragment"
+    local status
+    for status in 1 0; do
+        stub perl <<< "exit $status"
+        OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
+            die() { echo "$*" >&2; exit 1; }
+            put() { cp "$1" "$t/installed"; }
+            t="$1"; source "$t/config-fragment"
+        ' sh "$D" 2>&1)"; RC=$?
+        assert_eq "$RC" "$status" "Perl status $status"
+        if [ "$status" = 1 ]; then
+            assert_nofile "$D/installed" "invalid Perl never installed"
+            assert_has "$OUT" 'does not parse' "parse refusal reason"
+        else
+            assert_same "$D/linux-av.conf" "$D/installed" "valid Perl installed"
+        fi
+    done
+    assert_has "$(calls)" "perl -c $D/linux-av.conf" "checks the temporary file"
+}
+row_root_install_library_first() {
+    new_fixture "$ROW"
+    # Run just the two put calls with a recording function, without installing anything.
+    sed -n '/^put "\$here\/.*" .*"\$dst\//p' "$REPO/root-install.sh" > "$D/puts"
+    OUT="$("$BASH_BIN" -c '
+        here=tree; dst=dest
+        put() { echo "$1"; }
+        source "$1"
+    ' sh "$D/puts")"
+    assert_eq "$OUT" $'tree/lib/common.sh\ntree/bin/av-scan' "library installed before its consumer"
+}
+
+# The runner refuses root-install.sh unless each "# sha256 <hex> <relpath>" line names its file's
+# current SHA-256; a stale line would only show up on his card. Check them here.
+row_root_install_hashes() {
+    new_fixture "$ROW"
+    local hash sum hex rel n=0
+    while read -r hash sum hex rel; do
+        [ "$hash $sum" = '# sha256' ] || continue
+        n=$((n+1))
+        assert_eq "$(sha256sum < "$REPO/$rel" | cut -c1-64)" "$hex" "root-install.sh lists the SHA-256 of $rel"
+    done < "$REPO/root-install.sh"
+    assert_eq "$n" 2 "root-install.sh lists two files"
+}
+
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

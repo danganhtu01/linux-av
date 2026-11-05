@@ -54,15 +54,10 @@ choose_engine() {
     else echo ""; fi
 }
 
-# Physical absolute path, with a lexical fallback for missing paths.
+# Lexical absolute path, without stat/readlink on mounts.
 # REPLY preserves even trailing newlines in a pathname.
 scan_path_absolute() {
-    local path="$1" part resolved
-    # The sentinel preserves trailing newlines in the resolved pathname.
-    if resolved="$(realpath -e -- "$path" 2>/dev/null && printf '.')"; then
-        REPLY="${resolved%$'\n.'}"
-        return
-    fi
+    local path="$1" part
     [[ $path = /* ]] || path="$PWD/$path"
     path="$path/"; REPLY=""
     while [ -n "$path" ]; do
@@ -80,13 +75,11 @@ scan_path_absolute() {
 run_scan() {
     local engine paths=("$@")
     local -a mount_excludes=() scan_paths=() fstype_patterns=() fields=()
-    local -a mount_ids=() mount_points=() mount_types=()
-    local -A covered=()
+    local -a mount_ids=() mount_parents=() mount_points=() mount_types=()
+    local -a skipped_points=() skipped_types=()
+    local -A covered=() mount_index=()
     local p line mount fstype pattern matched escaped char label path_label REPLY i idx
-    for p in "${paths[@]}"; do
-        scan_path_absolute "$p"; scan_paths+=("$REPLY")
-    done
-    paths=("${scan_paths[@]}")
+    local cursor parent parent_idx steps reachable stage resolved
     if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
         [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
         read -r -a fstype_patterns <<< "$AV_EXCLUDE_FSTYPES"
@@ -94,12 +87,32 @@ run_scan() {
             [[ $line = *' - '* ]] || continue
             read -r -a fields <<< "$line"
             mount="${fields[4]}"; fstype="${line#* - }"; fstype="${fstype%% *}"
-            mount_ids+=("${fields[0]}"); mount_points+=("$mount"); mount_types+=("$fstype")
-            covered["${fields[1]}:$mount"]=1
+            mount_index["${fields[0]}"]="${#mount_ids[@]}"
+            mount_ids+=("${fields[0]}"); mount_parents+=("${fields[1]}")
+            mount_points+=("$mount"); mount_types+=("$fstype")
+            if [ "${fields[1]}" != "${fields[0]}" ]; then
+                covered["${fields[1]}:$mount"]=1
+            fi
         done < "$AV_MOUNTINFO"
         for idx in "${!mount_ids[@]}"; do
             mount="${mount_points[idx]}"; fstype="${mount_types[idx]}"
             [ "${covered["${mount_ids[idx]}:$mount"]:-0}" = 1 ] && continue
+            # Stacked entries can reach their parent even when it is covered;
+            # entries inside a parent need that parent to be the top at its point.
+            reachable=0; cursor="$idx"
+            for ((steps=0; steps<${#mount_ids[@]}; steps++)); do
+                parent="${mount_parents[cursor]}"
+                parent_idx="${mount_index[$parent]:-}"
+                if [ "$parent" = "${mount_ids[cursor]}" ] || [ -z "$parent_idx" ]; then
+                    reachable=1; break
+                fi
+                if [ "${mount_points[cursor]}" != "${mount_points[parent_idx]}" ] &&
+                    [ "${covered["$parent:${mount_points[parent_idx]}"]:-0}" = 1 ]; then
+                    break
+                fi
+                cursor="$parent_idx"
+            done
+            [ "$reachable" = 1 ] || continue
             matched=0
             for pattern in "${fstype_patterns[@]}"; do
                 # The patterns are globs (fuse.* covers fuse.sshfs), so the right side stays unquoted.
@@ -112,39 +125,64 @@ run_scan() {
             mount="${mount//\\011/$'\t'}"
             mount="${mount//\\012/$'\n'}"
             mount="${mount//\\134/\\}"
-            printf -v label '%q' "$mount"
-            matched=0; scan_paths=()
-            for p in "${paths[@]}"; do
-                if [[ $mount = / || $p = "$mount" || $p = "$mount/"* ]]; then
-                    printf -v path_label '%q' "$p"
-                    log_warn "not scanning $path_label: it is on a $fstype mount at $label (set AV_EXCLUDE_FSTYPES= to scan it)"
-                    continue
-                fi
-                scan_paths+=("$p")
-                if [[ $p = / || $mount = "$p" || $mount = "$p/"* ]]; then
-                    matched=1
-                fi
-            done
-            paths=("${scan_paths[@]}")
-            [ "$matched" = 1 ] || continue
-            escaped=""
-            for ((i=0; i<${#mount}; i++)); do
-                char="${mount:i:1}"
-                case "$char" in
-                    '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
-                esac
-                escaped+="$char"
-            done
-            mount_excludes+=("--exclude-dir=^${escaped}(/|$)")
-            mount_excludes+=("--exclude=^${escaped}(/|$)")
-            log_info "skipping mount $label (type=$fstype)"
+            skipped_points+=("$mount"); skipped_types+=("$fstype")
         done
     fi
 
+    # Check paths before collecting any exclusions for the paths that survive.
+    for p in "${paths[@]}"; do
+        scan_path_absolute "$p"; p="$REPLY"
+        matched=0
+        for stage in lexical physical; do
+            if [ "$stage" = physical ]; then
+                # The sentinel preserves trailing newlines in the resolved pathname.
+                if resolved="$(realpath -m -- "$p" 2>/dev/null && printf '.')"; then
+                    p="${resolved%$'\n.'}"
+                fi
+            fi
+            for idx in "${!skipped_points[@]}"; do
+                mount="${skipped_points[idx]}"; fstype="${skipped_types[idx]}"
+                if [[ $mount = / || $p = "$mount" || $p = "$mount/"* ]]; then
+                    printf -v label '%q' "$mount"
+                    printf -v path_label '%q' "$p"
+                    log_warn "not scanning $path_label: it is on a $fstype mount at $label (set AV_EXCLUDE_FSTYPES= to scan it)"
+                    matched=1; break
+                fi
+            done
+            [ "$matched" = 0 ] || break
+        done
+        [ "$matched" = 0 ] && scan_paths+=("$p")
+    done
+    paths=("${scan_paths[@]}")
     if [ "${#paths[@]}" -eq 0 ]; then
         log_warn "no scan paths remain after mount exclusions; scan not started"
         return 0
     fi
+
+    # Exclude mounts only below the kept paths.
+    for idx in "${!skipped_points[@]}"; do
+        mount="${skipped_points[idx]}"; fstype="${skipped_types[idx]}"
+        matched=0
+        for p in "${paths[@]}"; do
+            if [[ $p = / || $mount = "$p" || $mount = "$p/"* ]]; then
+                matched=1; break
+            fi
+        done
+        [ "$matched" = 1 ] || continue
+        escaped=""
+        for ((i=0; i<${#mount}; i++)); do
+            char="${mount:i:1}"
+            case "$char" in
+                '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
+            esac
+            escaped+="$char"
+        done
+        mount_excludes+=("--exclude-dir=^${escaped}(/|$)")
+        mount_excludes+=("--exclude=^${escaped}(/|$)")
+        printf -v label '%q' "$mount"
+        log_info "skipping mount $label (type=$fstype)"
+    done
+    # End mount exclusions.
     engine="$(choose_engine)"
     [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
 

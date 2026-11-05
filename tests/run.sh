@@ -635,7 +635,7 @@ scan_fixture() {
     new_fixture "$ROW"
     ln -s "$(command -v timeout)" "$B/timeout"
     ln -s "$(command -v realpath)" "$B/realpath"
-    : > "$D/mountinfo"
+    MOUNT_NEXT=42; : > "$D/mountinfo"
     printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
     stub clamscan <<'EOF'
 printf '%s\0' "$@" > "$SCAN_ARGS"
@@ -670,7 +670,80 @@ assert_mount_count() {
     assert_scan_arg '--exclude-dir=^/legacy'
 }
 mount_entry() {
-    printf '%s %s 0:42 / %s rw shared:1 - %s source rw\n' "${3:-42}" "${4:-1}" "$1" "$2" >> "$D/mountinfo"
+    local id="${3:-$MOUNT_NEXT}"
+    MOUNT_NEXT=$((id + 1))
+    printf '%s %s 0:42 / %s rw shared:1 - %s source rw\n' "$id" "${4:-1}" "$1" "$2" >> "$D/mountinfo"
+}
+
+row_scan_path_dead_mount() {
+    scan_fixture; mount_entry /srv/net cifs
+    stub realpath <<'EOF'
+exit 99
+EOF
+    scan --path /srv/net/sub
+    assert_eq "$RC" 0 "dead mount is a successful no-op"
+    assert_lacks "$(calls)" 'realpath ' "no path lookup on the dead mount"
+    assert_lacks "$(calls)" 'clamscan ' "scanner not called"
+    assert_has "$OUT" 'not scanning /srv/net/sub:' "lexical path dropped"
+}
+row_scan_path_missing_symlink() {
+    scan_fixture; mount_entry /srv/net cifs
+    ln -s /srv/net "$D/alias"
+    scan --path "$D/alias/missing/../kept"
+    assert_eq "$RC" 0 "missing component through a symlink is a no-op"
+    assert_lacks "$(calls)" 'clamscan ' "resolved network path not scanned"
+    assert_has "$OUT" 'not scanning /srv/net/kept:' "link resolved with a missing component"
+}
+row_scan_mount_self_parent() {
+    scan_fixture
+    printf '42 42 0:42 / / rw - nfs src rw\n' > "$D/mountinfo"
+    scan --path /scratch
+    assert_eq "$RC" 0 "network root is a successful no-op"
+    assert_lacks "$(calls)" 'clamscan ' "network root not scanned"
+    assert_has "$OUT" 'not scanning /scratch: it is on a nfs mount at / ' "self-parent root counts"
+}
+row_scan_mount_hidden_child() {
+    scan_fixture
+    mount_entry /srv/net cifs 42 1
+    mount_entry /srv/net/sub nfs 43 42
+    mount_entry /srv/net ext4 44 42
+    scan --path /srv/net/sub
+    assert_eq "$RC" 0 "local covering mount scanned"
+    assert_scan_arg /srv/net/sub
+    assert_mount_count 0
+    assert_lacks "$OUT" 'not scanning' "hidden child cannot drop a path"
+    scan --full
+    assert_eq "$RC" 0 "full scan exit"
+    assert_mount_count 0
+    assert_lacks "$OUT" 'skipping mount' "hidden child cannot add exclusions"
+}
+row_scan_mount_dropped_parent() {
+    scan_fixture
+    mount_entry /srv/net/sub nfs 43 42
+    mount_entry /srv/net cifs 42 1
+    SCAN_ENV=(AV_ENGINE=clamdscan)
+    scan --path /srv/net --path /safe
+    assert_eq "$RC" 0 "safe path scanned"
+    assert_scan_arg /safe
+    assert_has "$(calls)" 'clamdscan ' "daemon retained for safe path"
+    assert_lacks "$(calls)" 'clamscan ' "no unnecessary switch"
+    assert_lacks "$OUT" 'skipping mount' "dropped path adds no exclusions"
+    local arg
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in --exclude-dir=*|--exclude=*) fail "stale mount exclusion: $arg" ;; esac
+    done
+}
+row_scan_mount_ovh_stack() {
+    scan_fixture
+    mount_entry /srv/onedrive-corsair autofs 42 1
+    mount_entry /srv/onedrive-corsair cifs 43 42
+    scan --full
+    assert_eq "$RC" 0 "full scan exit"
+    assert_mount_count 1
+    assert_scan_arg '--exclude-dir=^/srv/onedrive-corsair(/|$)'
+    assert_scan_arg '--exclude=^/srv/onedrive-corsair(/|$)'
+    assert_eq "$(grep -c 'INFO.*skipping mount /srv/onedrive-corsair (type=cifs)' <<< "$OUT")" 1 "visible cifs logged once"
+    assert_lacks "$OUT" '(type=autofs)' "covered autofs ignored"
 }
 
 row_scan_path_symlink() {

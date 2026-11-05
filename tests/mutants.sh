@@ -18,6 +18,11 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'scan_self_parent~bin/av-scan~s/if \[ "${fields\[1\]}" != "${fields\[0\]}" \]; then/if true; then/~scan_mount_self_parent'
+'scan_reachable~bin/av-scan~s/\[ "$reachable" = 1 \] || continue/:/~scan_mount_hidden_child'
+'scan_lexical_precheck~bin/av-scan~s/for stage in lexical physical/for stage in physical/~scan_path_dead_mount'
+'scan_realpath_missing~bin/av-scan~s/realpath -m --/realpath -e --/~scan_path_missing_symlink'
+'scan_two_pass~bin/av-scan~:a;N;$!ba;s/\(    # Check paths.*\)\(    # Exclude mounts.*    # End mount exclusions\.\n\)/\2\1/~scan_mount_dropped_parent'
 'scan_fstype_match~bin/av-scan~s/\[\[ $fstype = $pattern \]\]/false/~scan_mount_cifs'
 'scan_local_type_guard~bin/av-scan~s/\[\[ $fstype = $pattern \]\]/true/~scan_mount_local_types'
 'scan_octal_decode~bin/av-scan~/^            mount="${mount\/\//d~scan_mount_escapes'
@@ -31,7 +36,7 @@ MUTANTS=(
 'scan_timeout_wrap~bin/av-scan~s/runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")/runner=()/~scan_timeout'
 'scan_timeout_optout~bin/av-scan~s/\[ "$AV_SCAN_TIMEOUT" != 0 \]/true/~scan_timeout_disabled'
 'scan_timeout_status~bin/av-scan~/^        124) log_warn/d;/^        137) log_warn/d~scan_timeout scan_timeout_killed'
-'scan_realpath~bin/av-scan~s/realpath -e --/false --/~scan_path_symlink'
+'scan_realpath~bin/av-scan~s/realpath -m --/false --/~scan_path_symlink'
 'scan_drop_path~bin/av-scan~s/\[\[ $mount = \/ || $p = "$mount" || $p = "$mount\/"\* \]\]/false/~scan_path_on_mount'
 'scan_empty_paths~bin/av-scan~/^    if \[ "${#paths\[@\]}" -eq 0 \]; then/,/^    fi$/d~scan_paths_all_dropped'
 'scan_covered_mount~bin/av-scan~/^            \[ "${covered\[/d~scan_covered_cifs_ext4 scan_covered_autofs_ext4 scan_covered_autofs_cifs'
@@ -126,7 +131,7 @@ MUTANTS=(
 SELECT=" $* "
 KILLED=0; SURVIVED=0
 
-# The unmutated copy must be green for every row first, or "red" would mean nothing.
+# The unmutated copy must be green for each selected row first, or red means nothing.
 copy_to() { # dir
     mkdir -p "$1"
     cp -r "$REPO/bin" "$REPO/lib" "$REPO/tests" "$1/"
@@ -139,8 +144,19 @@ run_rows() { # dir rows...
     AV_TEST_KEEP=1 "$dir/tests/run.sh" "$@" 2>&1
 }
 
+# A selected run proves only its own rows, keeping scoped checks scoped.
+BASELINE_ROWS=()
+if [ "$#" -gt 0 ]; then
+    for m in "${MUTANTS[@]}"; do
+        IFS='~' read -r name file expr rows <<< "$m"
+        case "$SELECT" in *" $name "*) : ;; *) continue ;; esac
+        read -r -a selected_rows <<< "$rows"
+        BASELINE_ROWS+=("${selected_rows[@]}")
+    done
+    [ "${#BASELINE_ROWS[@]}" -gt 0 ] || { echo "no matching mutants"; exit 2; }
+fi
 copy_to "$WORK/clean"
-if ! out="$(run_rows "$WORK/clean")"; then
+if ! out="$(run_rows "$WORK/clean" "${BASELINE_ROWS[@]}")"; then
     printf '%s\n' "$out" | tail -n 20
     echo "the unmutated copy is not green; no mutant can be judged"
     exit 1

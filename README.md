@@ -268,15 +268,19 @@ a mount excluded by `AV_EXCLUDE_FSTYPES`. If `clamscan` is missing, it warns tha
 the daemon cannot enforce those exclusions.
 Force either engine with `--engine clamscan|clamdscan` or `AV_ENGINE=`.
 
-Each scan resolves existing scan paths with `realpath -e` and passes those physical,
-absolute paths to the scanner; missing paths keep their lexical absolute form.
+Each scan checks a lexical absolute path against skipped mounts before any
+`realpath` call, so a path already on a dead network mount is dropped without
+probing it. Remaining paths resolve with `realpath -m`, including symlinks with
+missing components; only a failed resolution keeps the lexical absolute form.
+The resolved paths are checked again and passed to the scanner.
 It reads `/proc/self/mountinfo` (`AV_MOUNTINFO` overrides it), using mount IDs and
-parent IDs to ignore entries covered at the same mount point. Remote filesystems,
-automounts, `fuse`, and `fuse.*` are skipped by default. A scan path on a skipped
-mount is dropped with a warning; if none remain, the scan returns 0 without
-starting a scanner. Mount points below a selected path add escaped, anchored
-`--exclude-dir` and `--exclude` regexes, covering directories and file mounts,
-so excluding `/srv/cloud` keeps `/srv/cloud2`.
+parent IDs so only mounts that path lookup can reach count: covered entries and
+their hidden children are ignored, while the top of a stack remains visible.
+Remote filesystems, automounts, `fuse`, and `fuse.*` are skipped by default.
+A scan path on a skipped mount is dropped with a warning; if none remain, the
+scan returns 0 without starting a scanner. Mount points below a selected path
+add escaped, anchored `--exclude-dir` and `--exclude` regexes, covering directories
+and file mounts, so excluding `/srv/cloud` keeps `/srv/cloud2`.
 `AV_EXCLUDE_FSTYPES` accepts space-separated shell patterns. Local `fuseblk` disks
 and other local filesystems remain included unless reached through a skipped mount.
 

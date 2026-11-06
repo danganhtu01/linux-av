@@ -1,4 +1,5 @@
 #!/bin/sh
+# exempt: GNU-ONLY OVH (Ubuntu, GNU coreutils), run as root through /usr/local/sbin/ovh-root-run
 # root-install.sh: install linux-av's root-owned copy on OVH from this tree, as root, through /usr/local/sbin/ovh-root-run
 # (a tree step of linux-av@<commit>; C-10). OC-T-0046, R-3377: his words 2026-11-05, "Stop the antivirus scans jobs now.
 # Resume it after the fix is live, which could be later." This is the fix; a separate card starts the timer.

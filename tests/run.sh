@@ -1112,6 +1112,41 @@ row_scan_vanished_only() {
     assert_has "$OUT" 'scan finished; 2 file(s) vanished while it ran (not scanned), no other errors' "warning"
     assert_has "$OUT" "$(cat "$D/output")" "scanner output unchanged and ordered"
 }
+row_scan_vanished_empty_list() {
+    scan_vanished_fixture; scan_vanished_summary
+    stub mktemp <<'STUB'
+copy="${SCAN_ARGS%/*}/scan-copy"
+mkdir "$copy"
+/bin/ln -s /dev/null "$copy/vanished"
+printf '%s\n' "$copy"
+STUB
+    scan_vanished_check
+    assert_eq "$RC" 2 "empty list cannot account for warnings"
+}
+row_scan_vanished_unsearchable() {
+    scan_vanished_fixture; mkdir "$D/locked"; touch "$D/locked/present"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/locked/present" > "$D/output"
+    scan_vanished_summary 1
+    chmod 000 "$D/locked"
+    scan_vanished_check
+    chmod 700 "$D/locked"
+    assert_eq "$RC" 2 "unsearchable parent cannot prove absence"
+}
+row_scan_vanished_read_failure() {
+    scan_vanished_fixture; scan_vanished_summary
+    cat > "$D/read-failure" <<'STUB'
+read() {
+    if [ "$1" = -r ] && [ "${2:-}" = line ]; then
+        if [ "${READ_ONCE:-0}" = 1 ]; then return 1; fi
+        READ_ONCE=1
+    fi
+    builtin read "$@"
+}
+STUB
+    SCAN_ENV+=(BASH_ENV="$D/read-failure")
+    scan_vanished_check
+    assert_eq "$RC" 2 "partial read failure terminates and keeps error"
+}
 row_scan_vanished_write_failure() {
     scan_vanished_fixture; touch "$D/gone1"; scan_vanished_summary
     stub mktemp <<'STUB'
@@ -1494,6 +1529,7 @@ row_scan_vanished_symlink_component() {
 row_scan_vanished_probe_bounded() {
     scan_vanished_fixture; scan_vanished_summary
     stub timeout <<'STUB'
+printf 2
 exit 137
 STUB
     scan_vanished_check; assert_eq "$RC" 2 "a killed probe keeps the error"

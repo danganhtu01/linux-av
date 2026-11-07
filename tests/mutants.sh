@@ -18,6 +18,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'vanished_probed_count~bin/av-scan~/\[ "$probed" = "$count" \] || bad=1/d~scan_vanished_empty_list'
+'vanished_probe_condition~bin/av-scan~s@\[ "$count" -gt 0 \]; then@[ -s "$copy_dir/vanished" ]; then@~scan_vanished_empty_list'
+'vanished_parent_access~bin/av-scan~/if \[ -e "$q" \]; then \[ -d "$q" \] \&\& \[ -x "$q" \] || exit 1; fi/d~scan_vanished_unsearchable'
+'vanished_read_reset~bin/av-scan~s/while line=; IFS= read/while IFS= read/~scan_vanished_read_failure'
 'vanished_write_failure~bin/av-scan~s@>> "$copy_dir/vanished" || bad=1@>> "$copy_dir/vanished"@~scan_vanished_write_failure'
 'vanished_relative~bin/av-scan~/\[\[ $p = \/\* \]\] || { bad=1; continue; }/d~scan_vanished_relative_full'
 'vanished_skipped_mount~bin/av-scan~/for root in "${skipped_points\[@\]}"; do/,/done/d~scan_vanished_skipped_mount'
@@ -25,7 +29,7 @@ MUTANTS=(
 'vanished_noncanonical~bin/av-scan~s/\*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*)/*\/..\/*)/~scan_vanished_noncanonical'
 'vanished_symlink_component~bin/av-scan~s/\[ ! -L "$q" \] || exit 1/:/~scan_vanished_symlink_component'
 'vanished_probe_limit~bin/av-scan~s/timeout -s KILL 60s "$BASH" -c/"$BASH" -c/~scan_vanished_probe_bounded'
-'vanished_probe_closed~bin/av-scan~s/< "$copy_dir\/vanished" || bad=1/< "$copy_dir\/vanished" || :/~scan_vanished_probe_bounded'
+'vanished_probe_closed~bin/av-scan~s/< "$copy_dir\/vanished")" || bad=1/< "$copy_dir\/vanished")" || :/~scan_vanished_probe_bounded'
 'vanished_stderr~bin/av-scan~s/ 2>\&1 | tee/ | tee/~scan_vanished_stderr'
 'vanished_infected_required~bin/av-scan~s/\[ "${detail_seen\[Infected files\]:-0}" = 1 \]/true/~scan_vanished_missing_infected'
 'vanished_detail_unique~bin/av-scan~/\[ "${detail_seen\[\$kind\]:-0}" = 0 \] || bad=1/d~scan_vanished_duplicate_infected scan_vanished_duplicate_details'

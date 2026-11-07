@@ -74,7 +74,7 @@ scan_path_absolute() {
 # The caller supplies engine, args, paths, and runner through bash local scope.
 # Only the output copy, traps, pipe, and whitelist need a subshell.
 run_clamscan_checked() (
-    local copy_dir copy resolved line p root matched kind rc=0
+    local copy_dir copy resolved line p root matched kind probed rc=0
     local escaped char i count=0 summary="" bad=0 headers=0 total_seen=0
     local -A detail_seen=()
     local warning_re="^WARNING: Can't open file (.+): No such file or directory$" summary_re="^Total errors: ([0-9]+)$"
@@ -101,7 +101,7 @@ run_clamscan_checked() (
     local -a statuses=("${PIPESTATUS[@]}")
     rc=${statuses[0]}
     if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
+        while line=; IFS= read -r line || [ -n "$line" ]; do
             if [[ $line =~ $warning_re ]]; then
                 [ "$headers" = 0 ] || bad=1
                 p="${BASH_REMATCH[1]}"
@@ -143,18 +143,23 @@ run_clamscan_checked() (
                 bad=1
             fi
         done < "$copy"
-        # Probe once, under a kill limit, and never through a symlinked folder:
-        # a FUSE or network mount reached there could block root past the scan limit.
-        if [ "$bad" = 0 ] && [ -s "$copy_dir/vanished" ]; then
-            timeout -s KILL 60s "$BASH" -c '
+        # Probe every listed path under a kill limit, rejecting symlinks and
+        # inaccessible existing parent directories before checking absence.
+        if [ "$bad" = 0 ] && [ "$count" -gt 0 ]; then
+            probed="$(timeout -s KILL 60s "$BASH" -c '
+                n=0
                 while IFS= read -r -d "" p; do
                     q=""; r="${p#/}"
                     while [[ $r = */* ]]; do
                         q+="/${r%%/*}"; r="${r#*/}"
                         [ ! -L "$q" ] || exit 1
+                        if [ -e "$q" ]; then [ -d "$q" ] && [ -x "$q" ] || exit 1; fi
                     done
                     [ ! -L "$p" ] && [ ! -e "$p" ] || exit 1
-                done' < "$copy_dir/vanished" || bad=1
+                    n=$((n + 1))
+                done
+                printf "%s" "$n"' < "$copy_dir/vanished")" || bad=1
+            [ "$probed" = "$count" ] || bad=1
         fi
         if [ "$bad" = 0 ] && [ "$headers" = 1 ] && [ "$total_seen" = 1 ] && [ "${detail_seen[Infected files]:-0}" = 1 ] && [ -n "$summary" ] && [ "$count" -gt 0 ] && [ "$summary" = "$count" ]; then
             log_warn "scan finished; $count file(s) vanished while it ran (not scanned), no other errors"

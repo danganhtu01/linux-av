@@ -236,29 +236,51 @@ run_scan() (
     fi
     # clamdscan output differs; its exit handling remains unchanged.
     if [ "$engine" = clamscan ]; then
-        local copy line p count=0 summary="" bad=0
+        local copy_dir copy line p count=0 summary="" bad=0 headers=0
         local warning_re="^WARNING: Can't open file (.+): No such file or directory$" summary_re="^Total errors: ([0-9]+)$"
-        copy="$(umask 077; mktemp "${TMPDIR:-/tmp}/av-scan.XXXXXX")" || { log_err "cannot create scan output copy"; return 2; }
-        trap 'rm -f -- "$copy"' EXIT
+        local detail_re='^(Known viruses: [0-9]+|Engine version: [0-9][0-9.]*|Scanned directories: [0-9]+|Scanned files: [0-9]+|Infected files: 0|Data scanned: [0-9.]+ [KMGT]?i?B|Data read: [0-9.]+ [KMGT]?i?B \(ratio [0-9.]+:[0-9.]+\)|Time: [0-9.]+ sec \([0-9]+ m [0-9]+ s\)|Start Date: [0-9:]+ [0-9:]+|End Date: +[0-9:]+ [0-9:]+)$'
+        copy_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/av-scan.XXXXXX")" || { log_err "cannot create scan output copy"; return 2; }
+        trap 'rm -rf -- "$copy_dir"' EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
         trap 'exit 129' HUP
+        copy="$copy_dir/output"
+        # TMPDIR may be below a scan target. Escape exactly as for mount points.
+        escaped=""
+        for ((i=0; i<${#copy_dir}; i++)); do
+            char="${copy_dir:i:1}"
+            case "$char" in
+                '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
+            esac
+            escaped+="$char"
+        done
+        args+=("--exclude-dir=^${escaped}(/|$)" "--exclude=^${escaped}(/|$)")
         "${runner[@]}" "$engine" "${args[@]}" "${paths[@]}" | tee "$copy"
         local -a statuses=("${PIPESTATUS[@]}")
         rc=${statuses[0]}
         if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ]; then
             while IFS= read -r line || [ -n "$line" ]; do
                 if [[ $line =~ $warning_re ]]; then
+                    [ "$headers" = 0 ] || bad=1
                     p="${BASH_REMATCH[1]}"; count=$((count + 1))
                     [ ! -e "$p" ] && [ ! -L "$p" ] || bad=1
+                elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then
+                    headers=$((headers + 1))
+                    [ "$headers" = 1 ] || bad=1
                 elif [[ $line =~ $summary_re ]]; then
+                    [ "$headers" = 1 ] && [ -z "$summary" ] || bad=1
                     summary="${BASH_REMATCH[1]}"
                     while [[ $summary = 0* ]]; do summary=${summary#0}; done
-                elif [[ $line = WARNING:* || $line = ERROR:* || $line = LibClamAV\ Error* ]]; then
+                elif [ -z "$line" ]; then
+                    :
+                elif [[ $line =~ $detail_re ]]; then
+                    [ "$headers" = 1 ] || bad=1
+                else
+                    # Reject every unknown line, including split filename fragments.
                     bad=1
                 fi
             done < "$copy"
-            if [ "$bad" = 0 ] && [ -n "$summary" ] && [ "$count" -gt 0 ] && [ "$summary" = "$count" ]; then
+            if [ "$bad" = 0 ] && [ "$headers" = 1 ] && [ -n "$summary" ] && [ "$count" -gt 0 ] && [ "$summary" = "$count" ]; then
                 log_warn "scan finished; $count file(s) vanished while it ran (not scanned), no other errors"
                 return 0
             fi

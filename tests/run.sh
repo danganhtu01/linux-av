@@ -46,7 +46,7 @@ assert_same() { cmp -s "$1" "$2" || fail "$3: $1 and $2 differ"; }
 # ---------------------------------------------------------------------------
 # fixture
 # ---------------------------------------------------------------------------
-TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee sleep cmp ls"
+TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee sleep cmp ls stat"
 
 # new_fixture NAME [debian|arch]  -> sets R (AV_ROOT), B (PATH dir), H (HOME), CALLS
 new_fixture() {
@@ -631,6 +631,7 @@ row_av_root_refused_as_root() {
 # ---------------------------------------------------------------------------
 # Scan fixtures: neither scanner touches the supplied paths, even for /.
 # Arguments are NUL-delimited to preserve spaces, tabs, and newlines.
+# OC-T-0047 round 2: strict output whitelist and private-copy isolation regressions.
 scan_fixture() {
     new_fixture "$ROW"
     ln -s "$(command -v timeout)" "$B/timeout"
@@ -645,15 +646,44 @@ EOF
 printf '%s\0' "$@" > "$SCAN_ARGS"
 exit 0
 EOF
+    mkdir -p "$B/plain"
+    ln -s "$(command -v tee)" "$B/plain/tee"
+    stub tee <<'EOF'
+printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
+stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
+exec "${BASH_SOURCE[0]%/*}/plain/tee" "$@"
+EOF
     SCAN_ENV=()
 }
 scan() {
+    : > "$D/copies"; : > "$D/copy-modes"
     OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
         AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
         AV_MOUNTINFO="$D/mountinfo" AV_ENGINE=clamscan SCAN_ARGS="$D/args" \
         CALLS="$CALLS" "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" "$@" --now 2>&1)"
     RC=$?
     ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
+    assert_copy_isolation
+}
+assert_copy_isolation() {
+    local copy dir escaped char i mode
+    while IFS= read -r copy; do
+        dir="${copy%/*}"
+        assert_nofile "$dir" "private copy directory removed"
+        escaped=""
+        for ((i=0; i<${#dir}; i++)); do
+            char="${dir:i:1}"
+            case "$char" in
+                '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') escaped+="\\" ;;
+            esac
+            escaped+="$char"
+        done
+        assert_scan_arg "--exclude-dir=^${escaped}(/|$)"
+        assert_scan_arg "--exclude=^${escaped}(/|$)"
+    done < "$D/copies"
+    while IFS= read -r mode; do
+        assert_eq "$mode" 700 "private copy directory mode"
+    done < "$D/copy-modes"
 }
 assert_scan_arg() {
     local arg count=0
@@ -665,8 +695,10 @@ assert_mount_count() {
     for arg in "${ARGS[@]}"; do
         case "$arg" in --exclude-dir=*) count=$((count + 1)) ;; esac
     done
-    # One unchanged AV_EXCLUDE_DIRS argument, plus the mount exclusions.
-    assert_eq "$count" "$(($1 + 1))" "mount exclusion count"
+    # AV_EXCLUDE_DIRS, mount exclusions, and (for clamscan) its private copy.
+    local copies=0
+    [ ! -f "$D/copies" ] || copies="$(wc -l < "$D/copies")"
+    assert_eq "$count" "$(($1 + 1 + copies))" "mount exclusion count"
     assert_scan_arg '--exclude-dir=^/legacy'
 }
 mount_entry() {
@@ -995,6 +1027,10 @@ row_scan_mount_reread() {
     ARGS=(); [ ! -f "$D/args" ] || mapfile -d '' -t ARGS < "$D/args"
     assert_eq "$RC" 0 "two scans exit"
     assert_scan_arg '--exclude-dir=^/srv/new(/|$)'
+    local copy
+    while IFS= read -r copy; do
+        assert_nofile "${copy%/*}" "repeated scan copy directory removed"
+    done < "$D/copies"
 }
 row_scan_timeout() {
     scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=30)
@@ -1028,6 +1064,8 @@ EOF
 row_scan_timeout_killed() {
     scan_fixture
     stub timeout <<'EOF'
+shift 3
+printf '%s\0' "$@" > "$SCAN_ARGS"
 exit 137
 EOF
     scan --path /scratch
@@ -1037,18 +1075,22 @@ EOF
 }
 row_scan_threats() {
     scan_fixture
+    SCAN_ENV=(AV_ON_FOUND='printf "hook ran\n" >> "$CALLS"')
     stub clamscan <<'EOF'
+printf '%s\0' "$@" > "$SCAN_ARGS"
 exit 1
 EOF
     scan --path /scratch
     assert_eq "$RC" 1 "finding exit preserved"
     assert_has "$OUT" 'THREATS FOUND' "finding logged"
+    assert_has "$(calls)" 'hook ran' "AV_ON_FOUND still runs in subshell"
 }
 
 scan_vanished_fixture() {
     scan_fixture
     SCAN_ENV=(AV_SCAN_TIMEOUT=0 OUTPUT="$D/output" SCAN_RC=2)
     stub clamscan <<'STUB'
+printf '%s\0' "$@" > "$SCAN_ARGS"
 cat "$OUTPUT"
 exit "$SCAN_RC"
 STUB
@@ -1056,12 +1098,13 @@ STUB
 }
 scan_vanished_check() {
     scan --path /scratch
-    local files=("$D"/av-scan.*)
-    [ ! -e "${files[0]}" ] || fail "temporary scan copy remains"
+}
+scan_vanished_summary() {
+    printf '\n----------- SCAN SUMMARY -----------\nTotal errors: %s\n' "${1:-2}" >> "$D/output"
 }
 row_scan_vanished_only() {
     scan_vanished_fixture
-    printf 'Total errors: 2\n' >> "$D/output"
+    scan_vanished_summary
     scan_vanished_check
     assert_eq "$RC" 0 "vanished exit"
     assert_has "$OUT" 'scan finished; 2 file(s) vanished while it ran (not scanned), no other errors' "warning"
@@ -1069,40 +1112,147 @@ row_scan_vanished_only() {
 }
 row_scan_vanished_permission() {
     scan_vanished_fixture
-    printf "WARNING: Can't open file %s: Permission denied\nTotal errors: 2\n" "$D/denied" >> "$D/output"
+    printf "WARNING: Can't open file %s: Permission denied\n" "$D/denied" >> "$D/output"
+    scan_vanished_summary
     scan_vanished_check
     assert_eq "$RC" 2 "permission exit"
     assert_has "$OUT" 'scanner error (rc=2)' "error logged"
 }
 row_scan_vanished_mismatch() {
-    scan_vanished_fixture; printf 'Total errors: 3\n' >> "$D/output"; scan_vanished_check
+    scan_vanished_fixture; scan_vanished_summary 3; scan_vanished_check
     assert_eq "$RC" 2 "mismatch exit"
 }
 row_scan_vanished_no_summary() {
-    scan_vanished_fixture; scan_vanished_check
+    scan_vanished_fixture; printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
     assert_eq "$RC" 2 "missing summary exit"
 }
 row_scan_vanished_reappeared() {
-    scan_vanished_fixture; touch "$D/gone1"; printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
+    scan_vanished_fixture; touch "$D/gone1"; scan_vanished_summary; scan_vanished_check
     assert_eq "$RC" 2 "reappeared exit"
 }
 row_scan_vanished_newline() {
     scan_vanished_fixture
-    printf "WARNING: Can't open file %s\n%s: No such file or directory\nTotal errors: 1\n" "$D/line" 'break' > "$D/output"
+    printf "WARNING: Can't open file %s\n%s: No such file or directory\n" "$D/line" 'break' > "$D/output"
+    scan_vanished_summary 1
     scan_vanished_check; assert_eq "$RC" 2 "newline exit"
 }
 row_scan_vanished_threat() {
-    scan_vanished_fixture; SCAN_ENV+=(SCAN_RC=1); printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
+    scan_vanished_fixture; SCAN_ENV+=(SCAN_RC=1); scan_vanished_summary; scan_vanished_check
     assert_eq "$RC" 1 "threat exit"; assert_has "$OUT" 'THREATS FOUND' "threat warning"
 }
 row_scan_vanished_clamdscan() {
-    scan_vanished_fixture; printf 'Total errors: 2\n' >> "$D/output"
+    scan_vanished_fixture; scan_vanished_summary
     stub clamdscan <<'STUB'
 cat "$OUTPUT"
 exit 2
 STUB
     SCAN_ENV+=(AV_ENGINE=clamdscan); scan_vanished_check
     assert_eq "$RC" 2 "daemon error exit"
+}
+row_scan_vanished_split_reason() {
+    scan_vanished_fixture
+    local reason
+    for reason in 'Permission denied' 'Input/output error' 'Operation not permitted'; do
+        printf "WARNING: Can't open file %s: No such file or directory\nb: %s\n" "$D/gone" "$reason" > "$D/output"
+        scan_vanished_summary 1
+        scan_vanished_check
+        assert_eq "$RC" 2 "split filename with $reason"
+    done
+}
+row_scan_vanished_unknown() {
+    scan_vanished_fixture
+    printf 'unexpected scanner output\n' >> "$D/output"
+    scan_vanished_summary; scan_vanished_check
+    assert_eq "$RC" 2 "unknown line exit"
+}
+row_scan_vanished_infected() {
+    scan_vanished_fixture; scan_vanished_summary
+    printf 'Infected files: 1\n' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "nonzero infections with rc 2"
+}
+row_scan_vanished_two_summaries() {
+    scan_vanished_fixture; scan_vanished_summary
+    printf '%s\n' '----------- SCAN SUMMARY -----------' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "duplicate header exit"
+}
+row_scan_vanished_after_summary() {
+    scan_vanished_fixture; scan_vanished_summary 3
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone3" >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "late vanished warning exit"
+}
+row_scan_vanished_found() {
+    scan_vanished_fixture; scan_vanished_summary
+    printf '%s\n' '/scratch/eicar: Eicar-Test-Signature FOUND' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "FOUND line with rc 2"
+}
+row_scan_vanished_summary_shapes() {
+    scan_vanished_fixture
+    cp "$D/output" "$D/vanished"
+    local line
+    for line in \
+        'Known viruses: x' 'Engine version: v1.5.4' \
+        'Scanned directories: -1' 'Scanned files: 1 trailing' \
+        'Infected files: 00' 'Total errors: 2 trailing' \
+        'Data scanned: 108.33 XB' 'Data read: 90.14 GiB (ratio x:1)' \
+        'Time: 33916.104 sec (565 m x s)' \
+        'Start Date: 2026-11-06 11:15:34' 'End Date: 2026:11:06 20:40:50 extra' \
+        'prefix Known viruses: 3628245' 'Known viruses: 3628245 suffix'; do
+        cp "$D/vanished" "$D/output"; scan_vanished_summary
+        printf '%s\n' "$line" >> "$D/output"
+        scan_vanished_check; assert_eq "$RC" 2 "invalid summary line: $line"
+    done
+}
+row_scan_vanished_summary_order() {
+    scan_vanished_fixture
+    printf 'Known viruses: 3628245\n' >> "$D/output"
+    scan_vanished_summary; scan_vanished_check
+    assert_eq "$RC" 2 "summary detail before header"
+}
+row_scan_vanished_total_order() {
+    scan_vanished_fixture
+    printf 'Total errors: 2\n\n----------- SCAN SUMMARY -----------\n' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "total before header"
+}
+row_scan_vanished_duplicate_total() {
+    scan_vanished_fixture; scan_vanished_summary
+    printf 'Total errors: 2\n' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "duplicate total"
+}
+row_scan_vanished_real_summary() {
+    scan_vanished_fixture
+    : > "$D/output"
+    local n
+    for ((n=1; n<=21; n++)); do
+        printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone$n" >> "$D/output"
+    done
+    cat >> "$D/output" <<'EOF'
+
+----------- SCAN SUMMARY -----------
+Known viruses: 3628245
+Engine version: 1.5.4
+Scanned directories: 453297
+Scanned files: 1316902
+Infected files: 0
+Total errors: 21
+Data scanned: 108.33 GiB
+Data read: 90.14 GiB (ratio 1.20:1)
+Time: 33916.104 sec (565 m 16 s)
+Start Date: 2026:11:06 11:15:34
+End Date:   2026:11:06 20:40:50
+EOF
+    scan_vanished_check; assert_eq "$RC" 0 "real 2026-11-06 output forgiven"
+    assert_has "$OUT" 'scan finished; 21 file(s) vanished while it ran (not scanned), no other errors' "real scan warning"
+    assert_has "$OUT" "$(cat "$D/output")" "real scanner output unchanged and ordered"
+}
+row_scan_vanished_copy_excluded() {
+    scan_vanished_fixture; scan_vanished_summary
+    # Regex metacharacters in TMPDIR must be escaped in both exclusions.
+    local tmp="$D/copy.[x]+(y){z}^\$|?*"
+    mkdir -p "$tmp"
+    SCAN_ENV+=(TMPDIR="$tmp")
+    scan --path "$D"
+    assert_eq "$RC" 0 "copy below scanned path excluded"
+    assert_eq "$(wc -l < "$D/copies")" 1 "one output copy"
 }
 # Read only the installer functions, never its root entrypoint.
 root_install_fixture() {

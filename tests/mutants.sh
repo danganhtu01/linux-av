@@ -18,6 +18,15 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'vanished_stderr~bin/av-scan~s/ 2>\&1 | tee/ | tee/~scan_vanished_stderr'
+'vanished_infected_required~bin/av-scan~s/\[ "${detail_seen\[Infected files\]:-0}" = 1 \]/true/~scan_vanished_missing_infected'
+'vanished_detail_unique~bin/av-scan~/\[ "${detail_seen\[\$kind\]:-0}" = 0 \] || bad=1/d~scan_vanished_duplicate_infected scan_vanished_duplicate_details'
+'vanished_zero_total_seen~bin/av-scan~s/\[ "$total_seen" = 0 \]/[ -z "$summary" ]/~scan_vanished_zero_then_total'
+'vanished_physical_copy~bin/av-scan~s/copy_dir="$resolved"/:/~scan_vanished_physical_copy'
+'vanished_copy_resolution~bin/av-scan~s/resolved="$(cd -P -- "$copy_dir" \&\& pwd -P)"/resolved="$copy_dir"/~scan_vanished_copy_resolution_failure'
+'vanished_kept_paths~bin/av-scan~/\[ "$matched" = 1 \] || { bad=1; continue; }/d~scan_vanished_outside_paths'
+'scan_function_scope~bin/av-scan~/^run_scan() {/,/^}$/ { s/^run_scan() {/run_scan() (/; s/^}$/)/; }~scan_scheduled_no_engine scan_scheduled_hook_exit'
+'vanished_residual~MASTER.md~/^Residual: clamscan prints file names/d~scan_vanished_residual_documented'
 'vanished_count~bin/av-scan~s/\[ "$summary" = "$count" \]/true/~scan_vanished_mismatch'
 'vanished_absent~bin/av-scan~s/\[ ! -e "$p" \] \&\& \[ ! -L "$p" \] || bad=1/:/~scan_vanished_reappeared'
 'vanished_daemon~bin/av-scan~s/if \[ "$engine" = clamscan \]; then/if true; then/g~scan_vanished_clamdscan'
@@ -28,7 +37,7 @@ MUTANTS=(
 'vanished_header_required~bin/av-scan~s/\[ "$headers" = 1 \]/true/g~scan_vanished_no_summary'
 'vanished_before_summary~bin/av-scan~/\[ "$headers" = 0 \] || bad=1/d~scan_vanished_after_summary'
 'vanished_detail_order~bin/av-scan~/elif \[\[ $line =. $detail_re \]\]; then/{n;s/.*bad=1/                    :/;}~scan_vanished_summary_order'
-'vanished_total_order~bin/av-scan~/\[ "$headers" = 1 \] \&\& \[ -z "$summary" \] || bad=1/d~scan_vanished_total_order scan_vanished_duplicate_total'
+'vanished_total_order~bin/av-scan~/\[ "$headers" = 1 \] \&\& \[ "$total_seen" = 0 \] || bad=1/d~scan_vanished_total_order scan_vanished_duplicate_total'
 'vanished_copy_exclude~bin/av-scan~/args+=("--exclude-dir=\^${escaped}.*"--exclude=/d~scan_vanished_copy_excluded'
 'scan_self_parent~bin/av-scan~s/if \[ "${fields\[1\]}" != "${fields\[0\]}" \]; then/if true; then/~scan_mount_self_parent'
 'scan_reachable~bin/av-scan~s/\[ "$reachable" = 1 \] || continue/:/~scan_mount_hidden_child'

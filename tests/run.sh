@@ -22,6 +22,7 @@ HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${AV_REPO_UNDER_TEST:-$(cd -P "$HERE/.." && pwd)}"
 BASH_BIN="$(command -v bash)"
 ENV_BIN="$(command -v env)"
+TIMEOUT_BIN="$(command -v timeout)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-test.XXXXXX")" || exit 2
 if [ "${AV_TEST_KEEP:-0}" != 1 ]; then
     trap 'rm -rf "${WORK:?}"' EXIT
@@ -46,7 +47,7 @@ assert_same() { cmp -s "$1" "$2" || fail "$3: $1 and $2 differ"; }
 # ---------------------------------------------------------------------------
 # fixture
 # ---------------------------------------------------------------------------
-TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee sleep cmp ls stat"
+TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee cmp ls stat"
 
 # new_fixture NAME [debian|arch]  -> sets R (AV_ROOT), B (PATH dir), H (HOME), CALLS
 new_fixture() {
@@ -640,7 +641,10 @@ scan_fixture() {
     printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
     stub clamscan <<'EOF'
 printf '%s\0' "$@" > "$SCAN_ARGS"
-exec sleep "${STUB_SCAN_SLEEP:-0}"
+if [ "${STUB_SCAN_LOOP:-0}" = 1 ]; then
+    while :; do :; done
+fi
+exit 0
 EOF
     stub clamdscan <<'EOF'
 printf '%s\0' "$@" > "$SCAN_ARGS"
@@ -657,7 +661,7 @@ EOF
 }
 scan() {
     : > "$D/copies"; : > "$D/copy-modes"
-    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+    OUT="$("$TIMEOUT_BIN" 3s "$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
         AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
         AV_MOUNTINFO="$D/mountinfo" AV_ENGINE=clamscan SCAN_ARGS="$D/args" \
         CALLS="$CALLS" "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" "$@" --now 2>&1)"
@@ -1033,11 +1037,9 @@ row_scan_mount_reread() {
     done < "$D/copies"
 }
 row_scan_timeout() {
-    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=2s STUB_SCAN_SLEEP=30)
-    local started=$SECONDS
+    scan_fixture; SCAN_ENV=(AV_SCAN_TIMEOUT=0.1s STUB_SCAN_LOOP=1)
     scan --path /scratch
     assert_eq "$RC" 124 "timeout exit distinct from threats"
-    [ "$((SECONDS - started))" -lt 20 ] || fail "scanner was not stopped early (a 30 s scan, a 2 s limit)"
     assert_eq "$(grep -c 'WARN.*stopped at its time limit.*did not finish' <<< "$OUT")" 1 "one unfinished warning"
     assert_lacks "$OUT" 'THREATS FOUND' "timeout is not a finding"
 }
@@ -1083,7 +1085,7 @@ EOF
     scan --path /scratch
     assert_eq "$RC" 1 "finding exit preserved"
     assert_has "$OUT" 'THREATS FOUND' "finding logged"
-    assert_has "$(calls)" 'hook ran' "AV_ON_FOUND still runs in subshell"
+    assert_has "$(calls)" 'hook ran' "AV_ON_FOUND still runs"
 }
 
 scan_vanished_fixture() {
@@ -1097,10 +1099,10 @@ STUB
     printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone1" "$D/gone2" > "$D/output"
 }
 scan_vanished_check() {
-    scan --path /scratch
+    scan --path "$D"
 }
 scan_vanished_summary() {
-    printf '\n----------- SCAN SUMMARY -----------\nTotal errors: %s\n' "${1:-2}" >> "$D/output"
+    printf '\n----------- SCAN SUMMARY -----------\nInfected files: 0\nTotal errors: %s\n' "${1:-2}" >> "$D/output"
 }
 row_scan_vanished_only() {
     scan_vanished_fixture
@@ -1123,7 +1125,7 @@ row_scan_vanished_mismatch() {
     assert_eq "$RC" 2 "mismatch exit"
 }
 row_scan_vanished_no_summary() {
-    scan_vanished_fixture; printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
+    scan_vanished_fixture; printf 'Infected files: 0\nTotal errors: 2\n' >> "$D/output"; scan_vanished_check
     assert_eq "$RC" 2 "missing summary exit"
 }
 row_scan_vanished_reappeared() {
@@ -1167,7 +1169,7 @@ row_scan_vanished_unknown() {
 }
 row_scan_vanished_infected() {
     scan_vanished_fixture; scan_vanished_summary
-    printf 'Infected files: 1\n' >> "$D/output"
+    sed -i 's/Infected files: 0/Infected files: 1/' "$D/output"
     scan_vanished_check; assert_eq "$RC" 2 "nonzero infections with rc 2"
 }
 row_scan_vanished_two_summaries() {
@@ -1210,7 +1212,7 @@ row_scan_vanished_summary_order() {
 }
 row_scan_vanished_total_order() {
     scan_vanished_fixture
-    printf 'Total errors: 2\n\n----------- SCAN SUMMARY -----------\n' >> "$D/output"
+    printf 'Total errors: 2\n\n----------- SCAN SUMMARY -----------\nInfected files: 0\n' >> "$D/output"
     scan_vanished_check; assert_eq "$RC" 2 "total before header"
 }
 row_scan_vanished_duplicate_total() {
@@ -1244,6 +1246,115 @@ EOF
     assert_has "$OUT" 'scan finished; 21 file(s) vanished while it ran (not scanned), no other errors' "real scan warning"
     assert_has "$OUT" "$(cat "$D/output")" "real scanner output unchanged and ordered"
 }
+# OC-T-0047 round 3: every row below also fails against 4adfd96.
+row_scan_vanished_stderr() {
+    scan_vanished_fixture; scan_vanished_summary
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+cat "$OUTPUT"
+printf '%s\n' 'LibClamAV Error: read failed' >&2
+exit 2
+STUB
+    scan_vanished_check
+    assert_eq "$RC" 2 "stderr error prevents forgiveness"
+    assert_has "$OUT" 'LibClamAV Error: read failed' "stderr reaches journal stream"
+}
+row_scan_vanished_missing_infected() {
+    scan_vanished_fixture; scan_vanished_summary
+    sed -i '/^Infected files:/d' "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "infected count required"
+}
+row_scan_vanished_duplicate_infected() {
+    scan_vanished_fixture; scan_vanished_summary
+    printf 'Infected files: 0\n' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "duplicate infected count"
+}
+row_scan_vanished_duplicate_details() {
+    scan_vanished_fixture
+    cp "$D/output" "$D/warnings"
+    local line
+    for line in \
+        'Known viruses: 3628245' 'Engine version: 1.5.4' \
+        'Scanned directories: 453297' 'Scanned files: 1316902' \
+        'Data scanned: 108.33 GiB' 'Data read: 90.14 GiB (ratio 1.20:1)' \
+        'Time: 33916.104 sec (565 m 16 s)' \
+        'Start Date: 2026:11:06 11:15:34' 'End Date:   2026:11:06 20:40:50'; do
+        cp "$D/warnings" "$D/output"; scan_vanished_summary
+        printf '%s\n%s\n' "$line" "$line" >> "$D/output"
+        scan_vanished_check; assert_eq "$RC" 2 "duplicate summary kind: $line"
+    done
+}
+row_scan_vanished_zero_then_total() {
+    scan_vanished_fixture; scan_vanished_summary 0
+    printf 'Total errors: 2\n' >> "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "zero total cannot hide a duplicate"
+}
+row_scan_vanished_physical_copy() {
+    scan_vanished_fixture; scan_vanished_summary
+    mkdir "$D/physical"
+    ln -s "$D/physical" "$D/alias"
+    SCAN_ENV+=(TMPDIR="$D/alias")
+    scan_vanished_check
+    assert_eq "$RC" 0 "symlinked TMPDIR scan"
+    local copy
+    while IFS= read -r copy; do
+        case "$copy" in "$D/physical/av-scan."*/output) : ;;
+            *) fail "copy and its checked exclusions must use the physical path" ;;
+        esac
+    done < "$D/copies"
+    assert_eq "$(wc -l < "$D/copies")" 1 "one physical copy"
+}
+row_scan_vanished_copy_resolution_failure() {
+    scan_vanished_fixture; scan_vanished_summary
+    stub mktemp <<'STUB'
+printf '%s\n' "${SCAN_ARGS%/*}/missing-copy"
+STUB
+    scan_vanished_check
+    assert_eq "$RC" 2 "copy resolution failure"
+    assert_has "$OUT" 'cannot create scan output copy' "copy failure diagnostic"
+    assert_lacks "$(calls)" 'clamscan ' "scanner not started without resolved copy"
+}
+row_scan_vanished_outside_paths() {
+    scan_vanished_fixture
+    printf "WARNING: Can't open file /nonexistent-outside-scan: No such file or directory\n" > "$D/output"
+    scan_vanished_summary 1
+    scan_vanished_check; assert_eq "$RC" 2 "outside path not probed or counted"
+}
+scan_scheduled_check() {
+    # If run_scan becomes a subshell again, the loop must time out, never sleep.
+    stub sleep </dev/null
+    OUT="$("$TIMEOUT_BIN" 0.3s "$ENV_BIN" -i PATH="$B" HOME="$H" \
+        AV_ROOT="$R" AV_CONFIG="$H/av.env" AV_COLOR=never TMPDIR="$D" \
+        XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
+        AV_MOUNTINFO="$D/mountinfo" CALLS="$CALLS" SCAN_ARGS="$D/args" \
+        AV_SCAN_TIMEOUT=0 "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" \
+        --path "$D" --scheduled 1 2>&1)"
+    RC=$?
+}
+row_scan_scheduled_no_engine() {
+    scan_fixture; unstub clamscan; unstub clamdscan
+    SCAN_ENV=(AV_ENGINE=auto)
+    scan_scheduled_check
+    assert_eq "$RC" 1 "missing engine exits scheduled runner"
+    assert_has "$OUT" 'no ClamAV scanner found' "missing engine diagnostic"
+    assert_lacks "$(calls)" 'sleep ' "no further scheduled iteration"
+}
+row_scan_scheduled_hook_exit() {
+    scan_fixture
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+exit 1
+STUB
+    SCAN_ENV=(AV_ENGINE=clamscan AV_ON_FOUND='exit 1')
+    scan_scheduled_check
+    assert_eq "$RC" 1 "hook exit stops scheduled runner"
+    assert_has "$OUT" 'THREATS FOUND' "hook reached after finding"
+    assert_lacks "$(calls)" 'sleep ' "hook stops further scheduled iterations"
+}
+row_scan_vanished_residual_documented() {
+    assert_has "$(cat "$REPO/MASTER.md")" 'Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder) without a line. A local user who races the scan with a vanishing file whose name holds a newline and a forged warning can offset one such error. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.' "residual documented verbatim"
+}
+
 row_scan_vanished_copy_excluded() {
     scan_vanished_fixture; scan_vanished_summary
     # Regex metacharacters in TMPDIR must be escaped in both exclusions.

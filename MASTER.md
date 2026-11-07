@@ -178,7 +178,7 @@ is absent. `av-setup status` prints each scanner's report location and mail stat
 ### Tests — `tests/run.sh`, `tests/mutants.sh`
 
 ```bash
-tests/run.sh                  # every row, 94 at the time of writing; or name rows to run
+tests/run.sh                  # every row; or name rows to run
 tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
 ```
 
@@ -235,10 +235,16 @@ remaining paths means a successful no-op. Local filesystems, including `fuseblk`
 remain included unless reached through a skipped mount. An empty setting
 disables this feature. `AV_SCAN_TIMEOUT` defaults to `12h`; `timeout` stops a longer
 scan, with a 5-minute kill grace, and logs that it did not finish (exit 124).
-A clamscan exit 2 becomes a warning and exits 0 only when every output line matches
-the vanished-file or scan-summary whitelist, exactly one summary follows all vanished
-warnings, and its positive error total matches the paths still absent. Any unknown
+A clamscan exit 2 becomes a warning and exits 0 only when every stdout and stderr line
+matches the vanished-file or scan-summary whitelist. Exactly one summary header follows
+all vanished warnings, with exactly one `Infected files: 0` line and one positive
+`Total errors` count matching the paths still absent under the kept scan paths.
+No summary line kind may appear twice. The private output copy uses its physical
+directory path for both the copy and scanner exclusions, including with a symlinked
+`TMPDIR`. Only the clamscan output check runs in a subshell; missing-engine errors
+and an `exit` in `AV_ON_FOUND` still stop the foreground scheduled runner. Any unknown
 line or nonzero infected count keeps exit 2; other scanner errors remain failures.
+Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder) without a line. A local user who races the scan with a vanishing file whose name holds a newline and a forged warning can offset one such error. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.
@@ -270,7 +276,7 @@ Every tracked file in this repository.
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
-| `tests/run.sh` | The suite: 94 rows, bash only, no root. |
+| `tests/run.sh` | The suite: bash only, no root; includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |

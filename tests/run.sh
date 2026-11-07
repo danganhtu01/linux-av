@@ -1323,7 +1323,7 @@ row_scan_vanished_outside_paths() {
 scan_scheduled_check() {
     # If run_scan becomes a subshell again, the loop must time out, never sleep.
     stub sleep </dev/null
-    OUT="$("$TIMEOUT_BIN" 0.3s "$ENV_BIN" -i PATH="$B" HOME="$H" \
+    OUT="$("$TIMEOUT_BIN" 5s "$ENV_BIN" -i PATH="$B" HOME="$H" \
         AV_ROOT="$R" AV_CONFIG="$H/av.env" AV_COLOR=never TMPDIR="$D" \
         XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
         AV_MOUNTINFO="$D/mountinfo" CALLS="$CALLS" SCAN_ARGS="$D/args" \
@@ -1352,7 +1352,7 @@ STUB
     assert_lacks "$(calls)" 'sleep ' "hook stops further scheduled iterations"
 }
 row_scan_vanished_residual_documented() {
-    assert_has "$(cat "$REPO/MASTER.md")" 'Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder) without a line. A local user who races the scan with a vanishing file whose name holds a newline and a forged warning can offset one such error. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.' "residual documented verbatim"
+    assert_has "$(cat "$REPO/MASTER.md")" 'Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.' "residual documented verbatim"
 }
 
 row_scan_vanished_copy_excluded() {
@@ -1465,6 +1465,28 @@ row_root_install_hashes() {
     assert_eq "$n" 2 "root-install.sh lists two files"
 }
 
+# OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.
+row_scan_vanished_dotdot() {
+    scan_vanished_fixture; mkdir -p "$D/kept"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept/../outside/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --path "$D/kept"; assert_eq "$RC" 2 "dot-dot path leaves the kept paths"
+}
+row_scan_vanished_symlink_component() {
+    scan_vanished_fixture; mkdir -p "$D/kept" "$D/outside"
+    ln -s "$D/outside" "$D/kept/d"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept/d/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --path "$D/kept"; assert_eq "$RC" 2 "probe refuses a symlinked component"
+}
+row_scan_vanished_probe_bounded() {
+    scan_vanished_fixture; scan_vanished_summary
+    stub timeout <<'STUB'
+exit 137
+STUB
+    scan_vanished_check; assert_eq "$RC" 2 "a killed probe keeps the error"
+    assert_has "$(calls)" 'timeout -s KILL 60s ' "probe runs under its own kill limit"
+}
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

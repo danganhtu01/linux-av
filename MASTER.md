@@ -244,7 +244,7 @@ directory path for both the copy and scanner exclusions, including with a symlin
 `TMPDIR`. Only the clamscan output check runs in a subshell; missing-engine errors
 and an `exit` in `AV_ON_FOUND` still stop the foreground scheduled runner. Any unknown
 line or nonzero infected count keeps exit 2; other scanner errors remain failures.
-Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder) without a line. A local user who races the scan with a vanishing file whose name holds a newline and a forged warning can offset one such error. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.
+Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.

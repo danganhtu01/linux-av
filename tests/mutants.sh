@@ -18,6 +18,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot'
+'vanished_symlink_component~bin/av-scan~s/\[ ! -L "$q" \] || exit 1/:/~scan_vanished_symlink_component'
+'vanished_probe_limit~bin/av-scan~s/timeout -s KILL 60s "$BASH" -c/"$BASH" -c/~scan_vanished_probe_bounded'
+'vanished_probe_closed~bin/av-scan~s/< "$copy_dir\/vanished" || bad=1/< "$copy_dir\/vanished" || :/~scan_vanished_probe_bounded'
 'vanished_stderr~bin/av-scan~s/ 2>\&1 | tee/ | tee/~scan_vanished_stderr'
 'vanished_infected_required~bin/av-scan~s/\[ "${detail_seen\[Infected files\]:-0}" = 1 \]/true/~scan_vanished_missing_infected'
 'vanished_detail_unique~bin/av-scan~/\[ "${detail_seen\[\$kind\]:-0}" = 0 \] || bad=1/d~scan_vanished_duplicate_infected scan_vanished_duplicate_details'
@@ -28,7 +32,7 @@ MUTANTS=(
 'scan_function_scope~bin/av-scan~/^run_scan() {/,/^}$/ { s/^run_scan() {/run_scan() (/; s/^}$/)/; }~scan_scheduled_no_engine scan_scheduled_hook_exit'
 'vanished_residual~MASTER.md~/^Residual: clamscan prints file names/d~scan_vanished_residual_documented'
 'vanished_count~bin/av-scan~s/\[ "$summary" = "$count" \]/true/~scan_vanished_mismatch'
-'vanished_absent~bin/av-scan~s/\[ ! -e "$p" \] \&\& \[ ! -L "$p" \] || bad=1/:/~scan_vanished_reappeared'
+'vanished_absent~bin/av-scan~s/\[ ! -L "$p" \] \&\& \[ ! -e "$p" \] || exit 1/:/~scan_vanished_reappeared'
 'vanished_daemon~bin/av-scan~s/if \[ "$engine" = clamscan \]; then/if true; then/g~scan_vanished_clamdscan'
 'vanished_cleanup~bin/av-scan~/trap .*rm -rf --.*copy_dir.* EXIT/d~scan_vanished_only'
 'vanished_unknown~bin/av-scan~/Reject every unknown line/{n;s/bad=1/:/;}~scan_vanished_unknown scan_vanished_split_reason scan_vanished_found'

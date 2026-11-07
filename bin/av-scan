@@ -113,8 +113,9 @@ run_clamscan_checked() (
                 done
                 # Do not probe a forged path outside the kept scan paths.
                 [ "$matched" = 1 ] || { bad=1; continue; }
+                case "$p/" in */../*) bad=1; continue ;; esac
                 count=$((count + 1))
-                [ ! -e "$p" ] && [ ! -L "$p" ] || bad=1
+                printf '%s\0' "$p" >> "$copy_dir/vanished"
             elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then
                 headers=$((headers + 1))
                 [ "$headers" = 1 ] || bad=1
@@ -135,6 +136,19 @@ run_clamscan_checked() (
                 bad=1
             fi
         done < "$copy"
+        # Probe once, under a kill limit, and never through a symlinked folder:
+        # a FUSE or network mount reached there could block root past the scan limit.
+        if [ "$bad" = 0 ] && [ -s "$copy_dir/vanished" ]; then
+            timeout -s KILL 60s "$BASH" -c '
+                while IFS= read -r -d "" p; do
+                    q=""; r="${p#/}"
+                    while [[ $r = */* ]]; do
+                        q+="/${r%%/*}"; r="${r#*/}"
+                        [ ! -L "$q" ] || exit 1
+                    done
+                    [ ! -L "$p" ] && [ ! -e "$p" ] || exit 1
+                done' < "$copy_dir/vanished" || bad=1
+        fi
         if [ "$bad" = 0 ] && [ "$headers" = 1 ] && [ "$total_seen" = 1 ] && [ "${detail_seen[Infected files]:-0}" = 1 ] && [ -n "$summary" ] && [ "$count" -gt 0 ] && [ "$summary" = "$count" ]; then
             log_warn "scan finished; $count file(s) vanished while it ran (not scanned), no other errors"
             return 0

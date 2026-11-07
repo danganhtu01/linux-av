@@ -1,0 +1,63 @@
+# fault records (conventions.md C-64). One field a line, written by the records tool; a hand edit stays allowed and records check reads it.
+
+[[fault]]
+id = "FAULT-0001"
+status = "open"
+raised = "202611071811VN"
+build = "OC-T-0047"
+severity = "Medium"
+rule = "none"
+where = "bin/av-scan:104"
+fault = """
+The copy parse loop cannot tell a read error from end of file: with two vanished warnings, Infected files: 0 and Total errors: 2 followed by an unknown error line, an EISDIR on the read after Total errors ends the loop early and the scan is forgiven (rc 0, the Codex critic's repro).
+Needs an I/O error reading the root-only private copy.
+Fix candidate: branch codex/build/oc-t-0047-vanished-r10 at 354292e, not security-passed; its Codex critic (run 20261107T180456-1374187) failed it on a parser-side read injection.
+"""
+base = "e218946"
+head = "0a195a5"
+verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/runs/20261107T174046-1462295 (round 9 FAIL); critic-security workflow wf_4c4aa267-7e4 (round 9 CLEAR), session 3188114e; chief ruling CA-A-0372"
+
+[[fault]]
+id = "FAULT-0002"
+status = "open"
+raised = "202611071811VN"
+build = "OC-T-0047"
+severity = "Low"
+rule = "none"
+where = "tests/run.sh:1135"
+fault = """
+row_scan_vanished_read_failure never fails a read after a line was read; the mutant vanished_read_reset is caught only because set -u stops on an unset line, so a stale-line replay with line initialised would pass the row.
+Fix candidate: branch codex/build/oc-t-0047-vanished-r10 at 354292e, not security-passed; its Codex critic (run 20261107T180456-1374187) failed it on a parser-side read injection.
+"""
+base = "e218946"
+head = "0a195a5"
+verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/runs/20261107T174046-1462295 (round 9 FAIL); critic-security workflow wf_4c4aa267-7e4 (round 9 CLEAR), session 3188114e; chief ruling CA-A-0372"
+
+[[fault]]
+id = "FAULT-0003"
+status = "open"
+raised = "202611071811VN"
+build = "OC-T-0047"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:158"
+fault = "A stat error on the vanished path itself (EACCES from a FUSE mount without allow_other, a security-module denial, a path over PATH_MAX) reads as absent. os-config declined a fix (C-39): it adds nothing beyond the forged-name residual in MASTER.md, and FUSE types are excluded before the probe."
+base = "e218946"
+head = "0a195a5"
+verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/runs/20261107T174046-1462295 (round 9 FAIL); critic-security workflow wf_4c4aa267-7e4 (round 9 CLEAR), session 3188114e; chief ruling CA-A-0372"
+
+[[fault]]
+id = "FAULT-0004"
+status = "open"
+raised = "202611071811VN"
+build = "OC-T-0047"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:184"
+fault = """
+Inherited from main: the mount-table loop in run_scan keeps the old line on a read error and replays it until TimeoutStartSec; it never passes a scan.
+Fix candidate: branch codex/build/oc-t-0047-vanished-r10 at 354292e, not security-passed; its Codex critic (run 20261107T180456-1374187) failed it on a parser-side read injection.
+"""
+base = "e218946"
+head = "0a195a5"
+verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/runs/20261107T174046-1462295 (round 9 FAIL); critic-security workflow wf_4c4aa267-7e4 (round 9 CLEAR), session 3188114e; chief ruling CA-A-0372"

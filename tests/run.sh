@@ -1487,6 +1487,31 @@ STUB
     scan_vanished_check; assert_eq "$RC" 2 "a killed probe keeps the error"
     assert_has "$(calls)" 'timeout -s KILL 60s ' "probe runs under its own kill limit"
 }
+row_scan_vanished_relative_full() {
+    scan_vanished_fixture; mkdir -p "$D/cwd" "$D/outside"
+    ln -s "$D/outside" "$D/cwd/link"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "link/gone" > "$D/output"
+    scan_vanished_summary 1
+    local oldpwd="$PWD"
+    cd "$D/cwd" || return 1
+    scan --full
+    cd "$oldpwd" || return 1
+    assert_eq "$RC" 2 "relative path rejected under full scan"
+}
+row_scan_vanished_absolute_full() {
+    scan_vanished_fixture
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --full; assert_eq "$RC" 0 "absolute vanished path under full scan"
+}
+row_scan_vanished_skipped_mount() {
+    scan_vanished_fixture; mkdir -p "$D/kept/m"
+    mount_entry "$D/kept/m" fuse.sshfs
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept/m/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --path "$D/kept"; assert_eq "$RC" 2 "no probe below a skipped mount"
+    assert_lacks "$(calls)" 'timeout -s KILL' "probe not started below a skipped mount"
+}
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

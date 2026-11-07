@@ -105,6 +105,7 @@ run_clamscan_checked() (
             if [[ $line =~ $warning_re ]]; then
                 [ "$headers" = 0 ] || bad=1
                 p="${BASH_REMATCH[1]}"
+                [[ $p = /* ]] || { bad=1; continue; }
                 matched=0
                 for root in "${paths[@]}"; do
                     if [[ $root = / || $p = "$root/"* ]]; then
@@ -112,6 +113,12 @@ run_clamscan_checked() (
                     fi
                 done
                 # Do not probe a forged path outside the kept scan paths.
+                [ "$matched" = 1 ] || { bad=1; continue; }
+                # Never probe below a mount the scan skipped (FUSE, network, automount):
+                # clamscan did not walk there, so such a line is forged.
+                for root in "${skipped_points[@]}"; do
+                    if [[ $p = "$root" || $p = "$root/"* ]]; then matched=0; break; fi
+                done
                 [ "$matched" = 1 ] || { bad=1; continue; }
                 case "$p/" in */../*) bad=1; continue ;; esac
                 count=$((count + 1))

@@ -1573,6 +1573,20 @@ row_scan_vanished_noncanonical() {
     scan --path "$D/kept"; assert_eq "$RC" 2 "a // spelling is refused"
     assert_lacks "$(calls)" 'timeout -s KILL' "no probe for a non-canonical path"
 }
+row_installer_hash_lines() {
+    local line hash path count=0 actual
+    while IFS= read -r line; do
+        count=$((count + 1))
+        if [[ ! $line =~ ^\#\ sha256\ ([0-9a-f]{64})\ ([A-Za-z0-9._+/-]+)$ ]]; then
+            fail "malformed sha256 line: $line"
+            continue
+        fi
+        hash=${BASH_REMATCH[1]}; path=${BASH_REMATCH[2]}
+        actual=$(sha256sum "$REPO/$path") || { fail "cannot hash $path"; continue; }
+        assert_eq "${actual%% *}" "$hash" "sha256 of $path"
+    done < <(grep -E '^[[:space:]]*#[[:space:]]*sha256' "$REPO/root-install.sh")
+    [ "$count" -gt 0 ] || fail "no sha256 lines found"
+}
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

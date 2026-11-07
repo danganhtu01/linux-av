@@ -278,6 +278,7 @@ Every tracked file in this repository.
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
 | `tests/run.sh` | The suite: bash only, no root; includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
+| `FAULTS.toml` | Faults a review found and left open when a build landed (R-3443, R-3446), one entry each with its severity, place, base and head; written only by the records tool (`records add fault`, `records set`). OC-T-0047 filed FAULT-0001 to FAULT-0004 there on 2026-11-07. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |
 | `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@` and `@PATHS@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# exempt: GNU-ONLY GNU/Linux hosts only (Debian, Ubuntu and Arch, the distros linux-av supports): sed -i, find -printf, stat -c
 # tests/run.sh — linux-av's test suite (bash, no dependencies, no root).
 #
 #   tests/run.sh               run every row

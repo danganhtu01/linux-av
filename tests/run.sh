@@ -1112,6 +1112,18 @@ row_scan_vanished_only() {
     assert_has "$OUT" 'scan finished; 2 file(s) vanished while it ran (not scanned), no other errors' "warning"
     assert_has "$OUT" "$(cat "$D/output")" "scanner output unchanged and ordered"
 }
+row_scan_vanished_write_failure() {
+    scan_vanished_fixture; touch "$D/gone1"; scan_vanished_summary
+    stub mktemp <<'STUB'
+copy="${SCAN_ARGS%/*}/scan-copy"
+mkdir "$copy"
+/bin/ln -s /dev/full "$copy/vanished"
+printf '%s\n' "$copy"
+STUB
+    scan_vanished_check
+    assert_eq "$RC" 2 "failed vanished list write keeps error"
+    assert_has "$OUT" "No space left on device" "vanished list write failed"
+}
 row_scan_vanished_permission() {
     scan_vanished_fixture
     printf "WARNING: Can't open file %s: Permission denied\n" "$D/denied" >> "$D/output"

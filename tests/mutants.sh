@@ -18,6 +18,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'vanished_write_failure~bin/av-scan~s@>> "$copy_dir/vanished" || bad=1@>> "$copy_dir/vanished"@~scan_vanished_write_failure'
 'vanished_relative~bin/av-scan~/\[\[ $p = \/\* \]\] || { bad=1; continue; }/d~scan_vanished_relative_full'
 'vanished_skipped_mount~bin/av-scan~/for root in "${skipped_points\[@\]}"; do/,/done/d~scan_vanished_skipped_mount'
 'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot scan_vanished_noncanonical'

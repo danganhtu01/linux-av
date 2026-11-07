@@ -20,7 +20,8 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 MUTANTS=(
 'vanished_relative~bin/av-scan~/\[\[ $p = \/\* \]\] || { bad=1; continue; }/d~scan_vanished_relative_full'
 'vanished_skipped_mount~bin/av-scan~/for root in "${skipped_points\[@\]}"; do/,/done/d~scan_vanished_skipped_mount'
-'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot'
+'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot scan_vanished_noncanonical'
+'vanished_noncanonical~bin/av-scan~s/\*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*)/*\/..\/*)/~scan_vanished_noncanonical'
 'vanished_symlink_component~bin/av-scan~s/\[ ! -L "$q" \] || exit 1/:/~scan_vanished_symlink_component'
 'vanished_probe_limit~bin/av-scan~s/timeout -s KILL 60s "$BASH" -c/"$BASH" -c/~scan_vanished_probe_bounded'
 'vanished_probe_closed~bin/av-scan~s/< "$copy_dir\/vanished" || bad=1/< "$copy_dir\/vanished" || :/~scan_vanished_probe_bounded'

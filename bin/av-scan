@@ -120,7 +120,7 @@ run_clamscan_checked() (
                     if [[ $p = "$root" || $p = "$root/"* ]]; then matched=0; break; fi
                 done
                 [ "$matched" = 1 ] || { bad=1; continue; }
-                case "$p/" in */../*) bad=1; continue ;; esac
+                case "$p/" in */../*|*/./*|*//*) bad=1; continue ;; esac
                 count=$((count + 1))
                 printf '%s\0' "$p" >> "$copy_dir/vanished"
             elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then

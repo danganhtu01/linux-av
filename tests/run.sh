@@ -1507,10 +1507,23 @@ row_scan_vanished_absolute_full() {
 row_scan_vanished_skipped_mount() {
     scan_vanished_fixture; mkdir -p "$D/kept/m"
     mount_entry "$D/kept/m" fuse.sshfs
+    printf 'exec %q "$@"\n' "$TIMEOUT_BIN" | stub timeout
     printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept/m/gone" > "$D/output"
     scan_vanished_summary 1
     scan --path "$D/kept"; assert_eq "$RC" 2 "no probe below a skipped mount"
     assert_lacks "$(calls)" 'timeout -s KILL' "probe not started below a skipped mount"
+}
+row_scan_vanished_noncanonical() {
+    scan_vanished_fixture; mkdir -p "$D/kept/m"
+    mount_entry "$D/kept/m" fuse.sshfs
+    printf 'exec %q "$@"\n' "$TIMEOUT_BIN" | stub timeout
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept/./m/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --path "$D/kept"; assert_eq "$RC" 2 "a /./ spelling is refused"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/kept//m/gone" > "$D/output"
+    scan_vanished_summary 1
+    scan --path "$D/kept"; assert_eq "$RC" 2 "a // spelling is refused"
+    assert_lacks "$(calls)" 'timeout -s KILL' "no probe for a non-canonical path"
 }
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then

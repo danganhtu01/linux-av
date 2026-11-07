@@ -235,6 +235,7 @@ remaining paths means a successful no-op. Local filesystems, including `fuseblk`
 remain included unless reached through a skipped mount. An empty setting
 disables this feature. `AV_SCAN_TIMEOUT` defaults to `12h`; `timeout` stops a longer
 scan, with a 5-minute kill grace, and logs that it did not finish (exit 124).
+A clamscan exit 2 caused only by files that vanished during the scan is a warning and exits 0; other scanner errors remain failures.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.

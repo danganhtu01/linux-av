@@ -18,6 +18,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'vanished_count~bin/av-scan~s/\[ "$summary" = "$count" \]/true/~scan_vanished_mismatch'
+'vanished_absent~bin/av-scan~s/\[ ! -e "$p" \] \&\& \[ ! -L "$p" \] || bad=1/:/~scan_vanished_reappeared'
+'vanished_daemon~bin/av-scan~s/if \[ "$engine" = clamscan \]; then/if true; then/g~scan_vanished_clamdscan'
+'vanished_cleanup~bin/av-scan~/trap .*rm -f --.*copy.* EXIT/d~scan_vanished_only'
 'scan_self_parent~bin/av-scan~s/if \[ "${fields\[1\]}" != "${fields\[0\]}" \]; then/if true; then/~scan_mount_self_parent'
 'scan_reachable~bin/av-scan~s/\[ "$reachable" = 1 \] || continue/:/~scan_mount_hidden_child'
 'scan_lexical_precheck~bin/av-scan~s/for stage in lexical physical/for stage in physical/~scan_path_dead_mount'

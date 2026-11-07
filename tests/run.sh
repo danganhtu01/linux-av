@@ -46,7 +46,7 @@ assert_same() { cmp -s "$1" "$2" || fail "$3: $1 and $2 differ"; }
 # ---------------------------------------------------------------------------
 # fixture
 # ---------------------------------------------------------------------------
-TOOLS="sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee sleep cmp ls"
+TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee sleep cmp ls"
 
 # new_fixture NAME [debian|arch]  -> sets R (AV_ROOT), B (PATH dir), H (HOME), CALLS
 new_fixture() {
@@ -126,7 +126,7 @@ unstub() { rm -f "$B/$1"; }
 SETUP_ENV=()
 setup() {
     OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
-        AV_COLOR=never XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
+        AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
         CALLS="$CALLS" "${SETUP_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-setup" "$@" 2>&1)"
     RC=$?
 }
@@ -649,7 +649,7 @@ EOF
 }
 scan() {
     OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
-        AV_COLOR=never XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
+        AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
         AV_MOUNTINFO="$D/mountinfo" AV_ENGINE=clamscan SCAN_ARGS="$D/args" \
         CALLS="$CALLS" "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" "$@" --now 2>&1)"
     RC=$?
@@ -983,7 +983,7 @@ row_scan_mount_reread() {
     # one shell so cached mountinfo would fail the second scan.
     sed '/^# Default scan target/,$d' "$REPO/bin/av-scan" > "$D/functions"
     OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
-        AV_COLOR=never XDG_STATE_HOME="$H/state" AV_MOUNTINFO="$D/mountinfo" \
+        AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" AV_MOUNTINFO="$D/mountinfo" \
         CALLS="$CALLS" SCAN_ARGS="$D/args" AV_ENGINE=clamscan \
         "$BASH_BIN" -c '
             source <(sed "/^# --- locate/,/^av_detect_distro/d" "$1") --now
@@ -1045,7 +1045,66 @@ EOF
     assert_has "$OUT" 'THREATS FOUND' "finding logged"
 }
 
-# Read only the installer's functions or config fragment, never its root entrypoint.
+scan_vanished_fixture() {
+    scan_fixture
+    SCAN_ENV=(AV_SCAN_TIMEOUT=0 OUTPUT="$D/output" SCAN_RC=2)
+    stub clamscan <<'STUB'
+cat "$OUTPUT"
+exit "$SCAN_RC"
+STUB
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone1" "$D/gone2" > "$D/output"
+}
+scan_vanished_check() {
+    scan --path /scratch
+    local files=("$D"/av-scan.*)
+    [ ! -e "${files[0]}" ] || fail "temporary scan copy remains"
+}
+row_scan_vanished_only() {
+    scan_vanished_fixture
+    printf 'Total errors: 2\n' >> "$D/output"
+    scan_vanished_check
+    assert_eq "$RC" 0 "vanished exit"
+    assert_has "$OUT" 'scan finished; 2 file(s) vanished while it ran (not scanned), no other errors' "warning"
+    assert_has "$OUT" "$(cat "$D/output")" "scanner output unchanged and ordered"
+}
+row_scan_vanished_permission() {
+    scan_vanished_fixture
+    printf "WARNING: Can't open file %s: Permission denied\nTotal errors: 2\n" "$D/denied" >> "$D/output"
+    scan_vanished_check
+    assert_eq "$RC" 2 "permission exit"
+    assert_has "$OUT" 'scanner error (rc=2)' "error logged"
+}
+row_scan_vanished_mismatch() {
+    scan_vanished_fixture; printf 'Total errors: 3\n' >> "$D/output"; scan_vanished_check
+    assert_eq "$RC" 2 "mismatch exit"
+}
+row_scan_vanished_no_summary() {
+    scan_vanished_fixture; scan_vanished_check
+    assert_eq "$RC" 2 "missing summary exit"
+}
+row_scan_vanished_reappeared() {
+    scan_vanished_fixture; touch "$D/gone1"; printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
+    assert_eq "$RC" 2 "reappeared exit"
+}
+row_scan_vanished_newline() {
+    scan_vanished_fixture
+    printf "WARNING: Can't open file %s\n%s: No such file or directory\nTotal errors: 1\n" "$D/line" 'break' > "$D/output"
+    scan_vanished_check; assert_eq "$RC" 2 "newline exit"
+}
+row_scan_vanished_threat() {
+    scan_vanished_fixture; SCAN_ENV+=(SCAN_RC=1); printf 'Total errors: 2\n' >> "$D/output"; scan_vanished_check
+    assert_eq "$RC" 1 "threat exit"; assert_has "$OUT" 'THREATS FOUND' "threat warning"
+}
+row_scan_vanished_clamdscan() {
+    scan_vanished_fixture; printf 'Total errors: 2\n' >> "$D/output"
+    stub clamdscan <<'STUB'
+cat "$OUTPUT"
+exit 2
+STUB
+    SCAN_ENV+=(AV_ENGINE=clamdscan); scan_vanished_check
+    assert_eq "$RC" 2 "daemon error exit"
+}
+# Read only the installer functions, never its root entrypoint.
 root_install_fixture() {
     new_fixture "$ROW"
     sed -n '/^put() {/,/^keep "\$dst\/bin\/av-scan"/{ /^keep "\$dst\/bin\/av-scan"/d; p; }' \

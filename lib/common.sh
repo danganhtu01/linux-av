@@ -61,9 +61,13 @@ done
 # ---------------------------------------------------------------------------
 : "${AV_SCAN_PATHS:=$HOME}"                                   # space-separated list
 : "${AV_EXCLUDE_DIRS:=/proc /sys /dev /run /var/lib/clamav}"  # never descend into these
+: "${AV_EXCLUDE_PATTERNS=node_modules target .cache __pycache__ .venv .tox .gradle .claude/worktrees}"
 : "${AV_EXCLUDE_FSTYPES=autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.*}"
 : "${AV_MOUNTINFO:=/proc/self/mountinfo}"                     # read without probing mounts
 : "${AV_SCAN_TIMEOUT:=12h}"                                  # 0 disables the scan time limit
+: "${AV_FULL_EVERY:=7d}"                                     # full-scan interval (seconds or d/h/m)
+: "${AV_SCAN_MEMORY_HIGH=2G}"                                # empty omits the unit directive
+: "${AV_SCAN_MEMORY_MAX=3G}"
 : "${AV_ENGINE:=auto}"                                        # auto | clamdscan | clamscan
 : "${AV_LOG_DIR:=$XDG_STATE_HOME/linux-av}"
 : "${AV_QUARANTINE:=$AV_LOG_DIR/quarantine}"
@@ -81,7 +85,8 @@ done
 export AV_SCAN_PATHS AV_EXCLUDE_DIRS AV_ENGINE AV_LOG_DIR AV_QUARANTINE \
        AV_LOG_FILE AV_TIMER_NAME AV_ROOTKIT_TIMER_NAME AV_TIMER_BOOT_DELAY \
        AV_AIDE_BOOT_DELAY AV_COLOR AV_ROOT AV_QUIET_REPORTS AV_RKHUNTER_DAILY \
-       AV_AIDE_INIT_UNIT AV_AIDE_INIT_TIMEOUT AV_EXCLUDE_FSTYPES AV_MOUNTINFO AV_SCAN_TIMEOUT
+       AV_AIDE_INIT_UNIT AV_AIDE_INIT_TIMEOUT AV_EXCLUDE_FSTYPES AV_MOUNTINFO AV_SCAN_TIMEOUT \
+       AV_EXCLUDE_PATTERNS AV_FULL_EVERY AV_SCAN_MEMORY_HIGH AV_SCAN_MEMORY_MAX
 
 # ---------------------------------------------------------------------------
 # 3. Logging (colored to stderr, plain to $AV_LOG_FILE).
@@ -104,10 +109,14 @@ _av_log() { # level color message...
     local lvl="$1" col="$2"; shift 2
     local ts; ts="$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf '%s%s %-5s%s %s\n' "$col" "$ts" "$lvl" "$_C_RST" "$*" >&2
+    AV_REPORT_WRITTEN=0
     if [ -n "${AV_LOG_FILE:-}" ]; then
         mkdir -p "$(dirname "$AV_LOG_FILE")" 2>/dev/null || true
-        printf '%s %-5s %s\n' "$ts" "$lvl" "$*" >>"$AV_LOG_FILE" 2>/dev/null || true
+        if printf '%s %-5s %s\n' "$ts" "$lvl" "$*" 2>/dev/null >>"$AV_LOG_FILE"; then
+            AV_REPORT_WRITTEN=1
+        fi
     fi
+    return 0
 }
 log_info() { _av_log INFO "$_C_GRN" "$@"; }
 log_warn() { _av_log WARN "$_C_YEL" "$@"; }

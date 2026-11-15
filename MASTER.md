@@ -193,6 +193,8 @@ survivor. Set `TMPDIR` to a scratch directory; `AV_TEST_KEEP=1` keeps the rows' 
 
 ```bash
 av-scan --now                  # one scan of $AV_SCAN_PATHS (default: $HOME)
+av-scan --changed --now        # force changed files for the selected paths
+av-scan --full-scan --now      # force a full scan of the selected paths
 av-scan --quick                # $HOME /tmp /var/tmp
 av-scan --full                 # whole filesystem
 av-scan --path /srv --now
@@ -241,13 +243,48 @@ all vanished warnings, with exactly one `Infected files: 0` line and one positiv
 `Total errors` count matching the paths still absent under the kept scan paths.
 No summary line kind may appear twice. The private output copy uses its physical
 directory path for both the copy and scanner exclusions, including with a symlinked
-`TMPDIR`. Only the clamscan output check runs in a subshell; missing-engine errors
+`TMPDIR`. The clamscan output check runs in a subshell; missing-engine errors
 and an `exit` in `AV_ON_FOUND` still stop the foreground scheduled runner. Any unknown
 line or nonzero infected count keeps exit 2; other scanner errors remain failures.
 Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.
+
+`--now` starts with a full scan, then scans only regular files changed by mtime
+or ctime since the last completed scan until `AV_FULL_EVERY` (default `7d`) makes
+the full scan due. This tunable accepts seconds or digits with a `d`, `h` or `m`
+suffix; `0` makes every automatic scan full. `--changed` and `--full-scan` force
+the mode, with `--now` as the action; `--full` still selects `/`. Each run logs
+its mode and reason. Foreground `--scheduled` scans remain full.
+
+`AV_EXCLUDE_PATTERNS` defaults to
+`node_modules target .cache __pycache__ .venv .tox .gradle .claude/worktrees`.
+These are space-separated literal directory components or component sequences,
+matched anywhere under scan paths with regex metacharacters escaped. `target`
+does not match `targets` or `mytarget`. Empty disables the feature.
+Changed-file walks prune these trees, `AV_EXCLUDE_DIRS` and excluded mounts
+before entering them; full clamscan scans receive equivalent directory regexes.
+Scratch exclusions switch clamdscan to clamscan if present, otherwise warn.
+
+Changed scans use a private temporary newline-delimited clamscan `--file-list`
+under `AV_LOG_DIR`, cleaned on exit. Newline-containing names are reported with
+shell quoting and fail the scan without splitting the name or updating stamps.
+Changed mode switches clamdscan to clamscan if present, otherwise logs a fallback
+to a full clamdscan scan. Empty lists log `nothing changed` and advance the good
+stamp without invoking the scanner.
+
+`AV_LOG_DIR/last-good-scan.stamp` and `last-full-scan.stamp` hold scan start times,
+so changes during a scan stay eligible. They advance after the report is written
+only on scanner exits 0 or 1, including threats found; errors, forgiven vanished
+files, timeouts and signals keep the old stamps. Remove both stamps to request a
+full scan. Independent scan path sets should use separate `AV_LOG_DIR` histories.
+
+The rendered scan service has `MemoryHigh=2G` and `MemoryMax=3G`, tunable with
+`AV_SCAN_MEMORY_HIGH` and `AV_SCAN_MEMORY_MAX`. Each accepts digits with optional
+`K`/`M`/`G`/`T`, or `infinity`; empty omits that directive. Invalid values fail
+before either unit is written. Re-run `--install-timer` to apply changes.
+`CPUQuota=100%`, `CPUWeight=20`, `Nice=10` and `IOSchedulingClass=idle` are fixed.
 
 ### AIDE on Arch — `av-aide-arch`
 
@@ -281,7 +318,7 @@ Every tracked file in this repository.
 | `FAULTS.toml` | Faults a review found and left open when a build landed (R-3443, R-3446), one entry each with its severity, place, base and head; written only by the records tool (`records add fault`, `records set`). OC-T-0047 filed FAULT-0001 to FAULT-0004 there on 2026-11-07. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |
-| `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@` and `@PATHS@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |
+| `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@`, `@PATHS@`, `@MEMORY_HIGH@` and `@MEMORY_MAX@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |
 | `systemd/av-rootkit.service` | Template for the scheduled rkhunter + chkrootkit run. `@BIN@` filled in at install time. |
 | `systemd/av-scan.timer` | Generic timer template driving either service. `@BOOTDELAY@`, `@INTERVAL@`, `@NAME@` filled in at install time; `Persistent=true` catches up a run missed while the box was off. |
 | `config/av.env.example` | Every tunable with its built-in default, commented out. Copy it to one of the config locations below. |

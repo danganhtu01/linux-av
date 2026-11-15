@@ -3,6 +3,8 @@
 #           rootkit + file-integrity passes.
 #
 #   av-scan --now                 run one scan of $AV_SCAN_PATHS right now
+#   av-scan --changed --now       force a changed-files scan
+#   av-scan --full-scan --now     force a full scan of the selected paths
 #   av-scan --scheduled 10000     scan every 10000 ms (=10 s) in the foreground
 #   av-scan --full                scan the whole filesystem ( / )
 #   av-scan --quick               scan $HOME /tmp /var/tmp
@@ -71,6 +73,64 @@ scan_path_absolute() {
     REPLY="${REPLY:-/}"
 }
 
+# Same literal regex escaping as mount paths; REPLY preserves newlines.
+scan_regex_escape() {
+    local value="$1" char i
+    REPLY=""
+    for ((i=0; i<${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\') REPLY+="\\" ;;
+        esac
+        REPLY+="$char"
+    done
+}
+
+# Only --now maintains stamps. Keep run_scan in the caller's shell: scheduled
+# scans still propagate die and an exit in AV_ON_FOUND as before.
+scan_now() (
+    local scan_mode=full scan_reason="no good full-scan stamp" scan_state
+    local good="$AV_LOG_DIR/last-good-scan.stamp" full="$AV_LOG_DIR/last-full-scan.stamp"
+    local seconds factor=1 now age rc resolved
+    [[ $AV_FULL_EVERY =~ ^([0-9]+)([dhm]?)$ ]] || die "AV_FULL_EVERY must be seconds or digits followed by d, h or m"
+    seconds="${BASH_REMATCH[1]}"
+    case "${BASH_REMATCH[2]}" in d) factor=86400 ;; h) factor=3600 ;; m) factor=60 ;; esac
+    # Bound arithmetic to avoid wraparound accepting an invalid interval.
+    [ "${#seconds}" -le 10 ] || die "AV_FULL_EVERY is too large"
+    seconds=$((10#$seconds * factor))
+    now="$(date +%s)" || return 2
+    if [ -f "$full" ] && [ -f "$good" ]; then
+        age="$(stat -c %Y -- "$full")" || return 2
+        age=$((now - age))
+        if [ "$age" -ge 0 ] && [ "$age" -lt "$seconds" ]; then
+            scan_mode=changed; scan_reason="full-scan stamp younger than AV_FULL_EVERY=$AV_FULL_EVERY"
+        else
+            scan_reason="full-scan stamp due (AV_FULL_EVERY=$AV_FULL_EVERY)"
+        fi
+    fi
+    if [ -n "$FORCE_SCAN" ]; then scan_mode="$FORCE_SCAN"; scan_reason="forced by command line"; fi
+    mkdir -p "$AV_LOG_DIR" || return 2
+    scan_state="$(umask 077; mktemp -d "$AV_LOG_DIR/av-scan-state.XXXXXX")" || return 2
+    trap 'rm -rf -- "$scan_state"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    resolved="$(cd -P -- "$scan_state" && pwd -P)" || return 2
+    scan_state="$resolved"
+    touch "$scan_state/start" || return 2
+    run_scan "$@"; rc=$?
+    # The report has been written by run_scan. A forgiven raw scanner error
+    # (vanished files) still cannot advance a stamp.
+    if [ "$rc" -le 1 ] && [ -f "$scan_state/completed" ]; then
+        [ "${AV_REPORT_WRITTEN:-0}" = 1 ] || { log_err "scan report could not be written; stamps unchanged"; return 2; }
+        if [ "$scan_mode" = full ]; then
+            touch -r "$scan_state/start" "$scan_state/full" && mv -f -- "$scan_state/full" "$full" || return 2
+        fi
+        touch -r "$scan_state/start" "$scan_state/good" && mv -f -- "$scan_state/good" "$good" || return 2
+    fi
+    return "$rc"
+)
+
 # The caller supplies engine, args, paths, and runner through bash local scope.
 # Only the output copy, traps, pipe, and whitelist need a subshell.
 run_clamscan_checked() (
@@ -97,9 +157,13 @@ run_clamscan_checked() (
         escaped+="$char"
     done
     args+=("--exclude-dir=^${escaped}(/|$)" "--exclude=^${escaped}(/|$)")
-    "${runner[@]}" "$engine" "${args[@]}" "${paths[@]}" 2>&1 | tee "$copy"
+    "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}" 2>&1 | tee "$copy"
     local -a statuses=("${PIPESTATUS[@]}")
     rc=${statuses[0]}
+    if [ "${statuses[1]}" != 0 ]; then return 2; fi
+    if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
+        touch "$scan_state/completed" || return 2
+    fi
     if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ]; then
         while line=; IFS= read -r line || [ -n "$line" ]; do
             if [[ $line =~ $warning_re ]]; then
@@ -172,6 +236,7 @@ run_clamscan_checked() (
 # Build the per-engine exclude args and run one scan of "$@" (paths).
 run_scan() {
     local engine paths=("$@")
+    local -a scan_targets=() scratch_excludes=() walk_excludes=() scratch_patterns=()
     local -a mount_excludes=() scan_paths=() fstype_patterns=() fields=()
     local -a mount_ids=() mount_parents=() mount_points=() mount_types=()
     local -a skipped_points=() skipped_types=()
@@ -284,6 +349,30 @@ run_scan() {
     engine="$(choose_engine)"
     [ -n "$engine" ] || die "no ClamAV scanner found — run 'av-setup install' first"
 
+    if [ "$engine" = clamdscan ] && [ "${scan_mode:-full}" = changed ]; then
+        if have clamscan; then
+            log_info "changed scans require clamscan; switching from clamdscan"
+            engine=clamscan
+        else
+            log_warn "changed scans require clamscan; falling back to full scan with clamdscan"
+            scan_mode=full; scan_reason="clamscan unavailable for changed scan"
+        fi
+    fi
+
+    read -r -a scratch_patterns <<< "$AV_EXCLUDE_PATTERNS"
+    for pattern in "${scratch_patterns[@]}"; do
+        scan_regex_escape "$pattern"
+        scratch_excludes+=("--exclude-dir=(^|/)${REPLY}(/|$)")
+    done
+    if [ "$engine" = clamdscan ] && [ "${#scratch_excludes[@]}" -gt 0 ]; then
+        if have clamscan; then
+            log_info "scratch exclusions require clamscan; switching from clamdscan"
+            engine=clamscan
+        else
+            log_warn "clamdscan cannot enforce AV_EXCLUDE_PATTERNS"
+        fi
+    fi
+
     if [ "$engine" = clamdscan ] && [ "${#mount_excludes[@]}" -gt 0 ]; then
         if have clamscan; then
             log_info "mount exclusions require clamscan; switching from clamdscan"
@@ -318,6 +407,7 @@ run_scan() {
     if [ "$engine" = clamscan ]; then
         args+=( --recursive --infected --stdout )
         local d; for d in $AV_EXCLUDE_DIRS; do args+=( "--exclude-dir=^${d}" ); done
+        args+=( "${scratch_excludes[@]}" )
         args+=( "${mount_excludes[@]}" )
         [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
     else
@@ -326,7 +416,58 @@ run_scan() {
         [ "${AV_QUARANTINE_ON:-0}" = 1 ] && args+=( "--move=$AV_QUARANTINE" )
     fi
 
-    log_info "engine=$engine scanning: ${paths[*]}"
+    log_info "mode=${scan_mode:-full} reason=${scan_reason:-scheduled full scan} engine=$engine scanning: ${paths[*]}"
+    scan_targets=("${paths[@]}")
+    if [ "${scan_mode:-full}" = changed ]; then
+        # GNU find uses whole-path EREs; append .* to clamscan's prefix
+        # expressions. Prune before walking so excluded mounts are never entered.
+        local expression list file newline=0
+        list="$(umask 077; mktemp "$scan_state/files.XXXXXX")" || return 2
+        for expression in "${scratch_excludes[@]}"; do
+            [ "${#walk_excludes[@]}" -eq 0 ] || walk_excludes+=( -o )
+            walk_excludes+=( -regex ".*${expression#--exclude-dir=}.*" )
+        done
+        for d in $AV_EXCLUDE_DIRS; do
+            [ "${#walk_excludes[@]}" -eq 0 ] || walk_excludes+=( -o )
+            walk_excludes+=( -regex "${d}.*" )
+        done
+        local -a directory_excludes=("${walk_excludes[@]}")
+        walk_excludes=()
+        # Test mount paths first, before asking for a directory's type.
+        for mount in "${skipped_points[@]}" "$scan_state"; do
+            scan_regex_escape "$mount"
+            [ "${#walk_excludes[@]}" -eq 0 ] || walk_excludes+=( -o )
+            walk_excludes+=( -regex "${REPLY}(/.*)?" )
+        done
+        # Directory exclusions do not exclude a regular file with that name.
+        if [ "${#directory_excludes[@]}" -gt 0 ]; then
+            walk_excludes+=( -o \( \( "${directory_excludes[@]}" \) -type d \) )
+        fi
+        local -a changed_since=()
+        [ ! -f "$good" ] || changed_since=( \( -newer "$good" -o -cnewer "$good" \) )
+        find "${paths[@]}" -regextype posix-extended \
+            \( \( "${walk_excludes[@]}" \) -prune \) -o \
+            \( -type f "${changed_since[@]}" -print0 \) > "$scan_state/walk" || {
+                log_err "changed-files walk failed; scan not completed"; return 2;
+            }
+        while IFS= read -r -d '' file; do
+            if [[ $file = *$'\n'* ]]; then
+                printf -v label '%q' "$file"
+                log_err "cannot put filename containing newline in clamscan --file-list: $label"
+                newline=1
+            else
+                printf '%s\n' "$file" >> "$list" || return 2
+            fi
+        done < "$scan_state/walk"
+        [ "$newline" = 0 ] || return 2
+        if [ ! -s "$list" ]; then
+            log_info "clean — nothing changed"
+            touch "$scan_state/completed" || return 2
+            return 0
+        fi
+        args+=("--file-list=$list")
+        scan_targets=()
+    fi
     local rc=0
     local -a runner=()
     if [ "$AV_SCAN_TIMEOUT" != 0 ]; then
@@ -336,7 +477,10 @@ run_scan() {
     if [ "$engine" = clamscan ]; then
         run_clamscan_checked; rc=$?
     else
-        "${runner[@]}" "$engine" "${args[@]}" "${paths[@]}"; rc=$?
+        "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}"; rc=$?
+        if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
+            touch "$scan_state/completed" || return 2
+        fi
     fi
     case $rc in
         0) log_info "clean — no threats in ${paths[*]}" ;;
@@ -421,13 +565,23 @@ install_timer() {
     local name="$1" tmpl="$2" ms="$3"; need_root
     [ "$ms" -gt 0 ] 2>/dev/null || die "interval (ms) must be a positive integer"
     local bin; bin="$(command -v av-scan || echo "$AV_HOME/bin/av-scan")"
-    local unit="/etc/systemd/system/${name}"
+    local unit="${AV_ROOT}/etc/systemd/system/${name}"
     local iv; iv="$(ms_to_systemd "$ms")"
+    local memory_high="" memory_max="" setting value
+    if [ "$tmpl" = av-scan.service ]; then
+        for setting in AV_SCAN_MEMORY_HIGH AV_SCAN_MEMORY_MAX; do
+            value="${!setting}"
+            [[ -z $value || $value =~ ^([0-9]+[KMGT]?|infinity)$ ]] || die "$setting must be a systemd size (digits with optional K/M/G/T, or infinity; empty omits it)"
+        done
+        [ -z "$AV_SCAN_MEMORY_HIGH" ] || memory_high="MemoryHigh=$AV_SCAN_MEMORY_HIGH"
+        [ -z "$AV_SCAN_MEMORY_MAX" ] || memory_max="MemoryMax=$AV_SCAN_MEMORY_MAX"
+    fi
 
     sed -e "s|@BIN@|$bin|g" -e "s|@PATHS@|$AV_SCAN_PATHS|g" \
-        "$AV_HOME/systemd/$tmpl" > "${unit}.service"
+        -e "s|@MEMORY_HIGH@|$memory_high|g" -e "s|@MEMORY_MAX@|$memory_max|g" \
+        "$AV_HOME/systemd/$tmpl" > "${unit}.service" || die "cannot write ${unit}.service"
     sed -e "s|@INTERVAL@|$iv|g" -e "s|@NAME@|$name|g" -e "s|@BOOTDELAY@|$AV_TIMER_BOOT_DELAY|g" \
-        "$AV_HOME/systemd/av-scan.timer" > "${unit}.timer"
+        "$AV_HOME/systemd/av-scan.timer" > "${unit}.timer" || die "cannot write ${unit}.timer"
 
     systemctl daemon-reload
     systemctl enable --now "${name}.timer"
@@ -463,10 +617,12 @@ scheduled_loop() {
 # Argument parsing.
 # ---------------------------------------------------------------------------
 [ $# -eq 0 ] && usage 1
-MODE=""; INTERVAL_MS=""; declare -a PATHS=()
+MODE=""; INTERVAL_MS=""; FORCE_SCAN=""; declare -a PATHS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --now)            MODE=now ;;
+        --changed)        FORCE_SCAN=changed ;;
+        --full-scan)      FORCE_SCAN=full ;;
         --scheduled)      MODE=scheduled; INTERVAL_MS="${2:?--scheduled needs an interval in ms}"; shift ;;
         --install-timer)  MODE=install-timer; INTERVAL_MS="${2:?--install-timer needs an interval in ms}"; shift ;;
         --remove-timer)   MODE=remove-timer ;;
@@ -491,7 +647,7 @@ done
 if [ "${#PATHS[@]}" -eq 0 ]; then read -r -a PATHS <<<"$AV_SCAN_PATHS"; fi
 
 case "$MODE" in
-    now)            run_scan "${PATHS[@]}" ;;
+    now)            scan_now "${PATHS[@]}" ;;
     scheduled)      scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
     install-timer)          install_timer "$AV_TIMER_NAME" av-scan.service "$INTERVAL_MS" ;;
     remove-timer)           remove_timer "$AV_TIMER_NAME" ;;

@@ -18,6 +18,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+'scratch_component~bin/av-scan~s/(\^|\/)${REPLY}(\/|\$)/${REPLY}/~scan_scratch_components'
+'scan_stamp_exit~bin/av-scan~s/\[ "$rc" -le 1 \]/true/g~scan_changed_stamps'
+'scan_size_check~bin/av-scan~/^            \[\[ -z $value /d~scan_memory_invalid'
 'vanished_probed_count~bin/av-scan~/\[ "$probed" = "$count" \] || bad=1/d~scan_vanished_empty_list'
 'vanished_probe_condition~bin/av-scan~s@\[ "$count" -gt 0 \]; then@[ -s "$copy_dir/vanished" ]; then@~scan_vanished_empty_list'
 'vanished_parent_access~bin/av-scan~/if \[ -e "$q" \]; then \[ -d "$q" \] \&\& \[ -x "$q" \] || exit 1; fi/d~scan_vanished_unsearchable'
@@ -168,6 +171,7 @@ KILLED=0; SURVIVED=0
 copy_to() { # dir
     mkdir -p "$1"
     cp -r "$REPO/bin" "$REPO/lib" "$REPO/tests" "$1/"
+    cp -r "$REPO/systemd" "$1/"
     [ -d "$REPO/config" ] && cp -r "$REPO/config" "$1/"
     cp "$REPO/README.md" "$REPO/MASTER.md" "$1/"
     cp "$REPO/root-install.sh" "$1/"

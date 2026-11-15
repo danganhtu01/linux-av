@@ -131,6 +131,32 @@ scan_now() (
     return "$rc"
 )
 
+# Called inside one timeout by run_clamscan_checked. The ordinary list costs
+# one DB load; LF/CR names are quoted argv entries in bounded batches. No
+# pathname passes through shell source text or a line-delimited file-list.
+run_clamscan_batches() {
+    local engine="$1" list="$2" odd_list="$3" file chars rc=0 batch_rc
+    shift 3
+    local -a targets=()
+    if [ -s "$list" ]; then
+        "$engine" "$@" "--file-list=$list"; rc=$?
+    fi
+    while :; do
+        targets=(); chars=0
+        while IFS= read -r -d '' file; do
+            targets+=("$file")
+            chars=$((chars + ${#file} + 1))
+            # At most 8192 characters plus one pathname, or 128 names, leaves
+            # room for multibyte names, environment, options and argv pointers.
+            [ "$chars" -lt 8192 ] && [ "${#targets[@]}" -lt 128 ] || break
+        done
+        [ "${#targets[@]}" -gt 0 ] || break
+        "$engine" "$@" "${targets[@]}"; batch_rc=$?
+        if [ "$rc" -le 1 ] && [ "$batch_rc" -gt "$rc" ]; then rc=$batch_rc; fi
+    done < "$odd_list"
+    return "$rc"
+}
+
 # The caller supplies engine, args, paths, and runner through bash local scope.
 # Only the output copy, traps, pipe, and whitelist need a subshell.
 run_clamscan_checked() (
@@ -157,7 +183,14 @@ run_clamscan_checked() (
         escaped+="$char"
     done
     args+=("--exclude-dir=^${escaped}(/|$)" "--exclude=^${escaped}(/|$)")
-    "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}" 2>&1 | tee "$copy"
+    local -a command=("$engine" "${args[@]}" "${scan_targets[@]}")
+    if [ -n "${odd_list:-}" ] && [ -s "$odd_list" ]; then
+        # Serialize only this trusted function, never any pathname, into code.
+        # A single timeout bounds every scanner invocation in the worker.
+        command=("$BASH" -c "$(declare -f run_clamscan_batches)"$'\nrun_clamscan_batches "$@"' \
+            av-scan "$engine" "$list" "$odd_list" "${args[@]}")
+    fi
+    "${runner[@]}" "${command[@]}" 2>&1 | tee "$copy"
     local -a statuses=("${PIPESTATUS[@]}")
     rc=${statuses[0]}
     if [ "${statuses[1]}" != 0 ]; then return 2; fi
@@ -243,6 +276,7 @@ run_scan() {
     local -A covered=() mount_index=()
     local p line mount fstype pattern matched escaped char label path_label REPLY i idx
     local cursor parent parent_idx steps reachable stage resolved
+    local walk_failed=0 list="" odd_list=""
     if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
         [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
         read -r -a fstype_patterns <<< "$AV_EXCLUDE_FSTYPES"
@@ -421,7 +455,7 @@ run_scan() {
     if [ "${scan_mode:-full}" = changed ]; then
         # GNU find uses whole-path EREs; append .* to clamscan's prefix
         # expressions. Prune before walking so excluded mounts are never entered.
-        local expression list file newline=0
+        local expression file
         list="$(umask 077; mktemp "$scan_state/files.XXXXXX")" || return 2
         for expression in "${scratch_excludes[@]}"; do
             [ "${#walk_excludes[@]}" -eq 0 ] || walk_excludes+=( -o )
@@ -445,27 +479,28 @@ run_scan() {
         fi
         local -a changed_since=()
         [ ! -f "$good" ] || changed_since=( \( -newer "$good" -o -cnewer "$good" \) )
-        find "${paths[@]}" -regextype posix-extended \
+        find "${paths[@]}" -ignore_readdir_race -regextype posix-extended \
             \( \( "${walk_excludes[@]}" \) -prune \) -o \
             \( -type f "${changed_since[@]}" -print0 \) > "$scan_state/walk" || {
-                log_err "changed-files walk failed; scan not completed"; return 2;
+                walk_failed=1
+                log_warn "changed-files walk failed; partial walk: scanning listed files; stamps unchanged so the next run retries"
             }
+        odd_list="$scan_state/odd"
+        (umask 077; : > "$odd_list") || return 2
         while IFS= read -r -d '' file; do
-            if [[ $file = *$'\n'* ]]; then
-                printf -v label '%q' "$file"
-                log_err "cannot put filename containing newline in clamscan --file-list: $label"
-                newline=1
-            else
-                printf '%s\n' "$file" >> "$list" || return 2
-            fi
+            # clamscan's line list cannot represent LF safely; CR may be stripped.
+            # Keep both byte-for-byte as argv, read from a private NUL stream.
+            case "$file" in
+                *$'\n'*|*$'\r'*) printf '%s\0' "$file" >> "$odd_list" || return 2 ;;
+                *) printf '%s\n' "$file" >> "$list" || return 2 ;;
+            esac
         done < "$scan_state/walk"
-        [ "$newline" = 0 ] || return 2
-        if [ ! -s "$list" ]; then
+        if [ ! -s "$list" ] && [ ! -s "$odd_list" ]; then
+            [ "$walk_failed" = 0 ] || return 2
             log_info "clean — nothing changed"
             touch "$scan_state/completed" || return 2
             return 0
         fi
-        args+=("--file-list=$list")
         scan_targets=()
     fi
     local rc=0
@@ -475,7 +510,9 @@ run_scan() {
     fi
     # clamdscan output differs; its exit handling remains unchanged.
     if [ "$engine" = clamscan ]; then
+        if [ -n "$list" ] && [ ! -s "$odd_list" ]; then args+=("--file-list=$list"); fi
         run_clamscan_checked; rc=$?
+        if [ "$walk_failed" = 1 ]; then rm -f -- "$scan_state/completed" || return 2; fi
     else
         "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}"; rc=$?
         if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
@@ -490,6 +527,10 @@ run_scan() {
         137) log_warn "scan was killed (SIGKILL: its time limit's kill-after, or another killer such as the OOM killer) and did not finish" ;;
         *) log_err  "scanner error (rc=$rc) on ${paths[*]}" ;;
     esac
+    if [ "$walk_failed" = 1 ]; then
+        log_err "partial walk: listed files scanned; stamps unchanged so the next run retries"
+        [ "$rc" -gt 1 ] || rc=2
+    fi
     return $rc
 }
 
@@ -559,6 +600,28 @@ ms_to_systemd() { # ms -> "<n>s" (>=1s; systemd discourages sub-second timers)
     echo "${s}s"
 }
 
+# Shared memory validation/substitutions for the timer and the inert drop-in.
+scan_memory_settings() {
+    local setting value
+    for setting in AV_SCAN_MEMORY_HIGH AV_SCAN_MEMORY_MAX; do
+        value="${!setting}"
+        [[ -z $value || $value =~ ^([0-9]+[KMGT]?|infinity)$ ]] || die "$setting must be a systemd size (digits with optional K/M/G/T, or infinity; empty omits it)"
+    done
+    [ -z "$AV_SCAN_MEMORY_HIGH" ] || memory_high="MemoryHigh=$AV_SCAN_MEMORY_HIGH"
+    [ -z "$AV_SCAN_MEMORY_MAX" ] || memory_max="MemoryMax=$AV_SCAN_MEMORY_MAX"
+}
+
+# CPU values stay in the service template; memory defaults stay in common.sh.
+# This rendering command never invokes systemctl or installs/activates a unit.
+render_scan_limits() {
+    local memory_high="" memory_max=""
+    scan_memory_settings
+    printf '%s\n' '[Service]'
+    sed -n -e "s|@MEMORY_HIGH@|$memory_high|" -e "s|@MEMORY_MAX@|$memory_max|" \
+        -e '/^MemoryHigh=/p' -e '/^MemoryMax=/p' \
+        -e '/^CPUQuota=/p' -e '/^CPUWeight=/p' "$AV_HOME/systemd/av-scan.service"
+}
+
 # install_timer <unit-name> <service-template> <interval-ms>
 # The .timer template (av-scan.timer) is generic; only the .service differs.
 install_timer() {
@@ -567,15 +630,8 @@ install_timer() {
     local bin; bin="$(command -v av-scan || echo "$AV_HOME/bin/av-scan")"
     local unit="${AV_ROOT}/etc/systemd/system/${name}"
     local iv; iv="$(ms_to_systemd "$ms")"
-    local memory_high="" memory_max="" setting value
-    if [ "$tmpl" = av-scan.service ]; then
-        for setting in AV_SCAN_MEMORY_HIGH AV_SCAN_MEMORY_MAX; do
-            value="${!setting}"
-            [[ -z $value || $value =~ ^([0-9]+[KMGT]?|infinity)$ ]] || die "$setting must be a systemd size (digits with optional K/M/G/T, or infinity; empty omits it)"
-        done
-        [ -z "$AV_SCAN_MEMORY_HIGH" ] || memory_high="MemoryHigh=$AV_SCAN_MEMORY_HIGH"
-        [ -z "$AV_SCAN_MEMORY_MAX" ] || memory_max="MemoryMax=$AV_SCAN_MEMORY_MAX"
-    fi
+    local memory_high="" memory_max=""
+    if [ "$tmpl" = av-scan.service ]; then scan_memory_settings; fi
 
     sed -e "s|@BIN@|$bin|g" -e "s|@PATHS@|$AV_SCAN_PATHS|g" \
         -e "s|@MEMORY_HIGH@|$memory_high|g" -e "s|@MEMORY_MAX@|$memory_max|g" \
@@ -626,6 +682,7 @@ while [ $# -gt 0 ]; do
         --scheduled)      MODE=scheduled; INTERVAL_MS="${2:?--scheduled needs an interval in ms}"; shift ;;
         --install-timer)  MODE=install-timer; INTERVAL_MS="${2:?--install-timer needs an interval in ms}"; shift ;;
         --remove-timer)   MODE=remove-timer ;;
+        --render-scan-limits) MODE=render-scan-limits ;;
         --install-rootkit-timer) MODE=install-rootkit-timer; INTERVAL_MS="${2:?--install-rootkit-timer needs an interval in ms}"; shift ;;
         --remove-rootkit-timer)  MODE=remove-rootkit-timer ;;
         --full)           PATHS=(/) ;;
@@ -650,6 +707,7 @@ case "$MODE" in
     now)            scan_now "${PATHS[@]}" ;;
     scheduled)      scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
     install-timer)          install_timer "$AV_TIMER_NAME" av-scan.service "$INTERVAL_MS" ;;
+    render-scan-limits)     render_scan_limits ;;
     remove-timer)           remove_timer "$AV_TIMER_NAME" ;;
     install-rootkit-timer)  install_timer "$AV_ROOTKIT_TIMER_NAME" av-rootkit.service "$INTERVAL_MS" ;;
     remove-rootkit-timer)   remove_timer "$AV_ROOTKIT_TIMER_NAME" ;;

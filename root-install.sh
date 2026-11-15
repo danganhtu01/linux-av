@@ -4,13 +4,13 @@
 # (a tree step of linux-av@<commit>; C-10). OC-T-0046, R-3377: his words 2026-11-05, "Stop the antivirus scans jobs now.
 # Resume it after the fix is live, which could be later." This is the fix; a separate card starts the timer.
 # The runner checks this file's SHA-256 and each listed file's before it runs anything:
-# sha256 015d25a8b2300f7f42f59526d84c77ffa07cd67e5f6d7701f43c9184e644b2fe bin/av-scan
+# sha256 dfb1a821537b0f544e8048b537bdfa29f6d609952472febce49d38dc3179add8 bin/av-scan
 # sha256 1ee5629599004961efafe99e43c791ae1b0d18e50f606f3b4d17733f6a57c747 lib/common.sh
 # sha256 ae1283589ae0b920d1f72dbb72d74b1668e8312d36b9b7f8ca876317dd396684 systemd/av-scan.service
 # What it writes, all root:root:
 #   /usr/local/lib/linux-av/bin/av-scan     0755  (the old one kept once as av-scan.before-R-3377)
 #   /usr/local/lib/linux-av/lib/common.sh   0644  (the old one kept once as common.sh.before-R-3377)
-#   /etc/systemd/system/linux-av-scan.service.d/limits.conf   0644  MemoryHigh/MemoryMax/CPUQuota/CPUWeight
+#   /etc/systemd/system/linux-av-scan.service.d/limits.conf   0644  MemoryHigh/MemoryMax
 #   /etc/systemd/system/linux-av-scan.service.d/30-time-limit.conf   0644  TimeoutStartSec=12h30min
 #   /etc/needrestart/conf.d/linux-av.conf   0644  needrestart never restarts linux-av-* (a restart waits for a whole scan)
 # Then systemctl daemon-reload. It starts, stops, enables and disables nothing.
@@ -50,8 +50,8 @@ put "$here/lib/common.sh" 0644 "$dst/lib/common.sh"
 put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"
 t=$(mktemp -d /run/linux-av-root-install.XXXXXXXX)
 trap 'case $t in /run/linux-av-root-install.?*) rm -rf --one-file-system -- "$t" ;; esac' EXIT
-# OC-T-0067, R-3377: render the same limits as --install-timer, without its
-# enable --now. Pin config selection to an empty private file; defaults and
+# OC-T-0067, R-3377: render memory limits without activation. CPU values remain
+# solely in OVH's R-3377-cpu-cap.conf. Pin config to an empty private file; defaults and
 # explicit AV_SCAN_MEMORY_* environment overrides match the timer renderer.
 : > "$t/av.env"
 AV_CONFIG="$t/av.env" "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"

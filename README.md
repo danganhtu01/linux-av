@@ -422,14 +422,21 @@ clamdscan to clamscan when available; otherwise a warning reports the limitation
 
 Changed scans keep ordinary filenames in a private, temporary newline-delimited
 `--file-list` under `AV_LOG_DIR`. Names containing LF (newline) or CR (carriage
-return) instead travel through a private NUL-delimited stream into individually
-quoted clamscan arguments. This avoids both line splitting (FAULT-0005) and
-possible CR stripping by a file-list reader (FAULT-0006); neither character is
-removed or interpreted as another filename. ClamAV NUL-list support is not
+return), or measuring **1022 bytes or more** under `LC_ALL=C`, instead travel
+through a private NUL-delimited stream into individually quoted clamscan
+arguments. ClamAV 1.5.4's file-list reader uses `fgets` with a 1024-byte buffer;
+longer lines can split into separate targets, including relative paths. This
+avoids line splitting (FAULT-0005 and FAULT-0006) and possible CR stripping;
+names stay literal. ClamAV NUL-list support is not
 required. Argument batches hold at most 128 names, with an additional size bound;
 all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
-An earlier batch error cannot be erased by a later clean batch. Temporary lists
-and captured output are removed on exit.
+An earlier batch error cannot be erased by a later clean batch. A threat in any
+batch takes priority over errors in other batches: the run returns 1, reports
+`THREATS FOUND` and invokes `AV_ON_FOUND`, while batch errors remain visible in
+the log (FAULT-0016). This matches
+[ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
+which selects infection before errors. Temporary lists and captured output are
+removed on exit.
 
 The walk uses GNU find's `-ignore_readdir_race`. If find still exits non-zero,
 the scan processes everything it listed, logs **partial walk**, returns an error
@@ -455,20 +462,31 @@ before either unit is written. The scan unit also sets `CPUQuota=100%` and
 
 For OVH, `root-install.sh` installs
 `/etc/systemd/system/linux-av-scan.service.d/limits.conf` atomically as root:root
-0644, then calls `systemctl daemon-reload`. It never enables, starts or restarts
+0644 with only `MemoryHigh` and `MemoryMax`, then calls `systemctl daemon-reload`.
+OVH's existing `R-3377-cpu-cap.conf` remains the sole CPU drop-in, setting
+`CPUWeight=20` and `CPUQuota=100%` (FAULT-0020). Keeping CPU settings there
+preserves the host's established control without a later override from
+`limits.conf`. Fresh hosts using `--install-timer` still receive CPU settings
+from `systemd/av-scan.service`.
+The installer never enables, starts or restarts
 units and leaves the timer state alone (R-3377). Starting remains a separate
 card; do not restart the scan as part of this build or install.
 
 `av-scan --render-scan-limits` renders that drop-in without installing or
 activating anything. It shares memory defaults/validation with `--install-timer`
-and reads CPU values from the same service template, so there is one source for
-each value. The installer pins config selection to an empty private file for
+and renders only the template's memory directives. The installer pins config
+selection to an empty private file for
 predictable defaults; explicit `AV_SCAN_MEMORY_HIGH`/`AV_SCAN_MEMORY_MAX`
 environment overrides remain available. Its `# sha256` manifest pins all three
 rendering inputs (`bin/av-scan`, `lib/common.sh`, `systemd/av-scan.service`), and
 installation prints the generated drop-in's SHA-256 alongside the installed
 script/library hashes.
 
+Round 3 closes the long-name remainder of FAULT-0006, FAULT-0016 and FAULT-0020.
+The new long-name, mixed-result and memory-only installer regressions fail at
+`0d5499d`; mutants check the length boundary, byte counting, batch precedence
+and duplicate CPU settings. FAULT-0017, FAULT-0018, FAULT-0019 and FAULT-0021
+remain unchanged, including the existing argument batching and memory limits.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

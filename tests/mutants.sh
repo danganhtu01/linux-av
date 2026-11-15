@@ -18,6 +18,12 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0067 round 3: length boundary, byte count, threat priority and CPU owner.
+'file_list_length_removed~bin/av-scan~s/\&\& ${#1} -lt 1022//~scan_changed_long_names'
+'file_list_length_relaxed~bin/av-scan~s/${#1} -lt 1022/${#1} -lt 1023/~scan_changed_long_names'
+'file_list_character_count~bin/av-scan~/^    local LC_ALL=C$/d~scan_changed_long_names'
+'batch_error_over_found~bin/av-scan~s/if \[ "$batch_rc" = 1 \]; then rc=1/if [ "$rc" -le 1 ] \&\& [ "$batch_rc" -gt "$rc" ]; then rc=$batch_rc/;s/elif \[ "$rc" = 0 \] \&\& \[ "$batch_rc" -gt 1 \]; then rc=$batch_rc/elif false; then :/~scan_changed_found_error'
+'root_limits_cpu_duplicate~bin/av-scan~s@-e \x27/\^MemoryMax=/p\x27@-e \x27/^MemoryMax=/p\x27 -e \x27/^CPUQuota=/p\x27 -e \x27/^CPUWeight=/p\x27@~root_install_limits'
 # OC-T-0067 round 2: each new safety property must kill its mutation.
 'root_limits_missing~root-install.sh~/^put "\$t\/limits.conf"/d~root_install_limits'
 'root_limits_activation~root-install.sh~s/^systemctl daemon-reload$/systemctl restart linux-av-scan.service/~root_install_limits'
@@ -25,7 +31,7 @@ MUTANTS=(
 'walk_abort_partial~bin/av-scan~s/^                walk_failed=1$/                return 2/~scan_changed_vanishing_folder'
 'walk_partial_stamp~bin/av-scan~s/^                walk_failed=1$/                walk_failed=0/~scan_changed_vanishing_folder'
 'odd_batch_unbounded~bin/av-scan~s/"$chars" -lt 8192/"$chars" -lt 999999/;s/"${#targets\[@\]}" -lt 128/"${#targets[@]}" -lt 999999/~scan_changed_odd_batches'
-'odd_batch_error_lost~bin/av-scan~s/^        if \[ "$rc" -le 1 \] \&\& \[ "$batch_rc" -gt "$rc" \]; then rc=$batch_rc; fi$/        rc=$batch_rc/~scan_changed_odd_error'
+'odd_batch_error_lost~bin/av-scan~s/elif \[ "$rc" = 0 \] \&\& \[ "$batch_rc" -gt 1 \]; then rc=$batch_rc; fi/else rc=$batch_rc; fi/~scan_changed_odd_error'
 'scratch_component~bin/av-scan~s/(\^|\/)${REPLY}(\/|\$)/${REPLY}/~scan_scratch_components'
 'scan_stamp_exit~bin/av-scan~s/\[ "$rc" -le 1 \]/true/g~scan_changed_stamps'
 'scan_size_check~bin/av-scan~/^        \[\[ -z $value /d~scan_memory_invalid'

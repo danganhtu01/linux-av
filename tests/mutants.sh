@@ -18,9 +18,17 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0067 round 2: each new safety property must kill its mutation.
+'root_limits_missing~root-install.sh~/^put "\$t\/limits.conf"/d~root_install_limits'
+'root_limits_activation~root-install.sh~s/^systemctl daemon-reload$/systemctl restart linux-av-scan.service/~root_install_limits'
+'walk_race_flag~bin/av-scan~s/ -ignore_readdir_race//~scan_changed_vanishing_folder'
+'walk_abort_partial~bin/av-scan~s/^                walk_failed=1$/                return 2/~scan_changed_vanishing_folder'
+'walk_partial_stamp~bin/av-scan~s/^                walk_failed=1$/                walk_failed=0/~scan_changed_vanishing_folder'
+'odd_batch_unbounded~bin/av-scan~s/"$chars" -lt 8192/"$chars" -lt 999999/;s/"${#targets\[@\]}" -lt 128/"${#targets[@]}" -lt 999999/~scan_changed_odd_batches'
+'odd_batch_error_lost~bin/av-scan~s/^        if \[ "$rc" -le 1 \] \&\& \[ "$batch_rc" -gt "$rc" \]; then rc=$batch_rc; fi$/        rc=$batch_rc/~scan_changed_odd_error'
 'scratch_component~bin/av-scan~s/(\^|\/)${REPLY}(\/|\$)/${REPLY}/~scan_scratch_components'
 'scan_stamp_exit~bin/av-scan~s/\[ "$rc" -le 1 \]/true/g~scan_changed_stamps'
-'scan_size_check~bin/av-scan~/^            \[\[ -z $value /d~scan_memory_invalid'
+'scan_size_check~bin/av-scan~/^        \[\[ -z $value /d~scan_memory_invalid'
 'vanished_probed_count~bin/av-scan~/\[ "$probed" = "$count" \] || bad=1/d~scan_vanished_empty_list'
 'vanished_probe_condition~bin/av-scan~s@\[ "$count" -gt 0 \]; then@[ -s "$copy_dir/vanished" ]; then@~scan_vanished_empty_list'
 'vanished_parent_access~bin/av-scan~/if \[ -e "$q" \]; then \[ -d "$q" \] \&\& \[ -x "$q" \] || exit 1; fi/d~scan_vanished_unsearchable'

@@ -420,23 +420,61 @@ Regex metacharacters in scratch names are literal. Full clamscan scans use the
 same scratch expressions as `--exclude-dir` arguments. Scratch exclusions switch
 clamdscan to clamscan when available; otherwise a warning reports the limitation.
 
-The changed list is a private, temporary newline-delimited `--file-list` under
-`AV_LOG_DIR`, removed on exit. A filename containing a newline is reported with
-shell quoting and fails the scan without splitting its name or advancing stamps.
+Changed scans keep ordinary filenames in a private, temporary newline-delimited
+`--file-list` under `AV_LOG_DIR`. Names containing LF (newline) or CR (carriage
+return) instead travel through a private NUL-delimited stream into individually
+quoted clamscan arguments. This avoids both line splitting (FAULT-0005) and
+possible CR stripping by a file-list reader (FAULT-0006); neither character is
+removed or interpreted as another filename. ClamAV NUL-list support is not
+required. Argument batches hold at most 128 names, with an additional size bound;
+all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
+An earlier batch error cannot be erased by a later clean batch. Temporary lists
+and captured output are removed on exit.
+
+The walk uses GNU find's `-ignore_readdir_race`. If find still exits non-zero,
+the scan processes everything it listed, logs **partial walk**, returns an error
+(2 unless the scanner returned another error), and leaves both stamps unchanged.
+Keeping the stamps ensures the next run retries files that the incomplete walk
+may have missed; the error is never silently forgiven. Threat reporting and
+`AV_ON_FOUND` still run if the partial walk's scanner finds a threat.
 With clamdscan selected, changed mode uses clamscan when available, otherwise it
-logs a fallback to a full clamdscan scan. An empty list logs `nothing changed`
-and advances the good-scan stamp without invoking the scanner.
+logs a fallback to a full clamdscan scan. An empty successful walk logs
+`nothing changed` and advances the good-scan stamp without invoking the scanner.
 
 `AV_LOG_DIR/last-good-scan.stamp` and `last-full-scan.stamp` record scan **start**
 times, preserving eligibility for files changed during a scan. Stamps advance
 only after the report is written and the scanner exits 0 (clean) or 1 (found).
-Errors, timeouts, signals, and forgiven vanished-file errors leave stamps alone.
+Errors, partial walks, timeouts, signals, and forgiven vanished-file errors leave
+stamps alone.
 Deleting both stamps requests a new full scan. Use a separate `AV_LOG_DIR` for
 independent scan path sets so their histories do not share stamps.
 
 Re-run `--install-timer` after changing either memory setting. Invalid sizes fail
 before either unit is written. The scan unit also sets `CPUQuota=100%` and
 `CPUWeight=20`, with `Nice=10` and `IOSchedulingClass=idle`.
+
+For OVH, `root-install.sh` installs
+`/etc/systemd/system/linux-av-scan.service.d/limits.conf` atomically as root:root
+0644, then calls `systemctl daemon-reload`. It never enables, starts or restarts
+units and leaves the timer state alone (R-3377). Starting remains a separate
+card; do not restart the scan as part of this build or install.
+
+`av-scan --render-scan-limits` renders that drop-in without installing or
+activating anything. It shares memory defaults/validation with `--install-timer`
+and reads CPU values from the same service template, so there is one source for
+each value. The installer pins config selection to an empty private file for
+predictable defaults; explicit `AV_SCAN_MEMORY_HIGH`/`AV_SCAN_MEMORY_MAX`
+environment overrides remain available. Its `# sha256` manifest pins all three
+rendering inputs (`bin/av-scan`, `lib/common.sh`, `systemd/av-scan.service`), and
+installation prints the generated drop-in's SHA-256 alongside the installed
+script/library hashes.
+
+Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
+The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
+`tests/run.sh` also checks bounded batches, a shared timeout and retained errors.
+The scanner and test harness already require Bash; `root-install.sh` remains
+POSIX sh. On a host where `sh` is Dash, use Bash to parse/run those existing Bash
+files (`bash -n bin/av-scan`, `bash tests/run.sh`, `bash tests/mutants.sh`).
 
 `av-setup` installs and enables auditd, but deliberately does **not** invent an
 audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify

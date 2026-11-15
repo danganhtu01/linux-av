@@ -661,6 +661,7 @@ EOF
     SCAN_ENV=()
 }
 scan() {
+    rm -f -- "$D/args"
     : > "$D/copies"; : > "$D/copy-modes"
     OUT="$("$TIMEOUT_BIN" 3s "$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
         AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" \
@@ -671,7 +672,9 @@ scan() {
     assert_copy_isolation
 }
 assert_copy_isolation() {
-    local copy dir escaped char i mode
+    local copy dir escaped char i mode arg invocations=0
+    for arg in "${ARGS[@]}"; do [ "$arg" != --stdout ] || invocations=$((invocations + 1)); done
+    [ "$invocations" -gt 0 ] || invocations=1
     while IFS= read -r copy; do
         dir="${copy%/*}"
         assert_nofile "$dir" "private copy directory removed"
@@ -683,8 +686,8 @@ assert_copy_isolation() {
             esac
             escaped+="$char"
         done
-        assert_scan_arg "--exclude-dir=^${escaped}(/|$)"
-        assert_scan_arg "--exclude=^${escaped}(/|$)"
+        assert_scan_arg "--exclude-dir=^${escaped}(/|$)" "$invocations"
+        assert_scan_arg "--exclude=^${escaped}(/|$)" "$invocations"
     done < "$D/copies"
     while IFS= read -r mode; do
         assert_eq "$mode" 700 "private copy directory mode"
@@ -693,7 +696,7 @@ assert_copy_isolation() {
 assert_scan_arg() {
     local arg count=0
     for arg in "${ARGS[@]}"; do [ "$arg" != "$1" ] || count=$((count + 1)); done
-    assert_eq "$count" 1 "scanner argument $1"
+    assert_eq "$count" "${2:-1}" "scanner argument $1"
 }
 assert_mount_count() {
     local arg count=0
@@ -1514,7 +1517,68 @@ row_root_install_hashes() {
         n=$((n+1))
         assert_eq "$(sha256sum < "$REPO/$rel" | cut -c1-64)" "$hex" "root-install.sh lists the SHA-256 of $rel"
     done < "$REPO/root-install.sh"
-    assert_eq "$n" 2 "root-install.sh lists two files"
+    assert_eq "$n" 3 "root-install.sh lists three rendering inputs"
+}
+
+# Execute a scratch copy of the complete installer; no real privileged tool runs.
+row_root_install_limits() {
+    new_fixture "$ROW"
+    mkdir -p "$R/usr/local/lib/linux-av/bin" "$R/usr/local/lib/linux-av/lib" \
+        "$R/etc/systemd/system/linux-av-scan.service.d" "$R/etc/needrestart/conf.d" "$R/run"
+    ln -s "$BASH_BIN" "$B/bash"
+    ln -s "$(command -v sha256sum)" "$B/sha256sum"
+    stub hostname <<'STUB'
+echo OVH
+STUB
+    stub stat <<'STUB'
+case "$2" in
+    '%u %A') echo '0 drwxr-xr-x' ;;
+    '%u %g %a') echo '0 0 644' ;;
+    *) exit 1 ;;
+esac
+STUB
+    stub install <<'STUB'
+[ "$1 $2 $3 $4 $5" = '-o root -g root -m' ] || exit 1
+shift 5
+mode=$1; shift
+cp "$1" "$2" && chmod "$mode" "$2"
+STUB
+    stub perl <<'STUB'
+exit 0
+STUB
+    sed -e 's|^PATH=.*|PATH="$B"|' \
+        -e "s|/usr/local/lib|$R/usr/local/lib|g" \
+        -e "s|/etc/systemd/system|$R/etc/systemd/system|g" \
+        -e "s|/etc/needrestart|$R/etc/needrestart|g" \
+        -e "s|/run/linux-av-root-install|$R/run/linux-av-root-install|g" \
+        "$REPO/root-install.sh" > "$D/installer"
+    OUT="$(cd "$REPO" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
+        AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
+        CALLS="$CALLS" /bin/sh "$D/installer" 2>&1)"; RC=$?
+    assert_eq "$RC" 0 'scratch installer exit'
+    local drop="$R/etc/systemd/system/linux-av-scan.service.d/limits.conf" line
+    assert_file "$drop" 'limits installed'
+    assert_eq "$(cat "$drop" 2>/dev/null)" "$(printf '%s\n' \
+        '[Service]' MemoryHigh=2G MemoryMax=3G CPUQuota=100% CPUWeight=20)" 'exact installed bounds'
+    assert_eq "$(stat -c %a "$drop" 2>/dev/null)" 644 'drop-in mode'
+    assert_has "$(calls)" "install -o root -g root -m 0644" 'root ownership requested'
+    assert_has "$(calls)" "$drop.new" 'atomic sibling write'
+    assert_nofile "$drop.new" 'atomic rename completed'
+    assert_has "$OUT" "$(sha256sum < "$drop" 2>/dev/null | cut -c1-64)" 'drop-in hash recorded'
+    assert_has "$(calls)" 'systemctl daemon-reload' 'daemon reload'
+    local call
+    while IFS= read -r call; do
+        case "$call" in
+            'systemctl daemon-reload'|'systemctl show linux-av-scan.service -p TimeoutStartUSec --value'|'systemctl is-active linux-av-scan.timer') ;;
+            systemctl*) fail "unexpected unit action: $call" ;;
+        esac
+    done < "$CALLS"
+    # Compare the drop-in with the existing timer renderer's defaults.
+    SCAN_ENV=(); resource_install
+    local unit="$R/etc/systemd/system/linux-av-scan.service"
+    for line in MemoryHigh MemoryMax CPUQuota CPUWeight; do
+        assert_eq "$(sed -n "/^$line=/p" "$drop" 2>/dev/null)" "$(sed -n "/^$line=/p" "$unit")" 'timer and drop-in agree'
+    done
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.
@@ -1748,14 +1812,102 @@ row_scan_changed_stamps() {
         fi
     done
 }
+# OC-T-0067 round 2: control characters stay single, literal argv entries.
 row_scan_changed_newline() {
-    changed_fixture; changed_seed; touch "$D/tree/"$'new\nline'
-    local before; before="$(stat -c %Y "$L/last-good-scan.stamp")"
+    changed_fixture; changed_seed
+    local name="$D/tree/"$'new\nline'
+    touch "$name" "$D/tree/plain"
     scan --path "$D/tree"
-    [ "$RC" -ne 0 ] || fail 'newline name silently accepted'
-    assert_has "$OUT" 'newline' 'newline filename reported'
-    assert_lacks "$(calls)" 'clamscan ' 'no split names sent'
-    assert_eq "$(stat -c %Y "$L/last-good-scan.stamp")" "$before" 'stamp unchanged'
+    assert_eq "$RC" 0 'newline scan completes'
+    assert_scan_arg "$name"
+    assert_has "$(cat "$D/list" 2>/dev/null)" "$D/tree/plain" 'ordinary file still scanned'
+    assert_lacks "$(cat "$D/list" 2>/dev/null)" "$name" 'newline kept off file-list'
+    [ "$L/last-good-scan.stamp" -nt "$L/last-full-scan.stamp" ] || fail 'complete walk advances stamp'
+}
+row_scan_changed_cr() {
+    changed_fixture; changed_seed
+    local name="$D/tree/evil"$'\r' arg file seen=()
+    touch "$name" "$D/tree/evil"
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'CR scan completes'
+    assert_scan_arg "$name"
+    # Model the file-list reader's possible CR stripping, plus literal argv.
+    while IFS= read -r file; do seen+=("${file%$'\r'}"); done < "$D/list"
+    for arg in "${ARGS[@]}"; do case "$arg" in /*) seen+=("$arg") ;; esac; done
+    ARGS=("${seen[@]}")
+    assert_scan_arg "$name"
+    assert_scan_arg "$D/tree/evil"
+}
+row_scan_changed_vanishing_folder() {
+    changed_fixture; changed_seed
+    touch "$D/tree/kept"
+    mkdir "$D/tree/gone"
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    cp -p "$L/last-full-scan.stamp" "$D/full-before"
+    # Deterministic race at the find boundary: preserve output from the walk,
+    # then remove a discovered folder and return the traversal failure.
+    printf 'real_find=%q\n' "$(command -v find)" > "$D/find-path"
+    stub find <<'STUB'
+source "${SCAN_ARGS%/*}/find-path"
+"$real_find" "$@"
+rm -r "${SCAN_ARGS%/*}/tree/gone"
+echo 'find: folder vanished mid-walk' >&2
+exit 1
+STUB
+    scan --path "$D/tree"
+    assert_eq "$RC" 2 'partial coverage remains an error'
+    assert_has "$(cat "$D/list" 2>/dev/null)" "$D/tree/kept" 'listed file scanned despite race'
+    assert_has "$(calls)" '-ignore_readdir_race' 'find tolerates readdir races'
+    assert_has "$OUT" 'partial walk' 'partial walk reported'
+    assert_has "$OUT" 'stamps unchanged' 'retry rule reported'
+    assert_has "$(cat "$L/av-scan.log")" 'partial walk' 'partial walk persisted in log'
+    assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp unchanged'
+    assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp unchanged'
+}
+row_scan_changed_odd_batches() {
+    changed_fixture; changed_seed
+    local i=0 name
+    while [ "$i" -lt 260 ]; do
+        touch "$D/tree/odd-$i"$'\n'
+        i=$((i + 1))
+    done
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'bounded batches complete'
+    i=0
+    while [ "$i" -lt 260 ]; do
+        assert_scan_arg "$D/tree/odd-$i"$'\n'
+        i=$((i + 1))
+    done
+    assert_eq "$(grep -c '^clamscan ' "$CALLS")" 3 '128 names maximum per batch'
+}
+row_scan_changed_odd_timeout() {
+    changed_fixture; changed_seed
+    touch "$D/tree/normal" "$D/tree/odd"$'\r'
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+sleep 0.2
+STUB
+    ln -s "$(command -v sleep)" "$B/sleep"
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    SCAN_ENV=(AV_SCAN_TIMEOUT=0.3s)
+    scan --path "$D/tree"
+    assert_eq "$RC" 124 'all batches share one timeout'
+    assert_has "$OUT" 'time limit' 'timeout reported'
+    assert_eq "$(stat -c %Y "$L/last-good-scan.stamp")" "$(stat -c %Y "$D/good-before")" 'timeout keeps old stamp'
+}
+row_scan_changed_odd_error() {
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do case "$arg" in --file-list=*) exit 2 ;; esac; done
+exit 0
+STUB
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    scan --path "$D/tree"
+    assert_scan_arg "$D/tree/odd"$'\n'
+    assert_eq "$RC" 2 'later clean batch cannot erase an earlier error'
+    assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'mixed results keep stamp'
 }
 row_scan_changed_daemon() {
     changed_fixture; changed_seed; touch "$D/tree/new"

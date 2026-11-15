@@ -639,7 +639,7 @@ scan_fixture() {
     ln -s "$(command -v timeout)" "$B/timeout"
     ln -s "$(command -v realpath)" "$B/realpath"
     MOUNT_NEXT=42; : > "$D/mountinfo"
-    printf 'AV_EXCLUDE_DIRS=/legacy\n' > "$H/av.env"
+    printf 'AV_EXCLUDE_DIRS=/legacy\nAV_EXCLUDE_PATTERNS=""\nAV_FULL_EVERY=0\n' > "$H/av.env"
     stub clamscan <<'EOF'
 printf '%s\0' "$@" > "$SCAN_ARGS"
 if [ "${STUB_SCAN_LOOP:-0}" = 1 ]; then
@@ -1112,6 +1112,8 @@ row_scan_vanished_only() {
     assert_eq "$RC" 0 "vanished exit"
     assert_has "$OUT" 'scan finished; 2 file(s) vanished while it ran (not scanned), no other errors' "warning"
     assert_has "$OUT" "$(cat "$D/output")" "scanner output unchanged and ordered"
+    assert_nofile "$H/state/linux-av/last-good-scan.stamp" "forgiven error keeps good stamp absent"
+    assert_nofile "$H/state/linux-av/last-full-scan.stamp" "forgiven error keeps full stamp absent"
 }
 row_scan_vanished_empty_list() {
     scan_vanished_fixture; scan_vanished_summary
@@ -1354,7 +1356,9 @@ row_scan_vanished_physical_copy() {
 }
 row_scan_vanished_copy_resolution_failure() {
     scan_vanished_fixture; scan_vanished_summary
+    ln -s "$(command -v mktemp)" "$B/plain/mktemp"
     stub mktemp <<'STUB'
+case "$*" in *av-scan-state.*) exec "${BASH_SOURCE[0]%/*}/plain/mktemp" "$@" ;; esac
 printf '%s\n' "${SCAN_ARGS%/*}/missing-copy"
 STUB
     scan_vanished_check
@@ -1587,6 +1591,236 @@ row_installer_hash_lines() {
         assert_eq "${actual%% *}" "$hash" "sha256 of $path"
     done < <(grep -E '^[[:space:]]*#[[:space:]]*sha256' "$REPO/root-install.sh")
     [ "$count" -gt 0 ] || fail "no sha256 lines found"
+}
+# OC-T-0067: resource limits, scratch pruning, and incremental scans.
+resource_install() {
+    OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" \
+        AV_COLOR=never TMPDIR="$D" XDG_STATE_HOME="$H/state" CALLS="$CALLS" \
+        "${SCAN_ENV[@]}" "$BASH_BIN" "$REPO/bin/av-scan" --install-timer 86400000 2>&1)"; RC=$?
+}
+row_scan_memory_defaults() {
+    scan_fixture; resource_install
+    assert_eq "$RC" 0 'render exit'
+    local unit; unit="$(cat "$R/etc/systemd/system/linux-av-scan.service" 2>/dev/null)"
+    local line; for line in MemoryHigh=2G MemoryMax=3G CPUQuota=100% CPUWeight=20 Nice=10 IOSchedulingClass=idle; do
+        assert_has "$unit" "$line" 'resource bound'
+    done
+}
+row_scan_memory_values() {
+    scan_fixture
+    local value unit
+    for value in 12 4K 50M 6G 1T infinity ''; do
+        SCAN_ENV=(AV_SCAN_MEMORY_HIGH= "AV_SCAN_MEMORY_MAX=$value"); resource_install
+        assert_eq "$RC" 0 "accepted size $value"
+        unit="$(cat "$R/etc/systemd/system/linux-av-scan.service" 2>/dev/null)"
+        assert_lacks "$unit" 'MemoryHigh=' 'empty high omitted'
+        if [ -n "$value" ]; then assert_has "$unit" "MemoryMax=$value" 'max rendered'
+        else assert_lacks "$unit" 'MemoryMax=' 'empty max omitted'; fi
+    done
+}
+row_scan_memory_invalid() {
+    scan_fixture
+    local name value
+    for name in AV_SCAN_MEMORY_HIGH AV_SCAN_MEMORY_MAX; do
+        for value in 1GB -1 1.5G $'2G\nExecStart=bad' '1G|bad' ''; do
+            [ -n "$value" ] || continue
+            SCAN_ENV=("$name=$value"); resource_install
+            [ "$RC" -ne 0 ] || fail "accepted invalid $name"
+            assert_has "$OUT" "$name" 'clear validation error'
+            assert_nofile "$R/etc/systemd/system/linux-av-scan.service" 'no service written'
+            assert_nofile "$R/etc/systemd/system/linux-av-scan.timer" 'no timer written'
+            assert_lacks "$(calls)" 'systemctl ' 'no systemctl on invalid size'
+        done
+    done
+}
+row_scan_scratch_components() {
+    scan_fixture; printf 'AV_EXCLUDE_PATTERNS="target a.b .claude/worktrees"\n' >> "$H/av.env"
+    scan --path "$D/tree"
+    local arg regex found=0
+    for arg in "${ARGS[@]}"; do
+        [[ $arg = '--exclude-dir=(^|/)target(/|$)' ]] || continue
+        regex=${arg#--exclude-dir=}; found=1
+        [[ /x/target/child =~ $regex ]] || fail 'target tree included'
+        [[ ! /x/targets/child =~ $regex && ! /x/mytarget/child =~ $regex ]] || fail 'partial component excluded'
+    done
+    assert_eq "$found" 1 'whole component expression'
+    assert_scan_arg '--exclude-dir=(^|/)a\.b(/|$)'
+    assert_scan_arg '--exclude-dir=(^|/)\.claude/worktrees(/|$)'
+}
+row_scan_scratch_defaults() {
+    scan_fixture; sed -i '/^AV_EXCLUDE_PATTERNS=/d' "$H/av.env"; scan --path "$D"
+    local name
+    for name in node_modules target __pycache__; do assert_scan_arg "--exclude-dir=(^|/)$name(/|$)"; done
+    assert_scan_arg '--exclude-dir=(^|/)\.cache(/|$)'
+}
+changed_fixture() {
+    scan_fixture; ln -s "$(command -v find)" "$B/find"
+    sed -i '/^AV_EXCLUDE_PATTERNS=/d' "$H/av.env"
+    sed -i '/^AV_FULL_EVERY=/d' "$H/av.env"
+    mkdir -p "$D/tree" "$H/state/linux-av"
+    L="$H/state/linux-av"
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do
+    case "$arg" in --file-list=*)
+        f=${arg#--file-list=}; printf '%s\n' "$f" > "${SCAN_ARGS%/*}/list-path"
+        stat -c '%a' "$f" > "${SCAN_ARGS%/*}/list-mode"
+        cat "$f" > "${SCAN_ARGS%/*}/list" ;;
+    esac
+done
+exit "${SCAN_RC:-0}"
+STUB
+}
+changed_seed() {
+    touch -d '2 days ago' "$L/last-full-scan.stamp"
+    touch -d '1 day ago' "$L/last-good-scan.stamp"
+}
+row_scan_changed_selection() {
+    changed_fixture; changed_seed
+    touch "$D/tree/new" "$D/tree/metadata"
+    touch -d '10 days ago' "$D/tree/metadata"
+    mkdir -p "$D/tree/target" "$D/tree/targets" "$D/tree/.claude/worktrees" "$D/tree/cloud" "$D/tree/legacy"
+    touch "$D/tree/target/no" "$D/tree/targets/yes" "$D/tree/.claude/worktrees/no" "$D/tree/cloud/no" "$D/tree/legacy/no"
+    printf 'AV_EXCLUDE_DIRS="%s/tree/legacy"\n' "$D" >> "$H/av.env"
+    mount_entry "$D/tree/cloud" cifs
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'changed exit'
+    assert_has "$OUT" 'mode=changed' 'automatic changed mode'
+    local list; list="$(cat "$D/list" 2>/dev/null)"
+    assert_has "$list" "$D/tree/new" 'mtime change'
+    assert_has "$list" "$D/tree/metadata" 'ctime change'
+    assert_has "$list" "$D/tree/targets/yes" 'near match kept'
+    assert_lacks "$list" '/target/no' 'scratch pruned'
+    assert_lacks "$list" '/worktrees/no' 'multi component pruned'
+    assert_lacks "$list" '/cloud/no' 'mount pruned'
+    assert_lacks "$list" '/legacy/no' 'legacy pruned'
+    assert_eq "$(cat "$D/list-mode" 2>/dev/null)" 600 'private list'
+    assert_nofile "$(cat "$D/list-path" 2>/dev/null)" 'list cleaned'
+    assert_file "$L/last-good-scan.stamp" 'good stamp'
+}
+row_scan_changed_empty() {
+    changed_fixture; changed_seed
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'empty changed exit'
+    assert_has "$OUT" 'nothing changed' 'empty report'
+    assert_lacks "$(calls)" 'clamscan ' 'no engine needed for empty list'
+    [ "$L/last-good-scan.stamp" -nt "$L/last-full-scan.stamp" ] || fail 'stamp advanced'
+}
+row_scan_changed_modes() {
+    changed_fixture
+    scan --path "$D/tree"
+    assert_has "$OUT" 'mode=full' 'first scan full'
+    assert_file "$L/last-full-scan.stamp" 'full stamp'
+    touch -d '9 days ago' "$L/last-full-scan.stamp"
+    scan --path "$D/tree"
+    assert_has "$OUT" 'mode=full' 'expired full'
+    changed_seed; scan --full-scan --path "$D/tree"
+    assert_eq "$RC" 0 'forced full exit'; assert_has "$OUT" 'forced' 'forced reason'; assert_has "$OUT" 'mode=full' 'forced full'
+    rm -f "$L/last-full-scan.stamp"; touch "$D/tree/a"
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 0 'forced changed exit'; assert_has "$OUT" 'mode=changed' 'forced changed without full stamp'
+}
+row_scan_changed_intervals() {
+    changed_fixture; changed_seed
+    local duration
+    for duration in 1 1m 1h 1d; do
+        SCAN_ENV=("AV_FULL_EVERY=$duration"); scan --path "$D/tree"
+        assert_has "$OUT" 'mode=full' "expired interval $duration"; changed_seed
+    done
+    SCAN_ENV=(AV_FULL_EVERY=8d); scan --path "$D/tree"; assert_has "$OUT" 'mode=changed' 'fresh interval'
+    SCAN_ENV=(AV_FULL_EVERY=bogus); scan --path "$D/tree"
+    [ "$RC" -ne 0 ] || fail 'invalid duration accepted'
+    assert_has "$OUT" 'AV_FULL_EVERY' 'invalid interval diagnostic'
+}
+row_scan_changed_stamps() {
+    changed_fixture
+    local rc
+    for rc in 0 1 2 124 137 143; do
+        rm -f "$L/last-full-scan.stamp" "$L/last-good-scan.stamp"
+        SCAN_ENV=("SCAN_RC=$rc"); scan --path "$D/tree"
+        assert_eq "$RC" "$rc" "scanner exit $rc"
+        if [ "$rc" -le 1 ]; then
+            assert_file "$L/last-full-scan.stamp" "full completed $rc"
+            assert_file "$L/last-good-scan.stamp" "scan completed $rc"
+        else
+            assert_nofile "$L/last-full-scan.stamp" "full incomplete $rc"
+            assert_nofile "$L/last-good-scan.stamp" "scan incomplete $rc"
+        fi
+    done
+}
+row_scan_changed_newline() {
+    changed_fixture; changed_seed; touch "$D/tree/"$'new\nline'
+    local before; before="$(stat -c %Y "$L/last-good-scan.stamp")"
+    scan --path "$D/tree"
+    [ "$RC" -ne 0 ] || fail 'newline name silently accepted'
+    assert_has "$OUT" 'newline' 'newline filename reported'
+    assert_lacks "$(calls)" 'clamscan ' 'no split names sent'
+    assert_eq "$(stat -c %Y "$L/last-good-scan.stamp")" "$before" 'stamp unchanged'
+}
+row_scan_changed_daemon() {
+    changed_fixture; changed_seed; touch "$D/tree/new"
+    SCAN_ENV=(AV_ENGINE=clamdscan); scan --path "$D/tree"
+    assert_has "$OUT" 'changed scans require clamscan' 'daemon switch reason'
+    assert_has "$(calls)" 'clamscan ' 'standalone used'
+    : > "$CALLS"; unstub clamscan; changed_seed
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'fallback full exit'
+    assert_has "$OUT" 'falling back to full' 'fallback logged'
+    assert_has "$(calls)" 'clamdscan ' 'daemon full used'
+    assert_file "$L/last-full-scan.stamp" 'fallback full stamp'
+}
+row_scan_changed_pruning() {
+    changed_fixture; changed_seed
+    printf 'AV_EXCLUDE_PATTERNS="target a.b a*b"\n' >> "$H/av.env"
+    mkdir -p "$D/tree/x" "$D/tree/a.b" "$D/tree/axb" "$D/tree/a*b" "$D/tree/azb" "$D/tree/target"
+    touch "$D/tree/x/target" "$D/tree/a.b/no" "$D/tree/axb/yes" "$D/tree/a*b/no" "$D/tree/azb/yes" "$D/tree/target/no"
+    chmod 000 "$D/tree/target"
+    scan --path "$D/tree"
+    chmod 700 "$D/tree/target"
+    assert_eq "$RC" 0 'excluded tree never entered'
+    local list; list="$(cat "$D/list" 2>/dev/null)"
+    assert_has "$list" '/x/target' 'regular file named target kept'
+    assert_has "$list" '/axb/yes' 'dot escaped'
+    assert_has "$list" '/azb/yes' 'asterisk escaped'
+    assert_lacks "$list" '/a.b/no' 'literal dot tree pruned'
+    assert_lacks "$list" '/a*b/no' 'literal asterisk tree pruned'
+    changed_seed; printf 'AV_EXCLUDE_PATTERNS=""\n' >> "$H/av.env"
+    scan --path "$D/tree"
+    assert_has "$(cat "$D/list" 2>/dev/null)" '/target/no' 'empty disables patterns'
+}
+row_scan_changed_report_failure() {
+    changed_fixture; mkdir "$D/report-directory"
+    SCAN_ENV=("AV_LOG_FILE=$D/report-directory")
+    scan --path "$D/tree"
+    assert_eq "$RC" 2 'report failure exit'
+    assert_has "$OUT" 'scan report could not be written' 'report failure diagnostic'
+    assert_nofile "$L/last-good-scan.stamp" 'report failure keeps scan stamp absent'
+    assert_nofile "$L/last-full-scan.stamp" 'report failure keeps full stamp absent'
+}
+row_scan_changed_walk_failure() {
+    changed_fixture; changed_seed
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    scan --path "$D/missing"
+    assert_eq "$RC" 2 'walk failure exit'
+    assert_has "$OUT" 'changed-files walk failed' 'walk failure diagnostic'
+    assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'failed walk leaves stamp unchanged'
+    assert_lacks "$(calls)" 'clamscan ' 'incomplete walk not scanned'
+}
+row_scan_changed_snapshot() {
+    changed_fixture
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+touch "${SCAN_ARGS%/*}/tree/during-scan"
+STUB
+    scan --path "$D/tree"
+    assert_eq "$RC" 0 'snapshot full exit'
+    [ "$D/tree/during-scan" -nt "$L/last-good-scan.stamp" ] || fail 'stamp must refer to scan start'
+    stub clamscan <<'STUB'
+for arg in "$@"; do case "$arg" in --file-list=*) cat "${arg#--file-list=}" > "${SCAN_ARGS%/*}/list" ;; esac; done
+printf '%s\0' "$@" > "$SCAN_ARGS"
+STUB
+    scan --path "$D/tree"
+    assert_has "$(cat "$D/list" 2>/dev/null)" '/during-scan' 'change during previous scan retained'
 }
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then

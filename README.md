@@ -374,6 +374,10 @@ Key vars (all optional, shown with defaults):
 | Var | Default | Meaning |
 |---|---|---|
 | `AV_SCAN_PATHS` | `$HOME` | what `--now` scans |
+| `AV_EXCLUDE_PATTERNS` | `node_modules target .cache __pycache__ .venv .tox .gradle .claude/worktrees` | space-separated literal directory components or component sequences, excluded anywhere; empty disables |
+| `AV_FULL_EVERY` | `7d` | `--now` full-scan interval: seconds or digits with `d`/`h`/`m`; `0` makes every automatic scan full |
+| `AV_SCAN_MEMORY_HIGH` | `2G` | rendered scan unit's `MemoryHigh`; digits with optional `K`/`M`/`G`/`T`, or `infinity`; empty omits |
+| `AV_SCAN_MEMORY_MAX` | `3G` | rendered scan unit's `MemoryMax`; same syntax; empty omits |
 | `AV_EXCLUDE_FSTYPES` | `autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.*` | skip these filesystem types (shell patterns); empty disables |
 | `AV_MOUNTINFO` | `/proc/self/mountinfo` | mount table read at each scan, without probing mounts |
 | `AV_SCAN_TIMEOUT` | `12h` | scanner time limit; `0` disables; kill grace is 5 minutes |
@@ -401,6 +405,38 @@ mount counts.
 `clamscan` cuts a path to 512 characters before matching `--exclude-dir`, so a
 deeper mount point is not excluded. Set `AV_EXCLUDE_FSTYPES=` to scan network
 mounts on purpose.
+
+`av-scan --now` runs a full scan initially and whenever the last completed full
+scan is at least `AV_FULL_EVERY` old. Between full scans it walks regular files,
+selecting mtime or ctime newer than the last completed scan. Use
+`--changed --now` or `--full-scan --now` to force a mode for the selected paths;
+`--full` continues to select `/`. The log records the mode and reason.
+`--scheduled` keeps running full scans.
+
+Changed scans prune `AV_EXCLUDE_DIRS`, excluded mounts/filesystem types, and
+`AV_EXCLUDE_PATTERNS` before descending. Scratch names match complete components:
+`target` skips `/x/target/`, while keeping `/x/targets/` and `/x/mytarget/`.
+Regex metacharacters in scratch names are literal. Full clamscan scans use the
+same scratch expressions as `--exclude-dir` arguments. Scratch exclusions switch
+clamdscan to clamscan when available; otherwise a warning reports the limitation.
+
+The changed list is a private, temporary newline-delimited `--file-list` under
+`AV_LOG_DIR`, removed on exit. A filename containing a newline is reported with
+shell quoting and fails the scan without splitting its name or advancing stamps.
+With clamdscan selected, changed mode uses clamscan when available, otherwise it
+logs a fallback to a full clamdscan scan. An empty list logs `nothing changed`
+and advances the good-scan stamp without invoking the scanner.
+
+`AV_LOG_DIR/last-good-scan.stamp` and `last-full-scan.stamp` record scan **start**
+times, preserving eligibility for files changed during a scan. Stamps advance
+only after the report is written and the scanner exits 0 (clean) or 1 (found).
+Errors, timeouts, signals, and forgiven vanished-file errors leave stamps alone.
+Deleting both stamps requests a new full scan. Use a separate `AV_LOG_DIR` for
+independent scan path sets so their histories do not share stamps.
+
+Re-run `--install-timer` after changing either memory setting. Invalid sizes fail
+before either unit is written. The scan unit also sets `CPUQuota=100%` and
+`CPUWeight=20`, with `Nice=10` and `IOSchedulingClass=idle`.
 
 `av-setup` installs and enables auditd, but deliberately does **not** invent an
 audit policy. Add host-specific rules under `/etc/audit/rules.d/` and verify

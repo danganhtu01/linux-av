@@ -61,3 +61,162 @@ Fix candidate: branch codex/build/oc-t-0047-vanished-r10 at 354292e, not securit
 base = "e218946"
 head = "0a195a5"
 verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/runs/20261107T174046-1462295 (round 9 FAIL); critic-security workflow wf_4c4aa267-7e4 (round 9 CLEAR), session 3188114e; chief ruling CA-A-0372"
+
+[[fault]]
+id = "FAULT-0005"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Medium"
+rule = "none"
+where = "bin/av-scan:448-462"
+fault = """
+A changed-files run returns 2 before clamscan runs when find exits non-zero (the walk has no -ignore_readdir_race, so a folder vanishing mid-walk is enough) or when any walked name holds a newline.
+Any local user (touch /tmp/$'x\\ny') or ordinary temp churn makes every changed run scan nothing, and coverage of every file falls to one full scan per AV_FULL_EVERY (7 days).
+Confirmed by os-config reading the code.
+"""
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0006"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Medium"
+rule = "none"
+where = "bin/av-scan:454"
+fault = """
+Unconfirmed: clamscan --file-list (ClamAV filelist() in shared/misc.c, as the seat recalls it) strips a trailing CR as well as LF, so a file named evil<CR> beside a harmless evil is read as the harmless one twice; the payload is skipped and the good stamp advances.
+Over-long paths are split into fragments.
+"""
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0007"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Medium"
+rule = "none"
+where = "root-install.sh:9-14,45-52"
+fault = """
+root-install.sh writes no MemoryHigh, MemoryMax, CPUQuota or CPUWeight, so part (a), the resource bounds, never reaches OVH live linux-av-scan.service; av-scan --install-timer would render them but also runs enable --now, which R-3377 leaves to a separate card.
+A run card that installs this build must add a drop-in for them or say they are not live.
+"""
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0008"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:446-450"
+fault = "Moving a folder changes only that folder ctime, not its files, so files staged in an excluded folder (for example .cache) and moved into a scan path after a good stamp are missed by changed scans until the next full scan."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0009"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:362-366,410"
+fault = "The name-based excludes (AV_EXCLUDE_PATTERNS, default node_modules target .cache __pycache__ .venv .tox .gradle .claude/worktrees) also apply in full scans, so any user can make /tmp/a/.cache/ and nothing in it is ever scanned; node_modules and .venv are where supply-chain payloads land."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0010"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:362-366,426-429"
+fault = """
+A bad pattern prunes the scan root: the pattern / makes the walk regex match /, every changed run logs clean, nothing changed, and the stamps advance; a leading / anchors absolutely; a pattern matching part of a scan path prunes the start folder.
+Only root sets the value.
+"""
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0011"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:93,124-130"
+fault = "The stamps do not record which paths and excludes they cover, so widening AV_SCAN_PATHS or removing an exclude leaves newly covered older files unscanned for up to 7 days, and a forced narrow --full-scan --path /tmp --now writes the whole-root full stamp."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0012"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:102-106"
+fault = "A good stamp in the future (the clock stepped back) is not caught; files changed in the gap are older than the stamp and are skipped until a full scan is due."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0013"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:163"
+fault = """
+If tee cannot write its copy, a clamscan exit 1 (found) becomes 2: the log says scanner error instead of THREATS FOUND and AV_ON_FOUND does not run.
+At a66d320 exit 1 survived.
+"""
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0014"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:140"
+fault = "Unconfirmed, operational: a listed file deleted before clamscan reaches it gives Cannot access file, which is not the forgiven vanished-file line, so on a busy root every run may exit 2 and write no stamp, and the changed mode never takes effect."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0015"
+status = "open"
+raised = "202611151616VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:124"
+fault = "A found threat advances the stamps (exit 1), so with quarantine off (OVH ExecStart has no -q) it is reported once and again only at the next full scan; a66d320 reported it on every run."
+base = "a66d320"
+head = "41fc17e"
+verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"

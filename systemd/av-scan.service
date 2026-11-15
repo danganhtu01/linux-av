@@ -1,4 +1,4 @@
-# Rendered by `av-scan --install-timer` (placeholders @BIN@ / @PATHS@ filled in).
+# Rendered by `av-scan --install-timer` (path and memory placeholders filled in).
 # Installed to /etc/systemd/system/<AV_TIMER_NAME>.service on every distro
 # (Arch, Debian, Ubuntu all use systemd, so this file is identical everywhere).
 [Unit]
@@ -17,3 +17,7 @@ Environment=AV_SCAN_PATHS=@PATHS@
 ExecStart=@BIN@ --now
 Nice=10
 IOSchedulingClass=idle
+@MEMORY_HIGH@
+@MEMORY_MAX@
+CPUQuota=100%
+CPUWeight=20

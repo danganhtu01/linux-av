@@ -64,7 +64,7 @@ verdicts = "Codex critic run /home/atdang/.local/state/llm-models/codex-helper/r
 
 [[fault]]
 id = "FAULT-0005"
-status = "open"
+status = "fixed"
 raised = "202611151616VN"
 build = "OC-T-0067"
 severity = "Medium"
@@ -78,6 +78,7 @@ Confirmed by os-config reading the code.
 base = "a66d320"
 head = "41fc17e"
 verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+fixed_by = "3cdbcd7"
 
 [[fault]]
 id = "FAULT-0006"
@@ -88,16 +89,18 @@ severity = "Medium"
 rule = "none"
 where = "bin/av-scan:454"
 fault = """
-Unconfirmed: clamscan --file-list (ClamAV filelist() in shared/misc.c, as the seat recalls it) strips a trailing CR as well as LF, so a file named evil<CR> beside a harmless evil is read as the harmless one twice; the payload is skipped and the good stamp advances.
-Over-long paths are split into fragments.
+Half fixed by 3cdbcd7: names holding LF or CR now go to clamscan as quoted argv, never through --file-list (the seat confirmed from OVH clamscan 1.5.4 that its file-list reader, fgets into a 1024-byte buffer, strips a trailing LF and CR).
+Still open (the round 2 seat M1, Medium): names without LF or CR still go to --file-list at any length, and fgets splits a line into 1023-byte pieces, each its own target, a piece not starting with / resolved from WorkingDirectory=/.
+A harmless file padded to a 1023-byte path ending in abc beside malware at the same path ending in abcetc/hostname makes a changed run scan abc and /etc/hostname, never the malware, rc 0, and the good stamp passes it until the weekly full scan.
+Fix: names of 1022 bytes or more (LC_ALL=C) go as argv too (OC-T-0067 round 3).
 """
 base = "a66d320"
-head = "41fc17e"
+head = "3cdbcd7"
 verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
 
 [[fault]]
 id = "FAULT-0007"
-status = "open"
+status = "fixed"
 raised = "202611151616VN"
 build = "OC-T-0067"
 severity = "Medium"
@@ -110,6 +113,7 @@ A run card that installs this build must add a drop-in for them or say they are 
 base = "a66d320"
 head = "41fc17e"
 verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+fixed_by = "3cdbcd7"
 
 [[fault]]
 id = "FAULT-0008"
@@ -220,3 +224,95 @@ fault = "A found threat advances the stamps (exit 1), so with quarantine off (OV
 base = "a66d320"
 head = "41fc17e"
 verdicts = "os-config@414ff69:docs/20261115_OC-T-0062-0067_later-seat-verdicts.md (linux-av seat 1, critic-security, transcript agent-a2555cb0c63ec8800.jsonl of session 3188114e)"
+
+[[fault]]
+id = "FAULT-0016"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:155"
+fault = """
+The batch merge lets an error (2) outrank a threat (1): malware in an ordinary name plus an LF-named decoy deleted after the walk ends rc 2, logged as scanner error instead of THREATS FOUND, and AV_ON_FOUND does not run (Medium on a host that sets AV_ON_FOUND; OVH sets none).
+Round 3 fixes it.
+"""
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+
+[[fault]]
+id = "FAULT-0017"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:149-151"
+fault = """
+One database load per 128 odd names: about 100k LF-named files force some 800 clamscan runs a changed run, past the 12 h timeout at scale, and the stamps freeze.
+The limit counts characters, not bytes.
+Fix: batch by bytes up to about 1 MiB.
+"""
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+
+[[fault]]
+id = "FAULT-0018"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:154"
+fault = "One LF or CR name over 128 KiB (MAX_ARG_STRLEN, by deep nesting) makes execve fail with E2BIG: that batch returns 126 and every changed run errors while the name stays changed; the rest is still scanned (fails safe)."
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+
+[[fault]]
+id = "FAULT-0019"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "bin/av-scan:223-225"
+fault = "Any odd name makes at least two clamscan runs and two SCAN SUMMARY headers, which the parser marks bad, so vanished-file forgiveness never applies: one lasting CR-named file plus ordinary churn keeps the good stamp frozen until the weekly full scan (fails safe)."
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+
+[[fault]]
+id = "FAULT-0020"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "root-install.sh:58"
+fault = """
+limits.conf sorts after OVH R-3377-cpu-cap.conf and repeats its CPUQuota and CPUWeight: two sources on the host, a later edit to R-3377-cpu-cap.conf silently overridden, and the name breaks the numbered drop-in convention.
+Round 3 drops the CPU lines from limits.conf.
+"""
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+
+[[fault]]
+id = "FAULT-0021"
+status = "open"
+raised = "202611160632VN"
+build = "OC-T-0067"
+severity = "Low"
+rule = "none"
+where = "lib/common.sh:69-70"
+fault = """
+Unmeasured: MemoryHigh=2G and MemoryMax=3G against clamscan non-cache memory on a large archive could OOM-kill a scan (rc 137) or throttle it past 12 h.
+The 2026-11-12 14.3 GB peak was mostly page cache; the database is 169M.
+Watch the first run for rc 137.
+"""
+base = "22f338a"
+head = "3cdbcd7"
+verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"

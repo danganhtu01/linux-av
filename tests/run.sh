@@ -1618,19 +1618,21 @@ row_root_install_no_exec_bits() {
     assert_has "$OUT" 'root-install: done' 'installer ran to its end'
 }
 # OC-T-0067: run card 23989 replaced av-scan and common.sh and then stopped at the renderer. A failure while
-# rendering or checking must change nothing installed: here the renderer fails (its unit template is missing
-# from the copy), and the installer must stop before its first keep or put.
+# rendering or checking must change nothing installed: here the renderer fails (an explicit memory override that
+# is not a systemd size), and the installer must stop before its first keep or put.
 row_root_install_render_first() {
     root_install_scratch
     local tree="$D/tree"
-    mkdir -p "$tree/bin" "$tree/lib"
+    mkdir -p "$tree/bin" "$tree/lib" "$tree/systemd"
     cp "$REPO/bin/av-scan" "$tree/bin/av-scan"
     cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
+    cp "$REPO/systemd/av-scan.service" "$tree/systemd/av-scan.service"
     cp "$D/installer" "$tree/root-install.sh"
     OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
         AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
-        CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
+        AV_SCAN_MEMORY_HIGH=not-a-size CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
     [ "$RC" != 0 ] || fail 'installer went on after its renderer failed'
+    assert_has "$OUT" 'AV_SCAN_MEMORY_HIGH must be a systemd size' 'the renderer is what failed'
     assert_lacks "$(calls)" 'install -o root' 'nothing installed before the failure'
     assert_lacks "$(calls)" 'systemctl' 'nothing reloaded before the failure'
     assert_nofile "$R/usr/local/lib/linux-av/bin/av-scan.before-R-3377" 'no scanner backup made'

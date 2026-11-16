@@ -1425,7 +1425,13 @@ root_install_fixture() {
     new_fixture "$ROW"
     # Bounded by the two functions themselves, so no wording elsewhere can pull install steps in.
     sed -n '/^put() {/,/^}/p; /^keep() {/,/^}/p' "$REPO/root-install.sh" > "$D/functions"
-    [ "$(grep -c '^put() {\|^keep() {' "$D/functions")" = 2 ] || fail 'root-install.sh lost its put or keep function'
+    # OC-T-0096: two headers, two closing braces, ending on one; otherwise the cut ran on into the install steps,
+    # so nothing is sourced (an empty file makes every row that calls put or keep go red).
+    if [ "$(grep -c '^put() {\|^keep() {' "$D/functions")" != 2 ] || [ "$(grep -c '^}' "$D/functions")" != 2 ] ||
+        [ "$(tail -n 1 "$D/functions")" != '}' ]; then
+        : > "$D/functions"
+        fail 'root-install.sh put and keep functions are not two whole blocks'
+    fi
 }
 root_functions() {
     OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
@@ -1661,6 +1667,9 @@ row_root_install_render_empty() {
     cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
     cp "$REPO/systemd/av-scan.service" "$tree/systemd/av-scan.service"
     cp "$D/installer" "$tree/root-install.sh"
+    # OC-T-0096: an installed copy to keep, so a keep before the guard would leave a backup behind.
+    local lib="$R/usr/local/lib/linux-av"
+    printf 'old scanner\n' > "$lib/bin/av-scan"; printf 'old library\n' > "$lib/lib/common.sh"
     OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
         AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
         CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
@@ -1668,6 +1677,10 @@ row_root_install_render_empty() {
     assert_has "$OUT" 'rendered empty' 'empty render refused'
     assert_lacks "$(calls)" 'install -o root' 'nothing installed after an empty render'
     assert_lacks "$OUT" 'kept: ' 'no backup made after an empty render'
+    assert_eq "$(cat "$lib/bin/av-scan")" 'old scanner' 'installed scanner untouched after an empty render'
+    assert_eq "$(cat "$lib/lib/common.sh")" 'old library' 'installed library untouched after an empty render'
+    assert_nofile "$lib/bin/av-scan.before-R-3377" 'no scanner backup after an empty render'
+    assert_nofile "$lib/lib/common.sh.before-R-3377" 'no library backup after an empty render'
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.

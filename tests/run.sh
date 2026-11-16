@@ -1423,9 +1423,9 @@ row_scan_vanished_copy_excluded() {
 # Read only the installer functions, never its root entrypoint.
 root_install_fixture() {
     new_fixture "$ROW"
-    # The functions end where the render-first block's comment starts (OC-T-0067 round 6 moved the keep calls below it).
-    sed -n '/^put() {/,/^# OC-T-0067: everything is rendered/{ /^# OC-T-0067: everything is rendered/d; p; }' \
-        "$REPO/root-install.sh" > "$D/functions"
+    # Bounded by the two functions themselves, so no wording elsewhere can pull install steps in.
+    sed -n '/^put() {/,/^}/p; /^keep() {/,/^}/p' "$REPO/root-install.sh" > "$D/functions"
+    [ "$(grep -c '^put() {\|^keep() {' "$D/functions")" = 2 ] || fail 'root-install.sh lost its put or keep function'
 }
 root_functions() {
     OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
@@ -1481,14 +1481,20 @@ row_root_install_perl_guard() {
     local status
     for status in 1 0; do
         stub perl <<< "exit $status"
+        rm -f "$D/installed" "$D/kept" "$D/puts"
+        # The fragment now spans the keep and put calls (OC-T-0067 round 6): record them, copy only the conf.
         OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '
+            set -u
             die() { echo "$*" >&2; exit 1; }
-            put() { cp "$1" "$t/installed"; }
-            t="$1"; source "$t/config-fragment"
+            keep() { echo "$1" >> "$t/kept"; }
+            put() { echo "$1" >> "$t/puts"; case $1 in "$t/linux-av.conf") cp "$1" "$t/installed" ;; esac; }
+            t="$1"; here="$t/tree"; dst="$t/dst"; source "$t/config-fragment"
         ' sh "$D" 2>&1)"; RC=$?
         assert_eq "$RC" "$status" "Perl status $status"
         if [ "$status" = 1 ]; then
             assert_nofile "$D/installed" "invalid Perl never installed"
+            assert_nofile "$D/kept" "invalid Perl: nothing kept"
+            assert_nofile "$D/puts" "invalid Perl: nothing put"
             assert_has "$OUT" 'does not parse' "parse refusal reason"
         else
             assert_same "$D/linux-av.conf" "$D/installed" "valid Perl installed"
@@ -1628,9 +1634,15 @@ row_root_install_render_first() {
     cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
     cp "$REPO/systemd/av-scan.service" "$tree/systemd/av-scan.service"
     cp "$D/installer" "$tree/root-install.sh"
+    # An installed copy to keep, so a keep before the failure would leave a backup behind.
+    local lib="$R/usr/local/lib/linux-av"
+    printf 'old scanner\n' > "$lib/bin/av-scan"; printf 'old library\n' > "$lib/lib/common.sh"
     OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
         AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
         AV_SCAN_MEMORY_HIGH=not-a-size CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
+    assert_eq "$(cat "$lib/bin/av-scan")" 'old scanner' 'installed scanner untouched'
+    assert_eq "$(cat "$lib/lib/common.sh")" 'old library' 'installed library untouched'
+    assert_nofile "$lib/lib/common.sh.before-R-3377" 'no library backup made'
     [ "$RC" != 0 ] || fail 'installer went on after its renderer failed'
     assert_has "$OUT" 'AV_SCAN_MEMORY_HIGH must be a systemd size' 'the renderer is what failed'
     assert_lacks "$(calls)" 'install -o root' 'nothing installed before the failure'
@@ -1639,6 +1651,23 @@ row_root_install_render_first() {
     assert_lacks "$OUT" 'written: ' 'no file written'
     assert_lacks "$OUT" 'kept: ' 'no backup made'
     assert_lacks "$OUT" 'root-install: done' 'installer stopped'
+}
+# OC-T-0067: a renderer that exits 0 having printed nothing is refused, before anything is kept or installed.
+row_root_install_render_empty() {
+    root_install_scratch
+    local tree="$D/tree"
+    mkdir -p "$tree/bin" "$tree/lib" "$tree/systemd"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$tree/bin/av-scan"
+    cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
+    cp "$REPO/systemd/av-scan.service" "$tree/systemd/av-scan.service"
+    cp "$D/installer" "$tree/root-install.sh"
+    OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
+        AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
+        CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
+    [ "$RC" != 0 ] || fail 'installer went on after an empty render'
+    assert_has "$OUT" 'rendered empty' 'empty render refused'
+    assert_lacks "$(calls)" 'install -o root' 'nothing installed after an empty render'
+    assert_lacks "$OUT" 'kept: ' 'no backup made after an empty render'
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.

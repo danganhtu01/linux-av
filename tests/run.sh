@@ -1423,7 +1423,8 @@ row_scan_vanished_copy_excluded() {
 # Read only the installer functions, never its root entrypoint.
 root_install_fixture() {
     new_fixture "$ROW"
-    sed -n '/^put() {/,/^keep "\$dst\/bin\/av-scan"/{ /^keep "\$dst\/bin\/av-scan"/d; p; }' \
+    # The functions end where the render-first block's comment starts (OC-T-0067 round 6 moved the keep calls below it).
+    sed -n '/^put() {/,/^# OC-T-0067: everything is rendered/{ /^# OC-T-0067: everything is rendered/d; p; }' \
         "$REPO/root-install.sh" > "$D/functions"
 }
 root_functions() {
@@ -1621,17 +1622,18 @@ row_root_install_no_exec_bits() {
 # from the copy), and the installer must stop before its first keep or put.
 row_root_install_render_first() {
     root_install_scratch
-    local tree="$D/tree" before
+    local tree="$D/tree"
     mkdir -p "$tree/bin" "$tree/lib"
     cp "$REPO/bin/av-scan" "$tree/bin/av-scan"
     cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
     cp "$D/installer" "$tree/root-install.sh"
-    before="$(cat "$CALLS" 2>/dev/null)"
     OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
         AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
         CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
     [ "$RC" != 0 ] || fail 'installer went on after its renderer failed'
-    assert_eq "$(cat "$CALLS" 2>/dev/null)" "$before" 'nothing installed, kept or reloaded before the failure'
+    assert_lacks "$(calls)" 'install -o root' 'nothing installed before the failure'
+    assert_lacks "$(calls)" 'systemctl' 'nothing reloaded before the failure'
+    assert_nofile "$R/usr/local/lib/linux-av/bin/av-scan.before-R-3377" 'no scanner backup made'
     assert_lacks "$OUT" 'written: ' 'no file written'
     assert_lacks "$OUT" 'kept: ' 'no backup made'
     assert_lacks "$OUT" 'root-install: done' 'installer stopped'

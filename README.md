@@ -422,18 +422,26 @@ clamdscan to clamscan when available; otherwise a warning reports the limitation
 
 Changed scans keep ordinary filenames in a private, temporary newline-delimited
 `--file-list` under `AV_LOG_DIR`. Names containing LF (newline) or CR (carriage
-return), or measuring **1022 bytes or more** under `LC_ALL=C`, instead travel
+return), or measuring **1022 through 4095 bytes** under `LC_ALL=C`, instead travel
 through a private NUL-delimited stream into individually quoted clamscan
 arguments. ClamAV 1.5.4's file-list reader uses `fgets` with a 1024-byte buffer;
 longer lines can split into separate targets, including relative paths. This
 avoids line splitting (FAULT-0005 and FAULT-0006) and possible CR stripping;
 names stay literal. ClamAV NUL-list support is not
-required. Argument batches hold at most 128 names, with an additional size bound;
+required. Paths measuring **4096 bytes or more** take neither route: clamscan
+cannot open them through either route (PATH_MAX). Each is logged as unscannable
+with its byte length and a safely quoted 80-byte prefix. Other files still scan,
+including ordinary batch-mates; the run returns 2 and holds both stamps even if
+a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
+individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
+Argument batches hold at most 128 names, with an additional size bound;
 all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
-An earlier batch error cannot be erased by a later clean batch. A threat in any
-batch takes priority over errors in other batches: the run returns 1, reports
-`THREATS FOUND` and invokes `AV_ON_FOUND`, while batch errors remain visible in
-the log (FAULT-0016). This matches
+An earlier batch error cannot be erased by a later clean batch. The batch merge
+reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
+and invokes `AV_ON_FOUND`, while any batch error holds both
+stamps and logs that the next run will retry (FAULT-0016). A private failure
+marker preserves this distinction independently of the merged reporting status.
+The reporting priority matches
 [ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
 which selects infection before errors. Temporary lists and captured output are
 removed on exit.
@@ -450,9 +458,10 @@ logs a fallback to a full clamdscan scan. An empty successful walk logs
 
 `AV_LOG_DIR/last-good-scan.stamp` and `last-full-scan.stamp` record scan **start**
 times, preserving eligibility for files changed during a scan. Stamps advance
-only after the report is written and the scanner exits 0 (clean) or 1 (found).
-Errors, partial walks, timeouts, signals, and forgiven vanished-file errors leave
-stamps alone.
+only after the report is written and every scanner batch completes with 0
+(clean) or 1 (found). Any batch error holds both stamps, including a threat plus
+an error whose merged reporting status is 1. Unscannable paths, partial walks,
+timeouts, signals, and forgiven vanished-file errors also leave stamps alone.
 Deleting both stamps requests a new full scan. Use a separate `AV_LOG_DIR` for
 independent scan path sets so their histories do not share stamps.
 
@@ -485,8 +494,13 @@ script/library hashes.
 Round 3 closes the long-name remainder of FAULT-0006, FAULT-0016 and FAULT-0020.
 The new long-name, mixed-result and memory-only installer regressions fail at
 `0d5499d`; mutants check the length boundary, byte counting, batch precedence
-and duplicate CPU settings. FAULT-0017, FAULT-0018, FAULT-0019 and FAULT-0021
-remain unchanged, including the existing argument batching and memory limits.
+and duplicate CPU settings. Round 4 fixes round 3's held-stamp regression for
+threat-plus-error batches and bounds long names at 4096 bytes (FAULT-0018).
+The stamp assertions and unscannable-path regression fail at `c1f08de`; mutants
+remove the stamp hold, remove or raise the path bound, count characters instead
+of bytes, and remove the forced error status. FAULT-0017, FAULT-0019 and
+FAULT-0021 remain unchanged, including the existing memory limits and OVH CPU
+drop-in dependency.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

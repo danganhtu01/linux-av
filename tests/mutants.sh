@@ -18,6 +18,12 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
+'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
+'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'
+'path_length_raised~bin/av-scan~s/"${#1}" -lt 4096/"${#1}" -lt 4097/~scan_changed_unscannable'
+'path_character_count~bin/av-scan~s/local LC_ALL=C label/local label/~scan_changed_unscannable'
+'path_error_status_removed~bin/av-scan~/^    if \[ "$unscannable" = 1 \]; then rc=2; fi$/d~scan_changed_unscannable'
 # OC-T-0067 round 3: length boundary, byte count, threat priority and CPU owner.
 'file_list_length_removed~bin/av-scan~s/\&\& ${#1} -lt 1022//~scan_changed_long_names'
 'file_list_length_relaxed~bin/av-scan~s/${#1} -lt 1022/${#1} -lt 1023/~scan_changed_long_names'

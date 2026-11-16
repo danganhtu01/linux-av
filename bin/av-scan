@@ -139,6 +139,16 @@ scan_file_list_safe() {
     [[ $1 != *$'\n'* && $1 != *$'\r'* && ${#1} -lt 1022 ]]
 }
 
+# Neither file-list nor argv can open a PATH_MAX-sized name. Bound argv well
+# below MAX_ARG_STRLEN too; quote only a short byte prefix in the diagnostic.
+scan_path_scannable() {
+    local LC_ALL=C label
+    [ "${#1}" -lt 4096 ] && return 0
+    printf -v label '%q' "${1:0:80}"
+    log_err "unscannable path (${#1} bytes): $label...; stamps unchanged"
+    return 1
+}
+
 # Called inside one timeout by run_clamscan_checked. The ordinary list costs
 # one DB load; long and LF/CR names are quoted argv entries in bounded batches.
 # No pathname passes through shell source text.
@@ -149,6 +159,7 @@ run_clamscan_batches() {
     if [ -s "$list" ]; then
         "$engine" "$@" "--file-list=$list"; rc=$?
         if [ "$rc" -gt 1 ]; then
+            : > "$odd_list.failed" || return 2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >&2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >> "$AV_LOG_FILE"
         fi
@@ -165,10 +176,12 @@ run_clamscan_batches() {
         [ "${#targets[@]}" -gt 0 ] || break
         "$engine" "$@" "${targets[@]}"; batch_rc=$?
         if [ "$batch_rc" -gt 1 ]; then
+            : > "$odd_list.failed" || return 2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >&2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >> "$AV_LOG_FILE"
         fi
-        # Match clamscan's scanmanager: infection takes priority over errors.
+        # Infection takes reporting priority; the private failure marker keeps
+        # completion independent of that merged status, in either batch order.
         if [ "$batch_rc" = 1 ]; then rc=1
         elif [ "$rc" = 0 ] && [ "$batch_rc" -gt 1 ]; then rc=$batch_rc; fi
     done < "$odd_list"
@@ -212,6 +225,10 @@ run_clamscan_checked() (
     local -a statuses=("${PIPESTATUS[@]}")
     rc=${statuses[0]}
     if [ "${statuses[1]}" != 0 ]; then return 2; fi
+    if [ -n "${odd_list:-}" ] && [ -f "$odd_list.failed" ]; then
+        log_err "clamscan batch failed; stamps unchanged so the next run retries"
+        return "$rc"
+    fi
     if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
         touch "$scan_state/completed" || return 2
     fi
@@ -294,7 +311,7 @@ run_scan() {
     local -A covered=() mount_index=()
     local p line mount fstype pattern matched escaped char label path_label REPLY i idx
     local cursor parent parent_idx steps reachable stage resolved
-    local walk_failed=0 list="" odd_list=""
+    local walk_failed=0 unscannable=0 list="" odd_list=""
     if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
         [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
         read -r -a fstype_patterns <<< "$AV_EXCLUDE_FSTYPES"
@@ -506,6 +523,10 @@ run_scan() {
         odd_list="$scan_state/odd"
         (umask 077; : > "$odd_list") || return 2
         while IFS= read -r -d '' file; do
+            if ! scan_path_scannable "$file"; then
+                unscannable=1
+                continue
+            fi
             if scan_file_list_safe "$file"; then
                 printf '%s\n' "$file" >> "$list" || return 2
             else
@@ -513,7 +534,7 @@ run_scan() {
             fi
         done < "$scan_state/walk"
         if [ ! -s "$list" ] && [ ! -s "$odd_list" ]; then
-            [ "$walk_failed" = 0 ] || return 2
+            [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ] || return 2
             log_info "clean — nothing changed"
             touch "$scan_state/completed" || return 2
             return 0
@@ -529,7 +550,9 @@ run_scan() {
     if [ "$engine" = clamscan ]; then
         if [ -n "$list" ] && [ ! -s "$odd_list" ]; then args+=("--file-list=$list"); fi
         run_clamscan_checked; rc=$?
-        if [ "$walk_failed" = 1 ]; then rm -f -- "$scan_state/completed" || return 2; fi
+        if [ "$walk_failed" = 1 ] || [ "$unscannable" = 1 ]; then
+            rm -f -- "$scan_state/completed" || return 2
+        fi
     else
         "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}"; rc=$?
         if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
@@ -548,6 +571,7 @@ run_scan() {
         log_err "partial walk: listed files scanned; stamps unchanged so the next run retries"
         [ "$rc" -gt 1 ] || rc=2
     fi
+    if [ "$unscannable" = 1 ]; then rc=2; fi
     return $rc
 }
 

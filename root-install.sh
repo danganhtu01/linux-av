@@ -53,8 +53,14 @@ trap 'case $t in /run/linux-av-root-install.?*) rm -rf --one-file-system -- "$t"
 # OC-T-0067, R-3377: render memory limits without activation. CPU values remain
 # solely in OVH's R-3377-cpu-cap.conf. Pin config to an empty private file; defaults and
 # explicit AV_SCAN_MEMORY_* environment overrides match the timer renderer.
+# --render-scan-limits only prints the memory drop-in (render_scan_limits in bin/av-scan). It never calls
+# systemctl and never starts a scan.
+# Run it through bash, not as a program: ovh-root-run copies this tree without file modes, so bin/av-scan has
+# no exec bit here (run card 23989 stopped at this line with exit 126, Permission denied). Its shebang is
+# #!/usr/bin/env bash, so bash and not sh. Run the copy in $here, not the one in $dst: AV_HOME comes from the
+# script's own path and the renderer reads "$AV_HOME/systemd/av-scan.service", which this script never installs.
 : > "$t/av.env"
-AV_CONFIG="$t/av.env" "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
+AV_CONFIG="$t/av.env" bash "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
 put "$t/limits.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/limits.conf
 printf '%s\n' '# OC-T-0046, R-3377: a scan never runs longer than this (av-scan stops clamscan at AV_SCAN_TIMEOUT, 12h)' '[Service]' 'TimeoutStartSec=12h30min' > "$t/30-time-limit.conf"
 put "$t/30-time-limit.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/30-time-limit.conf

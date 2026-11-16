@@ -103,6 +103,9 @@ MUTANTS=(
 'root_backup_failure~root-install.sh~s/ || die "could not keep $1.before-R-3377"/ || true/~root_install_backup_failure'
 'root_perl_guard~root-install.sh~/^perl -c /d~root_install_perl_guard'
 'root_library_first~root-install.sh~/^put "\$here\/lib\/common.sh"/ { h; d; }; /^put "\$here\/bin\/av-scan"/ { G; }~root_install_library_first'
+# OC-T-0067 round 5: the renderer runs through bash (ovh-root-run drops file modes), from the tree and not the installed copy.
+'root_render_direct~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ "$here\/bin\/av-scan" --render/~root_install_no_exec_bits'
+'root_render_installed~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ bash "$dst\/bin\/av-scan" --render/~root_install_limits root_install_no_exec_bits'
 'root_hash_list~bin/av-scan~1a\# a changed byte~root_install_hashes'
 'mailer_guard~lib/reports.sh~s/^    if av_have_mailer; then/    if false; then/~mail_untouched_with_mail mail_untouched_with_sendmail'
 'mail_tool_mail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have sendmail; }/~mail_untouched_with_mail'

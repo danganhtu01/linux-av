@@ -1520,8 +1520,9 @@ row_root_install_hashes() {
     assert_eq "$n" 3 "root-install.sh lists three rendering inputs"
 }
 
-# Execute a scratch copy of the complete installer; no real privileged tool runs.
-row_root_install_limits() {
+# A scratch root, stubs for every privileged tool, and the complete installer with its root paths
+# redirected into the scratch root ($D/installer); no real privileged tool runs.
+root_install_scratch() {
     new_fixture "$ROW"
     mkdir -p "$R/usr/local/lib/linux-av/bin" "$R/usr/local/lib/linux-av/lib" \
         "$R/etc/systemd/system/linux-av-scan.service.d" "$R/etc/needrestart/conf.d" "$R/run"
@@ -1552,6 +1553,10 @@ STUB
         -e "s|/etc/needrestart|$R/etc/needrestart|g" \
         -e "s|/run/linux-av-root-install|$R/run/linux-av-root-install|g" \
         "$REPO/root-install.sh" > "$D/installer"
+}
+# Execute a scratch copy of the complete installer, from the checkout.
+row_root_install_limits() {
+    root_install_scratch
     OUT="$(cd "$REPO" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
         AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
         CALLS="$CALLS" /bin/sh "$D/installer" 2>&1)"; RC=$?
@@ -1582,6 +1587,32 @@ STUB
     for line in CPUQuota=100% CPUWeight=20; do
         assert_has "$(cat "$unit")" "$line" 'fresh timer retains template CPU bound'
     done
+}
+# OC-T-0067: /usr/local/sbin/ovh-root-run copies the tree without file modes, and run card 23989 stopped at
+# the renderer call with exit 126 (Permission denied). Run the installer from a copy of the files it needs,
+# itself included, with every exec bit stripped: it must render the limits without executing bin/av-scan.
+row_root_install_no_exec_bits() {
+    root_install_scratch
+    local tree="$D/tree" f
+    mkdir -p "$tree/bin" "$tree/lib" "$tree/systemd"
+    cp "$REPO/bin/av-scan" "$tree/bin/av-scan"
+    cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
+    cp "$REPO/systemd/av-scan.service" "$tree/systemd/av-scan.service"
+    cp "$D/installer" "$tree/root-install.sh"
+    for f in root-install.sh bin/av-scan lib/common.sh systemd/av-scan.service; do
+        chmod a-x "$tree/$f"
+        [ ! -x "$tree/$f" ] || fail "$f keeps an exec bit, so the copy is not the runner's"
+    done
+    OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
+        AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
+        CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
+    assert_eq "$RC" 0 'installer exit from a copy with no exec bits'
+    assert_lacks "$OUT" 'Permission denied' 'no file run without its exec bit'
+    local drop="$R/etc/systemd/system/linux-av-scan.service.d/limits.conf"
+    assert_file "$drop" 'limits installed'
+    assert_eq "$(cat "$drop" 2>/dev/null)" "$(printf '%s\n' \
+        '[Service]' MemoryHigh=2G MemoryMax=3G)" 'exact installed memory bounds'
+    assert_has "$OUT" 'root-install: done' 'installer ran to its end'
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.

@@ -1427,11 +1427,18 @@ root_install_fixture() {
     sed -n '/^put() {/,/^}/p; /^keep() {/,/^}/p' "$REPO/root-install.sh" > "$D/functions"
     # OC-T-0096: two headers, two closing braces, ending on one; otherwise the cut ran on into the install steps,
     # so nothing is sourced (an empty file makes every row that calls put or keep go red).
+    # Every other line must be indented or blank, so no top-level statement can ever be sourced.
     if [ "$(grep -c '^put() {\|^keep() {' "$D/functions")" != 2 ] || [ "$(grep -c '^}' "$D/functions")" != 2 ] ||
-        [ "$(tail -n 1 "$D/functions")" != '}' ]; then
+        [ "$(tail -n 1 "$D/functions")" != '}' ] ||
+        [ "$(grep -cv '^put() {$\|^keep() {$\|^}$\|^[[:space:]]\|^$' "$D/functions")" != 0 ]; then
         : > "$D/functions"
         fail 'root-install.sh put and keep functions are not two whole blocks'
     fi
+}
+# OC-T-0096: the fixture's cut is two whole functions and nothing else; this row's only red path is that guard.
+row_root_install_functions_whole() {
+    root_install_fixture
+    assert_eq "$(grep -c '^put() {\|^keep() {' "$D/functions")" 2 'fixture holds put and keep'
 }
 root_functions() {
     OUT="$("$ENV_BIN" -i PATH="$B" CALLS="$CALLS" "$BASH_BIN" -c '

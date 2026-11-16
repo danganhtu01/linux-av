@@ -111,7 +111,8 @@ MUTANTS=(
 'root_render_empty_guard~root-install.sh~/rendered empty/d~root_install_render_empty'
 # OC-T-0096: a keep before the empty-render guard leaves a backup; an indented closing brace lets the fixture's cut run on.
 'root_keep_before_empty_guard~root-install.sh~/rendered empty/i keep "$dst/lib/common.sh"~root_install_render_empty'
-'root_keep_brace_indent~root-install.sh~/^keep() {/,/^}/ s/^}$/  }/~root_install_backup_saved'
+'root_keep_brace_indent~root-install.sh~/^keep() {/,/^}/ s/^}$/  }/~root_install_functions_whole'
+'root_put_unindented~root-install.sh~/^put() {/a echo unindented~root_install_functions_whole'
 'root_hash_list~bin/av-scan~1a\# a changed byte~root_install_hashes'
 'mailer_guard~lib/reports.sh~s/^    if av_have_mailer; then/    if false; then/~mail_untouched_with_mail mail_untouched_with_sendmail'
 'mail_tool_mail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have sendmail; }/~mail_untouched_with_mail'

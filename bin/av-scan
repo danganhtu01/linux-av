@@ -204,7 +204,9 @@ run_clamscan_batches() {
         if [ "$batch_rc" = 1 ]; then rc=1
         elif [ "$rc" = 0 ] && [ "$batch_rc" -gt 1 ]; then rc=$batch_rc; fi
     done < "$odd_list"
-    if [ "$failed" = 0 ]; then rm -f -- "$odd_list.pending" || return 2; fi
+    # A batch's 1 stays 1 when the marker cannot be removed, so the caller alerts
+    # on status, never on output text; the marker left in place holds the stamps.
+    if [ "$failed" = 0 ]; then rm -f -- "$odd_list.pending" || { [ "$rc" = 1 ] && return 1; return 2; }; fi
     return "$rc"
 }
 
@@ -247,8 +249,11 @@ run_clamscan_checked() (
     rc=${statuses[0]}
     # Inspect output without consuming the rc=2 whitelist's read loop. If the
     # threat marker cannot be written, report here before losing this evidence.
+    # Output text is searched only when the scanner was stopped (timeout, kill,
+    # signal: 124 and above). At 0 or 2 a FOUND line can be forged by a file name
+    # holding a newline inside clamscan's own warning, so status alone decides.
     local marker_failed=0
-    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || grep -Eq ': .+ FOUND$' "$copy"; }; then
+    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
         touch "$scan_state/threat" || {
             log_err "cannot write threat marker; stamps unchanged"
             report_scan_threat
@@ -264,7 +269,7 @@ run_clamscan_checked() (
         [ "$rc" = 1 ] || rc=2
         return "$rc"
     fi
-    if [ -n "${odd_list:-}" ] && [ -f "$odd_list.pending" ]; then
+    if [ -n "${odd_list:-}" ] && [ -e "$odd_list.pending" ]; then
         log_err "clamscan batch failed; stamps unchanged so the next run retries"
         return "$rc"
     fi

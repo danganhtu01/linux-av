@@ -44,26 +44,36 @@ keep() {
   cp -p -- "$1" "$1.before-R-3377" || die "could not keep $1.before-R-3377"
   echo "kept: $1.before-R-3377"
 }
-keep "$dst/bin/av-scan"
-keep "$dst/lib/common.sh"
-put "$here/lib/common.sh" 0644 "$dst/lib/common.sh"
-put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"
+# OC-T-0067: everything is rendered and checked in $t first, and only then is anything kept or put, so a failure
+# while preparing changes nothing installed (run card 23989 replaced av-scan and common.sh, then stopped).
 t=$(mktemp -d /run/linux-av-root-install.XXXXXXXX)
 trap 'case $t in /run/linux-av-root-install.?*) rm -rf --one-file-system -- "$t" ;; esac' EXIT
 # OC-T-0067, R-3377: render memory limits without activation. CPU values remain
 # solely in OVH's R-3377-cpu-cap.conf. Pin config to an empty private file; defaults and
 # explicit AV_SCAN_MEMORY_* environment overrides match the timer renderer.
+# --render-scan-limits only prints the memory drop-in (render_scan_limits in bin/av-scan). It never calls
+# systemctl and never starts a scan.
+# Run it through bash, not as a program: ovh-root-run copies this tree without file modes, so bin/av-scan has
+# no exec bit here, and /run, where ovh-root-run places the tree, is mounted noexec on OVH (run card 23989
+# stopped at this line with exit 126, Permission denied). Its shebang is #!/usr/bin/env bash, so bash and not
+# sh. Run the copy in $here, not the one in $dst: AV_HOME comes from the script's own path and the renderer
+# reads "$AV_HOME/systemd/av-scan.service", which this script never installs.
 : > "$t/av.env"
-AV_CONFIG="$t/av.env" "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
-put "$t/limits.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/limits.conf
+AV_CONFIG="$t/av.env" bash "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
+[ -s "$t/limits.conf" ] || die "the memory drop-in rendered empty"
 printf '%s\n' '# OC-T-0046, R-3377: a scan never runs longer than this (av-scan stops clamscan at AV_SCAN_TIMEOUT, 12h)' '[Service]' 'TimeoutStartSec=12h30min' > "$t/30-time-limit.conf"
-put "$t/30-time-limit.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/30-time-limit.conf
 # The single quotes are meant: the line is Perl for needrestart, written as it stands.
 # shellcheck disable=SC2016
 printf '%s\n' '# OC-T-0046, R-3377: never restart linux-av units after an upgrade. linux-av-scan is a oneshot whole-root scan,' \
   '# so a restart waits for the whole scan: on 2026-11-04 it held unattended-upgrade and apt'"'"'s lock for 20 hours.' \
   '$nrconf{override_rc}->{qr(^linux-av-)} = 0;' > "$t/linux-av.conf"
 perl -c "$t/linux-av.conf" >/dev/null 2>&1 || die "needrestart's new conf does not parse"
+keep "$dst/bin/av-scan"
+keep "$dst/lib/common.sh"
+put "$here/lib/common.sh" 0644 "$dst/lib/common.sh"
+put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"
+put "$t/limits.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/limits.conf
+put "$t/30-time-limit.conf" 0644 /etc/systemd/system/linux-av-scan.service.d/30-time-limit.conf
 put "$t/linux-av.conf" 0644 /etc/needrestart/conf.d/linux-av.conf
 systemctl daemon-reload
 echo "read back:"

@@ -422,14 +422,29 @@ clamdscan to clamscan when available; otherwise a warning reports the limitation
 
 Changed scans keep ordinary filenames in a private, temporary newline-delimited
 `--file-list` under `AV_LOG_DIR`. Names containing LF (newline) or CR (carriage
-return) instead travel through a private NUL-delimited stream into individually
-quoted clamscan arguments. This avoids both line splitting (FAULT-0005) and
-possible CR stripping by a file-list reader (FAULT-0006); neither character is
-removed or interpreted as another filename. ClamAV NUL-list support is not
-required. Argument batches hold at most 128 names, with an additional size bound;
+return), or measuring **1022 through 4095 bytes** under `LC_ALL=C`, instead travel
+through a private NUL-delimited stream into individually quoted clamscan
+arguments. ClamAV 1.5.4's file-list reader uses `fgets` with a 1024-byte buffer;
+longer lines can split into separate targets, including relative paths. This
+avoids line splitting (FAULT-0005 and FAULT-0006) and possible CR stripping;
+names stay literal. ClamAV NUL-list support is not
+required. Paths measuring **4096 bytes or more** take neither route: clamscan
+cannot open them through either route (PATH_MAX). Each is logged as unscannable
+with its byte length and a safely quoted 80-byte prefix. Other files still scan,
+including ordinary batch-mates; the run returns 2 and holds both stamps even if
+a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
+individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
+Argument batches hold at most 128 names, with an additional size bound;
 all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
-An earlier batch error cannot be erased by a later clean batch. Temporary lists
-and captured output are removed on exit.
+An earlier batch error cannot be erased by a later clean batch. The batch merge
+reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
+and invokes `AV_ON_FOUND`, while any batch error holds both
+stamps and logs that the next run will retry (FAULT-0016). A private failure
+marker preserves this distinction independently of the merged reporting status.
+The reporting priority matches
+[ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
+which selects infection before errors. Temporary lists and captured output are
+removed on exit.
 
 The walk uses GNU find's `-ignore_readdir_race`. If find still exits non-zero,
 the scan processes everything it listed, logs **partial walk**, returns an error
@@ -443,9 +458,10 @@ logs a fallback to a full clamdscan scan. An empty successful walk logs
 
 `AV_LOG_DIR/last-good-scan.stamp` and `last-full-scan.stamp` record scan **start**
 times, preserving eligibility for files changed during a scan. Stamps advance
-only after the report is written and the scanner exits 0 (clean) or 1 (found).
-Errors, partial walks, timeouts, signals, and forgiven vanished-file errors leave
-stamps alone.
+only after the report is written and every scanner batch completes with 0
+(clean) or 1 (found). Any batch error holds both stamps, including a threat plus
+an error whose merged reporting status is 1. Unscannable paths, partial walks,
+timeouts, signals, and forgiven vanished-file errors also leave stamps alone.
 Deleting both stamps requests a new full scan. Use a separate `AV_LOG_DIR` for
 independent scan path sets so their histories do not share stamps.
 
@@ -455,20 +471,36 @@ before either unit is written. The scan unit also sets `CPUQuota=100%` and
 
 For OVH, `root-install.sh` installs
 `/etc/systemd/system/linux-av-scan.service.d/limits.conf` atomically as root:root
-0644, then calls `systemctl daemon-reload`. It never enables, starts or restarts
+0644 with only `MemoryHigh` and `MemoryMax`, then calls `systemctl daemon-reload`.
+OVH's existing `R-3377-cpu-cap.conf` remains the sole CPU drop-in, setting
+`CPUWeight=20` and `CPUQuota=100%` (FAULT-0020). Keeping CPU settings there
+preserves the host's established control without a later override from
+`limits.conf`. Fresh hosts using `--install-timer` still receive CPU settings
+from `systemd/av-scan.service`.
+The installer never enables, starts or restarts
 units and leaves the timer state alone (R-3377). Starting remains a separate
 card; do not restart the scan as part of this build or install.
 
 `av-scan --render-scan-limits` renders that drop-in without installing or
 activating anything. It shares memory defaults/validation with `--install-timer`
-and reads CPU values from the same service template, so there is one source for
-each value. The installer pins config selection to an empty private file for
+and renders only the template's memory directives. The installer pins config
+selection to an empty private file for
 predictable defaults; explicit `AV_SCAN_MEMORY_HIGH`/`AV_SCAN_MEMORY_MAX`
 environment overrides remain available. Its `# sha256` manifest pins all three
 rendering inputs (`bin/av-scan`, `lib/common.sh`, `systemd/av-scan.service`), and
 installation prints the generated drop-in's SHA-256 alongside the installed
 script/library hashes.
 
+Round 3 closes the long-name remainder of FAULT-0006, FAULT-0016 and FAULT-0020.
+The new long-name, mixed-result and memory-only installer regressions fail at
+`0d5499d`; mutants check the length boundary, byte counting, batch precedence
+and duplicate CPU settings. Round 4 fixes round 3's held-stamp regression for
+threat-plus-error batches and bounds long names at 4096 bytes (FAULT-0018).
+The stamp assertions and unscannable-path regression fail at `c1f08de`; mutants
+remove the stamp hold, remove or raise the path bound, count characters instead
+of bytes, and remove the forced error status. FAULT-0017, FAULT-0019 and
+FAULT-0021 remain unchanged, including the existing memory limits and OVH CPU
+drop-in dependency.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

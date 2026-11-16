@@ -1559,7 +1559,7 @@ STUB
     local drop="$R/etc/systemd/system/linux-av-scan.service.d/limits.conf" line
     assert_file "$drop" 'limits installed'
     assert_eq "$(cat "$drop" 2>/dev/null)" "$(printf '%s\n' \
-        '[Service]' MemoryHigh=2G MemoryMax=3G CPUQuota=100% CPUWeight=20)" 'exact installed bounds'
+        '[Service]' MemoryHigh=2G MemoryMax=3G)" 'exact installed memory bounds; CPU owned by OVH drop-in'
     assert_eq "$(stat -c %a "$drop" 2>/dev/null)" 644 'drop-in mode'
     assert_has "$(calls)" "install -o root -g root -m 0644" 'root ownership requested'
     assert_has "$(calls)" "$drop.new" 'atomic sibling write'
@@ -1576,8 +1576,11 @@ STUB
     # Compare the drop-in with the existing timer renderer's defaults.
     SCAN_ENV=(); resource_install
     local unit="$R/etc/systemd/system/linux-av-scan.service"
-    for line in MemoryHigh MemoryMax CPUQuota CPUWeight; do
+    for line in MemoryHigh MemoryMax; do
         assert_eq "$(sed -n "/^$line=/p" "$drop" 2>/dev/null)" "$(sed -n "/^$line=/p" "$unit")" 'timer and drop-in agree'
+    done
+    for line in CPUQuota=100% CPUWeight=20; do
+        assert_has "$(cat "$unit")" "$line" 'fresh timer retains template CPU bound'
     done
 }
 
@@ -1837,6 +1840,163 @@ row_scan_changed_cr() {
     ARGS=("${seen[@]}")
     assert_scan_arg "$name"
     assert_scan_arg "$D/tree/evil"
+}
+# OC-T-0067 round 3: model fgets(buffer, 1024), including relative split targets.
+row_scan_changed_long_names() {
+    changed_fixture; changed_seed
+    local LC_ALL=C dir="$D/tree" part prefix name size
+    printf -v part '%0180d' 0
+    while [ "${#dir}" -lt 850 ]; do dir="$dir/$part"; done
+    mkdir -p "$dir"
+    printf -v part '%*s' "$((1023 - ${#dir} - 1))" ''
+    prefix="$dir/${part// /x}"
+    assert_eq "${#prefix}" 1023 'split prefix length in bytes'
+    printf 'clean\n' > "$prefix"
+    printf 'malware\n' > "${prefix}decoy"
+    printf 'clean\n' > "$D/decoy"
+    # Exercise the conservative boundary, with a UTF-8 name whose byte and
+    # character lengths differ. The scanner itself runs under a UTF-8 locale.
+    for size in 1021 1022; do
+        name="${prefix:0:size-2}"$'\xc3\xa9'
+        printf 'clean\n' > "$name"
+    done
+    stub clamscan <<'STUB'
+export LC_ALL=C
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+cd "${SCAN_ARGS%/*}" || exit 2
+rc=0
+check_target() {
+    local target="$1"
+    [[ $target = /* ]] || target="$PWD/$target"
+    printf '%s\0' "$target" >> scanned
+    if [ -f "$target" ] && [ "$(cat "$target")" = malware ]; then
+        printf '%s: Test.Signature FOUND\n' "$target"; rc=1
+    fi
+}
+for arg in "$@"; do
+    case "$arg" in
+        --file-list=*)
+            cat "${arg#--file-list=}" >> list
+            while IFS= read -r -n 1023 file || [ -n "$file" ]; do
+                [ -z "$file" ] || check_target "${file%$'\r'}"
+            done < "${arg#--file-list=}" ;;
+        /*) check_target "$arg" ;;
+    esac
+done
+exit "$rc"
+STUB
+    SCAN_ENV=(LC_ALL=C.utf8)
+    scan --path "$D/tree"
+    assert_eq "$RC" 1 'crafted long target detected as itself'
+    assert_has "$OUT" 'THREATS FOUND' 'long target threat reported'
+    assert_scan_arg "$prefix"
+    assert_scan_arg "${prefix}decoy"
+    name="${prefix:0:1020}"$'\xc3\xa9'
+    assert_scan_arg "$name"
+    assert_lacks "$(cat "$D/list" 2>/dev/null)" "$name" '1022-byte name kept off file-list'
+    name="${prefix:0:1019}"$'\xc3\xa9'
+    assert_has "$(cat "$D/list" 2>/dev/null)" "$name" '1021-byte name still uses file-list'
+    local -a seen=()
+    mapfile -d '' -t seen < "$D/scanned"
+    for name in "${seen[@]}"; do
+        [ "$name" != "$D/decoy" ] || fail 'relative decoy substituted for long target'
+    done
+    ARGS=("${seen[@]}"); assert_scan_arg "${prefix}decoy"
+}
+row_scan_changed_found_error() {
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+rc=$ODD_RC
+for arg in "$@"; do case "$arg" in --file-list=*) rc=$NORMAL_RC ;; esac; done
+if [ "$rc" = 1 ]; then echo 'test: Test.Signature FOUND'
+else echo "WARNING: Can't open file ${SCAN_ARGS%/*}/tree/gone: No such file or directory"; fi
+exit "$rc"
+STUB
+    local normal odd error order
+    for error in 2 126 137 139; do
+        for order in found_first error_first; do
+            if [ "$order" = found_first ]; then normal=1; odd=$error
+            else normal=$error; odd=1; fi
+            changed_seed
+            cp -p "$L/last-good-scan.stamp" "$D/good-before"
+            cp -p "$L/last-full-scan.stamp" "$D/full-before"
+            rm -f "$D/found"
+            : > "$L/av-scan.log"
+            SCAN_ENV=("NORMAL_RC=$normal" "ODD_RC=$odd" "AV_ON_FOUND=touch '$D/found'")
+            scan --changed --path "$D/tree"
+            assert_eq "$RC" 1 "threat wins with ordinary batch rc=$normal"
+            assert_has "$OUT" 'THREATS FOUND' 'mixed result reports threat'
+            assert_file "$D/found" 'mixed result invokes AV_ON_FOUND'
+            assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'threat persisted in log'
+            assert_has "$(cat "$L/av-scan.log")" "clamscan batch failed (rc=$error)" 'batch error remains visible in log'
+            assert_has "$(cat "$L/av-scan.log")" 'stamps unchanged' 'batch failure holds stamps in log'
+            assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "threat plus rc=$error keeps good stamp ($order)"
+            assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "threat plus rc=$error keeps full stamp ($order)"
+        done
+    done
+}
+# OC-T-0067 round 4: PATH_MAX bounds both routes, counted in bytes.
+row_scan_changed_unscannable() {
+    changed_fixture; changed_seed
+    local LC_ALL=C name prefix quoted found arg
+    prefix="/"$'unsafe\n\r\t\'"\\'"/${D#/}/tree/"
+    printf -v name '%*s' "$((4096 - ${#prefix} - 2))" ''
+    name="$prefix${name// /x}"$'\xc3\xa9'
+    printf -v quoted '%q' "${name:0:80}"
+    printf '%s\0' "$name" > "$D/unscannable"
+    printf -v name '%131072s' ''
+    name="/$name"; name="${name:0:131072}"
+    printf '%s\0' "$name" >> "$D/unscannable"
+    printf -v name '%4095s' ''
+    name="/${name:1}"; name="${name// /x}"
+    printf '%s\0' "$name" > "$D/scannable"
+    printf 'malware\n' > "$D/tree/plain"
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do
+    case "$arg" in --file-list=*)
+        cat "${arg#--file-list=}" >> "${SCAN_ARGS%/*}/list"
+        while IFS= read -r file; do
+            if [ "$(cat "$file")" = malware ]; then
+                echo 'plain: Test.Signature FOUND'; exit 1
+            fi
+        done < "${arg#--file-list=}" ;;
+    esac
+done
+exit 0
+STUB
+    # Empty remainder, clean batch-mates, and an ordinary threat all hold stamps.
+    for found in empty clean threat; do
+        changed_seed
+        cp -p "$L/last-good-scan.stamp" "$D/good-before"
+        cp -p "$L/last-full-scan.stamp" "$D/full-before"
+        cp "$D/unscannable" "$D/walk"
+        if [ "$found" != empty ]; then cat "$D/scannable" >> "$D/walk"; fi
+        if [ "$found" = threat ]; then printf '%s\0' "$D/tree/plain" >> "$D/walk"; fi
+        : > "$D/args"; : > "$L/av-scan.log"; rm -f "$D/found"
+        SCAN_ENV=(LC_ALL=C.utf8 "AV_ON_FOUND=touch '$D/found'")
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 2 "unscannable path forces error ($found)"
+        assert_has "$OUT" "unscannable path (4096 bytes): $quoted" 'byte length and safely quoted prefix reported'
+        assert_has "$OUT" 'unscannable path (131072 bytes):' 'oversized argv rejected before exec'
+        assert_has "$(cat "$L/av-scan.log")" "unscannable path (4096 bytes): $quoted" 'unscannable persisted in log'
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "unscannable keeps good stamp ($found)"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "unscannable keeps full stamp ($found)"
+        for arg in "${ARGS[@]}"; do
+            [ "${#arg}" -lt 4096 ] || fail 'unscannable path reached argv'
+        done
+        if [ "$found" != empty ]; then assert_scan_arg "$name"; fi
+        if [ "$found" = threat ]; then
+            assert_has "$(cat "$D/list")" "$D/tree/plain" 'ordinary batch-mate scanned'
+            assert_has "$OUT" 'THREATS FOUND' 'ordinary threat still reported'
+            assert_file "$D/found" 'ordinary threat invokes AV_ON_FOUND'
+        fi
+    done
 }
 row_scan_changed_vanishing_folder() {
     changed_fixture; changed_seed

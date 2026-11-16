@@ -1612,7 +1612,29 @@ row_root_install_no_exec_bits() {
     assert_file "$drop" 'limits installed'
     assert_eq "$(cat "$drop" 2>/dev/null)" "$(printf '%s\n' \
         '[Service]' MemoryHigh=2G MemoryMax=3G)" 'exact installed memory bounds'
+    assert_eq "$(stat -c %a "$R/usr/local/lib/linux-av/bin/av-scan" 2>/dev/null)" 755 \
+        'installed scanner executable though its source had no exec bit'
     assert_has "$OUT" 'root-install: done' 'installer ran to its end'
+}
+# OC-T-0067: run card 23989 replaced av-scan and common.sh and then stopped at the renderer. A failure while
+# rendering or checking must change nothing installed: here the renderer fails (its unit template is missing
+# from the copy), and the installer must stop before its first keep or put.
+row_root_install_render_first() {
+    root_install_scratch
+    local tree="$D/tree" before
+    mkdir -p "$tree/bin" "$tree/lib"
+    cp "$REPO/bin/av-scan" "$tree/bin/av-scan"
+    cp "$REPO/lib/common.sh" "$tree/lib/common.sh"
+    cp "$D/installer" "$tree/root-install.sh"
+    before="$(cat "$CALLS" 2>/dev/null)"
+    OUT="$(cd "$tree" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
+        AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
+        CALLS="$CALLS" /bin/sh "$tree/root-install.sh" 2>&1)"; RC=$?
+    [ "$RC" != 0 ] || fail 'installer went on after its renderer failed'
+    assert_eq "$(cat "$CALLS" 2>/dev/null)" "$before" 'nothing installed, kept or reloaded before the failure'
+    assert_lacks "$OUT" 'written: ' 'no file written'
+    assert_lacks "$OUT" 'kept: ' 'no backup made'
+    assert_lacks "$OUT" 'root-install: done' 'installer stopped'
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.

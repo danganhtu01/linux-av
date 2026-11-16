@@ -106,6 +106,7 @@ MUTANTS=(
 # OC-T-0067 round 5: the renderer runs through bash (ovh-root-run drops file modes), from the tree and not the installed copy.
 'root_render_direct~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ "$here\/bin\/av-scan" --render/~root_install_no_exec_bits'
 'root_render_installed~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ bash "$dst\/bin\/av-scan" --render/~root_install_limits root_install_no_exec_bits'
+'root_install_before_render~root-install.sh~/^: > "\$t\/av.env"/i put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"~root_install_render_first'
 'root_hash_list~bin/av-scan~1a\# a changed byte~root_install_hashes'
 'mailer_guard~lib/reports.sh~s/^    if av_have_mailer; then/    if false; then/~mail_untouched_with_mail mail_untouched_with_sendmail'
 'mail_tool_mail_only~lib/reports.sh~s/^av_have_mailer() { have mail || have sendmail; }/av_have_mailer() { have sendmail; }/~mail_untouched_with_mail'

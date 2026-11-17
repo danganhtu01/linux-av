@@ -2558,26 +2558,36 @@ row_scan_changed_batch_killed_found() {
         assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario $status: full stamp kept"
     done
 }
-# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The stub
-# tee waits 1.2 s before it reads, so the FOUND line that the scanner prints at once is still in the pipe when the limit
-# (0.5 s) stops the group. A tee that dies of that signal loses the line, and the run raises no alert. The stub's sleep
-# inherits the ignored signals from the stub, as the real tee does from its parent shell.
+# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The order
+# of the row is by cause (OC-T-0114): the scanner stub traps TERM and leaves a marker, and a run's stub tee reads nothing until
+# that marker exists (it gives up after 2 s), so the FOUND line that the scanner printed at once is still in the pipe when the group
+# has been signalled, whatever the clock does. A tee that dies of that signal loses the line, and the run raises no alert.
+# The stub tee records that the marker, not its 2 s, released it, and the row asserts that record. The limit (0.5 s) is the one
+# time left in the row: it only has to pass after the scanner has printed. The stub's sleep inherits the ignored signals from
+# the stub, as the real tee does from its parent shell.
 row_scan_changed_stop_keeps_found() {
     changed_fixture; changed_seed
     touch "$D/tree/plain" "$D/tree/odd"$'\n'
     ln -s "$(command -v sleep)" "$B/sleep"
     stub clamscan <<'STUB'
 printf '%s\0' "$@" >> "$SCAN_ARGS"
-for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 ;; esac; done
+trap 'touch "${SCAN_ARGS%/*}/termed"; exit 143' TERM
+for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 & wait ;; esac; done
 STUB
     stub tee <<'STUB'
 printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
 stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
-case "$1" in */run.*) sleep 1.2 ;; esac
+case "$1" in */run.*)
+    i=0
+    while [ ! -e "${SCAN_ARGS%/*}/termed" ] && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+    [ ! -e "${SCAN_ARGS%/*}/termed" ] || : > "${SCAN_ARGS%/*}/tee-saw-termed" ;;
+esac
 exec "${BASH_SOURCE[0]%/*}/plain/tee" "$@"
 STUB
     SCAN_ENV=(AV_SCAN_TIMEOUT=0.5s "AV_ON_FOUND=touch '$D/found'")
     scan --changed --path "$D/tree"
+    assert_file "$D/termed" 'the scanner was signalled'
+    assert_file "$D/tee-saw-termed" 'the tee read after the signal, released by the scanner and not by its own bound'
     assert_eq "$RC" 124 'the scan is stopped at its time limit'
     assert_has "$OUT" 'time limit' 'the stop is reported'
     assert_has "$OUT" 'THREATS FOUND' 'the line still in the pipe at the stop alerts'

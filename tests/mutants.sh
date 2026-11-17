@@ -49,7 +49,7 @@ MUTANTS=(
 'batch_stderr_dropped~bin/av-scan~s/"$@" 2>\&1 | (/"$@" | (/~scan_changed_batch_errors'
 # The seat's L4: the per-run tee sits in the process group the time limit stops, and without the ignore a FOUND line still in its pipe dies with it.
 'batch_tee_signals_unguarded~bin/av-scan~s/( trap .. TERM HUP INT; exec tee/( exec tee/~scan_changed_stop_keeps_found'
-'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors'
+'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors scan_changed_batch_pair_errors'
 'batch_failure_log_dropped~bin/av-scan~/^    if \[ -n "${odd_list:-}" \] \&\& \[ -e "$odd_list.pending" \]; then$/,/^    fi$/d~scan_pending_remove_failure scan_changed_batch_errors'
 # OC-T-0112: a run the worker records as stopped (124 or above) has its own copy searched for a FOUND line, though the merged status
 # is 2. Each mutant removes one guard of that: the search itself, the threshold (status 2 text is forgeable), the run's own copy
@@ -82,14 +82,14 @@ MUTANTS=(
 'scan_size_check~bin/av-scan~/^        \[\[ -z $value /d~scan_memory_invalid'
 'vanished_probed_count~bin/av-scan~/\[ "$probed" = "$count" \] || bad=1/d~scan_vanished_empty_list'
 'vanished_probe_condition~bin/av-scan~s@\[ "$count" -gt 0 \]; then@[ -s "$copy_dir/vanished" ]; then@~scan_vanished_empty_list'
-'vanished_parent_access~bin/av-scan~/if \[ -e "$q" \]; then \[ -d "$q" \] \&\& \[ -x "$q" \] || exit 1; fi/d~scan_vanished_unsearchable'
+'vanished_parent_access~bin/av-scan~/if \[ -e "$q" \]; then \[ -d "$q" \] \&\& \[ -x "$q" \] || exit 1; fi/d~scan_vanished_unsearchable scan_vanished_pair_unsearchable'
 'vanished_read_reset~bin/av-scan~s/while line=; IFS= read/while IFS= read/~scan_vanished_read_failure'
 'vanished_write_failure~bin/av-scan~s@>> "$copy_dir/vanished" || bad=1@>> "$copy_dir/vanished"@~scan_vanished_write_failure'
 'vanished_relative~bin/av-scan~/\[\[ $p = \/\* \]\] || { bad=1; continue; }/d~scan_vanished_relative_full'
-'vanished_skipped_mount~bin/av-scan~/for root in "${skipped_points\[@\]}"; do/,/done/d~scan_vanished_skipped_mount'
-'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot scan_vanished_noncanonical'
-'vanished_noncanonical~bin/av-scan~s/\*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*)/*\/..\/*)/~scan_vanished_noncanonical'
-'vanished_symlink_component~bin/av-scan~s/\[ ! -L "$q" \] || exit 1/:/~scan_vanished_symlink_component'
+'vanished_skipped_mount~bin/av-scan~/for root in "${skipped_points\[@\]}"; do/,/done/d~scan_vanished_skipped_mount scan_vanished_pair_skipped_mount'
+'vanished_dotdot~bin/av-scan~/case "$p\/" in \*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*) bad=1; continue ;; esac/d~scan_vanished_dotdot scan_vanished_noncanonical scan_vanished_pair_noncanonical'
+'vanished_noncanonical~bin/av-scan~s/\*\/\.\.\/\*|\*\/\.\/\*|\*\/\/\*)/*\/..\/*)/~scan_vanished_noncanonical scan_vanished_pair_noncanonical'
+'vanished_symlink_component~bin/av-scan~s/\[ ! -L "$q" \] || exit 1/:/~scan_vanished_symlink_component scan_vanished_pair_symlink_component'
 'vanished_probe_limit~bin/av-scan~s/timeout -s KILL 60s "$BASH" -c/"$BASH" -c/~scan_vanished_probe_bounded'
 'vanished_probe_closed~bin/av-scan~s/< "$copy_dir\/vanished")" || bad=1/< "$copy_dir\/vanished")" || :/~scan_vanished_probe_bounded'
 'vanished_stderr~bin/av-scan~s/ 2>\&1 | tee/ | tee/~scan_vanished_stderr'
@@ -98,21 +98,42 @@ MUTANTS=(
 'vanished_zero_total_seen~bin/av-scan~s/\[ "$total_seen" = 0 \]/[ -z "$summary" ]/~scan_vanished_zero_then_total'
 'vanished_physical_copy~bin/av-scan~s/copy_dir="$resolved"/:/~scan_vanished_physical_copy'
 'vanished_copy_resolution~bin/av-scan~s/resolved="$(cd -P -- "$copy_dir" \&\& pwd -P)"/resolved="$copy_dir"/~scan_vanished_copy_resolution_failure'
-'vanished_kept_paths~bin/av-scan~/\[ "$matched" = 1 \] || { bad=1; continue; }/d~scan_vanished_outside_paths'
+'vanished_kept_paths~bin/av-scan~/\[ "$matched" = 1 \] || { bad=1; continue; }/d~scan_vanished_outside_paths scan_vanished_pair_outside_paths'
 'scan_function_scope~bin/av-scan~/^run_scan() {/,/^}$/ { s/^run_scan() {/run_scan() (/; s/^}$/)/; }~scan_scheduled_no_engine scan_scheduled_hook_exit'
 'vanished_residual~MASTER.md~/^Residual: clamscan prints file names/d~scan_vanished_residual_documented'
-'vanished_count~bin/av-scan~s/\[ "$summary" = "$run_count" \]/true/~scan_vanished_mismatch scan_changed_batch_errors'
-'vanished_absent~bin/av-scan~s/\[ ! -L "$p" \] \&\& \[ ! -e "$p" \] || exit 1/:/~scan_vanished_reappeared'
+'vanished_count~bin/av-scan~s/\[ "${summary:-0}" = "$run_old" \]/true/~scan_vanished_mismatch scan_changed_batch_errors scan_vanished_pair_total_higher'
+'vanished_absent~bin/av-scan~s/\[ ! -L "$p" \] \&\& \[ ! -e "$p" \] || exit 1/:/~scan_vanished_reappeared scan_vanished_pair_exists scan_vanished_pair_reappeared'
 'vanished_daemon~bin/av-scan~s/if \[ "$engine" = clamscan \]; then/if true; then/g~scan_vanished_clamdscan'
 'vanished_cleanup~bin/av-scan~/trap .*rm -rf --.*copy_dir.* EXIT/d~scan_vanished_only'
-'vanished_unknown~bin/av-scan~/Reject every unknown line/{n;s/bad=1/:/;}~scan_vanished_unknown scan_vanished_split_reason scan_vanished_found'
+'vanished_unknown~bin/av-scan~/Reject every unknown line/{n;s/bad=1/:/;}~scan_vanished_unknown scan_vanished_split_reason scan_vanished_found scan_vanished_pair_second_alone scan_vanished_pair_newline'
 'vanished_infected~bin/av-scan~s/Infected files: 0/Infected files: [0-9]+/~scan_vanished_infected'
 'vanished_second_header~bin/av-scan~s/headers=$((headers + 1))/headers=1/~scan_vanished_two_summaries'
 'vanished_header_required~bin/av-scan~s/\[ "$headers" = 1 \]/true/g~scan_vanished_no_summary'
-'vanished_before_summary~bin/av-scan~/\[ "$headers" = 0 \] || bad=1/d~scan_vanished_after_summary'
+'vanished_before_summary~bin/av-scan~/\[ "$headers" = 0 \] || bad=1/d~scan_vanished_after_summary scan_vanished_pair_after_summary'
 'vanished_detail_order~bin/av-scan~/elif \[\[ $line =. $detail_re \]\]; then/{n;s/.*bad=1/                    :/;}~scan_vanished_summary_order'
 'vanished_total_order~bin/av-scan~/\[ "$headers" = 1 \] \&\& \[ "$total_seen" = 0 \] || bad=1/d~scan_vanished_total_order scan_vanished_duplicate_total'
 'vanished_copy_exclude~bin/av-scan~/args+=("--exclude-dir=\^${escaped}.*"--exclude=/d~scan_vanished_copy_excluded'
+# OC-T-0118: the vanished-file pair (a first line "PATH: No such file or directory" and, on the very next line, "WARNING: PATH: Can't
+# access file"). One mutant for each of its guards. A mutant's text holds no tilde, the entry's field delimiter, and each pattern
+# for the apostrophe in "Can't" is a dot. pair_first_alone and pair_line_between are the two halves of adjacency (the line after a
+# first line that is not its second line leaves it alone, and the pending first line does not outlive that line); pair_open_at_end
+# is a first line that no line follows; pair_same_path and pair_glob_equality are the second line's path (any path, and a path read
+# as a pattern); the three after them let a pair, and no old-form warning, past the kept paths, the skipped mounts and the
+# non-canonical spellings, the shared guards that vanished_kept_paths, vanished_skipped_mount and vanished_dotdot remove for both
+# forms; pair_total_counted counts a pair against Total errors, vanished_count above stops comparing; pair_entry_required drops
+# the rule that a run of status 2 owes an entry; the last two remove the documentation that the rows pin.
+'pair_first_alone~bin/av-scan~s/; else bad=1; fi$/; fi/~scan_vanished_pair_first_alone'
+'pair_line_between~bin/av-scan~s/; else bad=1; fi$/; fi/;s/^\( *\)gone=""$/\1[ -z "$entry" ] || gone=""/~scan_vanished_pair_line_between'
+'pair_open_at_end~bin/av-scan~/\[ -z "$gone" \] || bad=1/d~scan_vanished_pair_first_last'
+'pair_same_path~bin/av-scan~s/\[ "$line" = "WARNING: $gone: Can.t access file" \]/[[ $line = "WARNING: "*": Can"?"t access file" ]]/~scan_vanished_pair_different_paths'
+'pair_glob_equality~bin/av-scan~s/\[ "$line" = "WARNING: $gone: Can.t access file" \]/[[ $line = "WARNING: "$gone": Can"?"t access file" ]]/~scan_vanished_pair_pattern_other'
+'pair_kept_paths~bin/av-scan~/Do not probe a forged path outside the kept scan paths/{n;s/.*/[ "$entry" != pair ] || matched=1; [ "$matched" = 1 ] || { bad=1; continue; }/;}~scan_vanished_pair_outside_paths'
+'pair_skipped_mount~bin/av-scan~s/then matched=0; break; fi/then [ "$entry" = pair ] || matched=0; break; fi/~scan_vanished_pair_skipped_mount'
+'pair_noncanonical~bin/av-scan~s/) bad=1; continue ;; esac/) [ "$entry" = pair ] || { bad=1; continue; } ;; esac/~scan_vanished_pair_noncanonical'
+'pair_total_counted~bin/av-scan~s/\[ "${summary:-0}" = "$run_old" \]/[ "${summary:-0}" = "$run_count" ]/~scan_vanished_pair_only scan_vanished_pair_mixed scan_vanished_pair_total_higher'
+'pair_entry_required~bin/av-scan~/\[ "$run_count" -gt 0 \] || bad=1/d~scan_changed_batch_pair_errors scan_changed_batch_errors'
+'pair_residual~MASTER.md~/^Residual of the pair (OC-T-0118)/d~scan_vanished_pair_documented'
+'pair_readme~README.md~/A pair offsets no error: only old-form warnings count against/d~scan_vanished_pair_documented'
 'scan_self_parent~bin/av-scan~s/if \[ "${fields\[1\]}" != "${fields\[0\]}" \]; then/if true; then/~scan_mount_self_parent'
 'scan_reachable~bin/av-scan~s/\[ "$reachable" = 1 \] || continue/:/~scan_mount_hidden_child'
 'scan_lexical_precheck~bin/av-scan~s/for stage in lexical physical/for stage in physical/~scan_path_dead_mount'

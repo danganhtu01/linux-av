@@ -493,6 +493,14 @@ OVH's existing `R-3377-cpu-cap.conf` remains the sole CPU drop-in, setting
 preserves the host's established control without a later override from
 `limits.conf`. Fresh hosts using `--install-timer` still receive CPU settings
 from `systemd/av-scan.service`.
+Because the installer writes no CPU setting, it first checks that
+`R-3377-cpu-cap.conf` is still as OVH needs it: a regular file (not a link),
+owned by root, not writable by group or others, with `CPUQuota=` and
+`CPUWeight=` lines that carry a value. Otherwise it stops before it renders,
+keeps or writes anything, and says which check failed (OC-T-0083). After the
+reload it prints `systemctl show` for `TimeoutStartUSec`, `CPUQuotaPerSecUSec`,
+`CPUWeight`, `MemoryHigh` and `MemoryMax`, so the card shows the bounds systemd
+now holds for the scan.
 The installer never enables, starts or restarts
 units and leaves the timer state alone (R-3377). Starting remains a separate
 card; do not restart the scan as part of this build or install.

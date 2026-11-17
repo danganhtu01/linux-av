@@ -1582,12 +1582,28 @@ root_install_scratch() {
     stub hostname <<'STUB'
 echo OVH
 STUB
+    # OC-T-0083: the CPU cap drop-in answers with the scratch file's real mode (a row may chmod it) and the owner in
+    # $D/cap-uid, since no test runs as root; every other path answers as a root-owned 0755 folder, as before.
+    ln -s "$(command -v stat)" "$B/realstat"
     stub stat <<'STUB'
 case "$2" in
-    '%u %A') echo '0 drwxr-xr-x' ;;
+    '%u %A')
+        case "$3" in
+            *R-3377-cpu-cap.conf) echo "$(cat "${CALLS%/*}/cap-uid") $(realstat -c %A "$3")" ;;
+            *) echo '0 drwxr-xr-x' ;;
+        esac ;;
     '%u %g %a') echo '0 0 644' ;;
     *) exit 1 ;;
 esac
+STUB
+    # OC-T-0083: the two read-backs answer only for their exact calls, so a changed call prints nothing.
+    stub systemctl <<'STUB'
+case "$*" in
+    'show linux-av-scan.service -p TimeoutStartUSec --value') echo '12h 30min' ;;
+    'show linux-av-scan.service -p CPUQuotaPerSecUSec -p CPUWeight -p MemoryHigh -p MemoryMax')
+        printf '%s\n' CPUQuotaPerSecUSec=1s CPUWeight=20 MemoryHigh=2147483648 MemoryMax=3221225472 ;;
+esac
+exit 0
 STUB
     stub install <<'STUB'
 [ "$1 $2 $3 $4 $5" = '-o root -g root -m' ] || exit 1
@@ -1604,6 +1620,11 @@ STUB
         -e "s|/etc/needrestart|$R/etc/needrestart|g" \
         -e "s|/run/linux-av-root-install|$R/run/linux-av-root-install|g" \
         "$REPO/root-install.sh" > "$D/installer"
+    # OC-T-0083: OVH's CPU cap drop-in, as the installer finds it: a root-owned 0644 regular file with both lines set.
+    CAP="$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf"
+    printf '%s\n' '[Service]' 'CPUQuota=100%' 'CPUWeight=20' > "$CAP"
+    chmod 0644 "$CAP"
+    printf '0\n' > "$D/cap-uid"
 }
 # Execute a scratch copy of the complete installer, from the checkout.
 row_root_install_limits() {
@@ -1622,10 +1643,19 @@ row_root_install_limits() {
     assert_nofile "$drop.new" 'atomic rename completed'
     assert_has "$OUT" "$(sha256sum < "$drop" 2>/dev/null | cut -c1-64)" 'drop-in hash recorded'
     assert_has "$(calls)" 'systemctl daemon-reload' 'daemon reload'
+    # OC-T-0083: after the reload, the unit's CPU and memory bounds are read back and printed, beside the time limit.
+    local show='systemctl show linux-av-scan.service -p CPUQuotaPerSecUSec -p CPUWeight -p MemoryHigh -p MemoryMax' calls_text
+    calls_text="$(calls)"
+    assert_has "$calls_text" "$show" 'CPU and memory bounds read back'
+    assert_has "${calls_text%%"$show"*}" 'systemctl daemon-reload' 'bounds read back after the reload'
+    assert_has "$OUT" 'TimeoutStartUSec=12h 30min' 'time limit still printed'
+    assert_has "$OUT" "$(printf '%s\n' CPUQuotaPerSecUSec=1s CPUWeight=20 MemoryHigh=2147483648 MemoryMax=3221225472)" \
+        'effective CPU and memory bounds printed'
+    assert_eq "$(cat "$CAP")" "$(printf '%s\n' '[Service]' 'CPUQuota=100%' 'CPUWeight=20')" 'CPU cap drop-in left as it was'
     local call
     while IFS= read -r call; do
         case "$call" in
-            'systemctl daemon-reload'|'systemctl show linux-av-scan.service -p TimeoutStartUSec --value'|'systemctl is-active linux-av-scan.timer') ;;
+            'systemctl daemon-reload'|'systemctl show linux-av-scan.service -p TimeoutStartUSec --value'|"$show"|'systemctl is-active linux-av-scan.timer') ;;
             systemctl*) fail "unexpected unit action: $call" ;;
         esac
     done < "$CALLS"
@@ -1719,6 +1749,74 @@ row_root_install_render_empty() {
     assert_eq "$(cat "$lib/lib/common.sh")" 'old library' 'installed library untouched after an empty render'
     assert_nofile "$lib/bin/av-scan.before-R-3377" 'no scanner backup after an empty render'
     assert_nofile "$lib/lib/common.sh.before-R-3377" 'no library backup after an empty render'
+}
+
+# OC-T-0083: OVH's CPU cap for the scan comes from R-3377-cpu-cap.conf, which the installer never writes. Each row below
+# breaks that drop-in one way and runs the scratch installer from the checkout over an installed copy of every file the
+# installer writes. It must stop with the cap check's own message, run neither the installer tool nor systemctl, and leave
+# the whole scratch root as it was: no backup, no new file, no changed byte. The message is asserted, so a guard that is
+# removed cannot hide behind a later one that happens to refuse the same file.
+root_install_tree() {
+    (cd "$R" && { find . ! -type d -printf '%p %m %u %l\n'; find . -type f -exec sha256sum {} +; } | sort)
+}
+root_install_cap_refused() { # message
+    local sd="$R/etc/systemd/system/linux-av-scan.service.d" lib="$R/usr/local/lib/linux-av" before after
+    printf 'old scanner\n' > "$lib/bin/av-scan"; printf 'old library\n' > "$lib/lib/common.sh"
+    printf 'old limits\n' > "$sd/limits.conf"; printf 'old time limit\n' > "$sd/30-time-limit.conf"
+    printf 'old needrestart\n' > "$R/etc/needrestart/conf.d/linux-av.conf"
+    before="$(root_install_tree)"
+    OUT="$(cd "$REPO" && "$ENV_BIN" -i B="$B" PATH="$B" HOME="$H" \
+        AV_CONFIG="$H/av.env" XDG_CONFIG_HOME="$H/config" XDG_STATE_HOME="$H/state" \
+        CALLS="$CALLS" /bin/sh "$D/installer" 2>&1)"; RC=$?
+    after="$(root_install_tree)"
+    [ "$RC" != 0 ] || fail 'installer went on with its CPU cap drop-in broken'
+    assert_has "$OUT" "$1" 'the cap check is what refused'
+    assert_has "$OUT" 'nothing was installed' 'refusal says nothing was installed'
+    assert_eq "$after" "$before" 'every file under the scratch root untouched'
+    assert_lacks "$(calls)" 'install -o root' 'nothing installed'
+    assert_lacks "$(calls)" 'systemctl' 'nothing reloaded'
+    assert_lacks "$OUT" 'written: ' 'no file written'
+    assert_lacks "$OUT" 'kept: ' 'no backup made'
+    assert_lacks "$OUT" 'root-install: done' 'installer stopped'
+}
+row_root_install_cap_missing() {
+    root_install_scratch; rm -f -- "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf is missing or not a regular file'
+}
+# The link points at a good file, so only the link check stands between it and the install.
+row_root_install_cap_link() {
+    root_install_scratch; cp -p "$CAP" "$D/cap-target"; rm -f -- "$CAP"; ln -s "$D/cap-target" "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf is a link'
+}
+row_root_install_cap_group_writable() {
+    root_install_scratch; chmod 0664 "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf is writable by group or others (-rw-rw-r--)'
+}
+row_root_install_cap_other_writable() {
+    root_install_scratch; chmod 0646 "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf is writable by group or others (-rw-r--rw-)'
+}
+row_root_install_cap_foreign_owner() {
+    root_install_scratch; printf '1000\n' > "$D/cap-uid"
+    root_install_cap_refused 'R-3377-cpu-cap.conf is not owned by root (uid 1000)'
+}
+# A commented line is not a setting.
+row_root_install_cap_quota_missing() {
+    root_install_scratch; printf '%s\n' '[Service]' '#CPUQuota=100%' 'CPUWeight=20' > "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf has no CPUQuota= line with a value'
+}
+row_root_install_cap_weight_missing() {
+    root_install_scratch; printf '%s\n' '[Service]' 'CPUQuota=100%' '#CPUWeight=20' > "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf has no CPUWeight= line with a value'
+}
+# An empty assignment resets the setting in systemd, so a line without a value is as good as none.
+row_root_install_cap_quota_empty() {
+    root_install_scratch; printf '%s\n' '[Service]' 'CPUQuota=' 'CPUWeight=20' > "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf has no CPUQuota= line with a value'
+}
+row_root_install_cap_weight_empty() {
+    root_install_scratch; printf '%s\n' '[Service]' 'CPUQuota=100%' 'CPUWeight=' > "$CAP"
+    root_install_cap_refused 'R-3377-cpu-cap.conf has no CPUWeight= line with a value'
 }
 
 # OC-T-0047 round 4: the absent-now probe stays inside the kept paths and the time limit.

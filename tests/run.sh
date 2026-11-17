@@ -1887,9 +1887,20 @@ row_scan_vanished_noncanonical() {
 # counted. vanished_pairs, defined with batch_run, prints the pair lines; scan_vanished_tail ends a run with the summary, with a
 # Total errors line only when it is given a number (a run of pairs alone has none).
 # Each row below holds a defect beside valid entries, so that it goes red through one guard only.
-scan_vanished_pairs_fixture() { # PATH...: a run that lists these as pairs and prints nothing else yet
+# scan_vanished_pairs_fixture NAME...: a run that lists these as pairs and prints nothing else yet. A NAME is a path below the row's
+# own $D, or an absolute path. The fixture sets $D, so the paths are made after it, never in the caller's arguments (they would be
+# those of the row before).
+scan_vanished_pairs_fixture() {
+    local name
+    local -a pair_paths=()
     scan_vanished_fixture
-    vanished_pairs "$@" > "$D/output"
+    for name; do
+        case $name in
+            /*) pair_paths+=("$name") ;;
+            *) pair_paths+=("$D/$name") ;;
+        esac
+    done
+    vanished_pairs "${pair_paths[@]}" > "$D/output"
 }
 scan_vanished_tail() { # [TOTAL]
     printf '\n----------- SCAN SUMMARY -----------\nKnown viruses: 3628245\nEngine version: 1.5.4\nScanned directories: 1\nScanned files: 3\nInfected files: 0\n' >> "$D/output"
@@ -1913,7 +1924,7 @@ scan_vanished_unforgiven() { # LABEL
     assert_nofile "$H/state/linux-av/last-full-scan.stamp" "$1: full stamp held"
 }
 row_scan_vanished_pair_only() {
-    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1; scan_vanished_tail
     scan_vanished_forgiven "one pair" 1
 }
 row_scan_vanished_pair_many() {
@@ -1933,7 +1944,7 @@ row_scan_vanished_pair_mixed() {
     scan_vanished_forgiven "3 pairs among 2 old-form warnings, Total errors 2" 5
 }
 row_scan_vanished_pair_folder_gone() {
-    scan_vanished_pairs_fixture "$D/nodir/sub/gone" "$D/nodir/gone"; scan_vanished_tail
+    scan_vanished_pairs_fixture nodir/sub/gone nodir/gone; scan_vanished_tail
     scan_vanished_forgiven "pairs whose folders are gone too" 2
 }
 # Names with [ * ? and a backslash are paths, never patterns: truly absent they are forgiven, with files beside them that a glob or
@@ -1969,7 +1980,7 @@ row_scan_vanished_pair_first_alone() {
     done
 }
 row_scan_vanished_pair_first_last() {
-    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1; scan_vanished_tail
     printf '%s: No such file or directory\n' "$D/gone2" >> "$D/output"
     scan_vanished_unforgiven "a first line that is the last line"
 }
@@ -2005,18 +2016,18 @@ row_scan_vanished_pair_line_between() {
     done
 }
 row_scan_vanished_pair_different_paths() {
-    scan_vanished_pairs_fixture "$D/gone1"
+    scan_vanished_pairs_fixture gone1
     printf "%s: No such file or directory\nWARNING: %s: Can't access file\n" "$D/gone2" "$D/gone3" >> "$D/output"
     scan_vanished_tail
     scan_vanished_unforgiven "a pair naming two paths, both absent and under the kept path"
 }
 row_scan_vanished_pair_exists() {
-    scan_vanished_pairs_fixture "$D/gone1" "$D/gone2"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1 gone2; scan_vanished_tail
     touch "$D/gone2"
     scan_vanished_unforgiven "a pair whose path exists"
 }
 row_scan_vanished_pair_reappeared() {
-    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1; scan_vanished_tail
     stub clamscan <<'STUB'
 printf '%s\0' "$@" > "$SCAN_ARGS"
 cat "$OUTPUT"
@@ -2042,7 +2053,7 @@ row_scan_vanished_pair_total_higher() {
     done
 }
 row_scan_vanished_pair_outside_paths() {
-    scan_vanished_pairs_fixture "$D/gone1" /nonexistent-outside-scan; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1 /nonexistent-outside-scan; scan_vanished_tail
     scan_vanished_unforgiven "a pair outside the kept scan paths"
 }
 row_scan_vanished_pair_skipped_mount() {
@@ -2080,13 +2091,13 @@ row_scan_vanished_pair_unsearchable() {
 # A name with a newline splits both lines of its pair, so no line pairs with another and each is an unknown line: the run stays an
 # error (the same residual as the old form's, MASTER.md).
 row_scan_vanished_pair_newline() {
-    scan_vanished_pairs_fixture "$D/gone1"
+    scan_vanished_pairs_fixture gone1
     printf "%s\n%s: No such file or directory\nWARNING: %s\n%s: Can't access file\n" "$D/line" 'break' "$D/line" 'break' >> "$D/output"
     scan_vanished_tail
     scan_vanished_unforgiven "a gone name with a newline"
 }
 row_scan_vanished_pair_after_summary() {
-    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1; scan_vanished_tail
     vanished_pairs "$D/gone2" >> "$D/output"
     scan_vanished_unforgiven "a pair after the summary"
 }
@@ -2097,7 +2108,7 @@ row_scan_vanished_pair_documented() {
 # Status 1 alerts as before: the pair forgives nothing. What a status 1 run does to the stamps is not this row's to change; the
 # note below says what it does with a pair and no Total errors line (a threat plus a vanished file counted in Total errors holds them).
 row_scan_vanished_pair_threat() {
-    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_pairs_fixture gone1; scan_vanished_tail
     SCAN_ENV+=(SCAN_RC=1 "AV_ON_FOUND=touch '$D/found'")
     scan_vanished_check
     assert_eq "$RC" 1 "threat exit"

@@ -429,18 +429,21 @@ longer lines can split into separate targets, including relative paths. This
 avoids line splitting (FAULT-0005 and FAULT-0006) and possible CR stripping;
 names stay literal. ClamAV NUL-list support is not
 required. Paths measuring **4096 bytes or more** take neither route: clamscan
-cannot open them through either route (PATH_MAX). Each is logged as unscannable
-with its byte length and a safely quoted 80-byte prefix. Other files still scan,
-including ordinary batch-mates; the run returns 2 and holds both stamps even if
-a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
+cannot open them through either route (PATH_MAX). Each of the first 20 is logged
+as unscannable with its byte length and a safely quoted 80-byte prefix, then the
+total count. Other files still scan, including ordinary batch-mates; the run
+returns 2 (or the scanner's stop status, 124, 137 or 143) and holds both stamps
+even if a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
 individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
 Argument batches hold at most 128 names, with an additional size bound;
 all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
 An earlier batch error cannot be erased by a later clean batch. The batch merge
 reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
 and invokes `AV_ON_FOUND`, while any batch error holds both
-stamps and logs that the next run will retry (FAULT-0016). A private failure
-marker preserves this distinction independently of the merged reporting status.
+stamps and logs that the next run will retry (FAULT-0016). A private pending
+marker is created before the worker starts and removed only if no batch returned
+above 1. It preserves this distinction independently of the merged reporting
+status.
 The reporting priority matches
 [ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
 which selects infection before errors. Temporary lists and captured output are
@@ -462,6 +465,19 @@ only after the report is written and every scanner batch completes with 0
 (clean) or 1 (found). Any batch error holds both stamps, including a threat plus
 an error whose merged reporting status is 1. Unscannable paths, partial walks,
 timeouts, signals, and forgiven vanished-file errors also leave stamps alone.
+A clamscan summary reporting `Total errors` above zero holds both stamps even
+when its exit status is 1 because it also found a threat. Under `--now`, clamscan
+threat output captured before `AV_SCAN_TIMEOUT` stops the scan, or before the
+scanner alone is killed, still triggers `THREATS FOUND` and `AV_ON_FOUND`; the
+stop status (124, 137 or 143) is preserved. This does not cover stopping the
+whole service unit with SIGTERM or `--scheduled` runs. Output is searched only
+after such a stop: a run that ends with status 0 or 2 alerts on status alone, so a
+`FOUND` line in its output, which a file name holding a newline can forge inside
+clamscan's own warning, raises no alert. The clamdscan engine
+alerts on exit status 1; it does not recover threats from interrupted output.
+Unscannable-path diagnostics log the first 20 paths and then the total count
+when there are more. Under `--now`, failures returned by the scan or stamp
+writes close with an error line; incomplete walks never report clean.
 Deleting both stamps requests a new full scan. Use a separate `AV_LOG_DIR` for
 independent scan path sets so their histories do not share stamps.
 

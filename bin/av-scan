@@ -122,14 +122,31 @@ scan_now() (
     # The report has been written by run_scan. A forgiven raw scanner error
     # (vanished files) still cannot advance a stamp.
     if [ "$rc" -le 1 ] && [ -f "$scan_state/completed" ]; then
-        [ "${AV_REPORT_WRITTEN:-0}" = 1 ] || { log_err "scan report could not be written; stamps unchanged"; return 2; }
-        if [ "$scan_mode" = full ]; then
-            touch -r "$scan_state/start" "$scan_state/full" && mv -f -- "$scan_state/full" "$full" || return 2
+        if [ "${AV_REPORT_WRITTEN:-0}" != 1 ]; then
+            log_err "scan report could not be written; stamps unchanged"
+            rc=2
+        else
+            if [ "$scan_mode" = full ]; then
+                touch -r "$scan_state/start" "$scan_state/full" && mv -f -- "$scan_state/full" "$full" || rc=2
+            fi
+            if [ "$rc" -le 1 ]; then
+                touch -r "$scan_state/start" "$scan_state/good" && mv -f -- "$scan_state/good" "$good" || rc=2
+            fi
         fi
-        touch -r "$scan_state/start" "$scan_state/good" && mv -f -- "$scan_state/good" "$good" || return 2
     fi
+    if [ "$rc" -gt 1 ]; then log_err "scan failed (rc=$rc); stamps unchanged"; fi
     return "$rc"
 )
+
+# Isolate --now hooks from scan status; scheduled hooks retain their exit semantics.
+report_scan_threat() {
+    log_warn "THREATS FOUND in ${paths[*]} (see $AV_LOG_FILE / quarantine)"
+    if [ -n "${scan_state:-}" ]; then
+        ( [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" ) || true
+    else
+        [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" || true
+    fi
+}
 
 # clamscan 1.5.4 reads file-list lines with fgets into a 1024-byte buffer.
 # Keep long names and LF/CR names byte-for-byte in argv instead. Scope the byte
@@ -144,6 +161,8 @@ scan_file_list_safe() {
 scan_path_scannable() {
     local LC_ALL=C label
     [ "${#1}" -lt 4096 ] && return 0
+    unscannable_count=$((unscannable_count + 1))
+    [ "$unscannable_count" -le 20 ] || return 1
     printf -v label '%q' "${1:0:80}"
     log_err "unscannable path (${#1} bytes): $label...; stamps unchanged"
     return 1
@@ -153,13 +172,13 @@ scan_path_scannable() {
 # one DB load; long and LF/CR names are quoted argv entries in bounded batches.
 # No pathname passes through shell source text.
 run_clamscan_batches() {
-    local engine="$1" list="$2" odd_list="$3" file chars rc=0 batch_rc
+    local engine="$1" list="$2" odd_list="$3" file chars rc=0 batch_rc failed=0
     shift 3
     local -a targets=()
     if [ -s "$list" ]; then
         "$engine" "$@" "--file-list=$list"; rc=$?
         if [ "$rc" -gt 1 ]; then
-            : > "$odd_list.failed" || return 2
+            failed=1
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >&2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >> "$AV_LOG_FILE"
         fi
@@ -176,7 +195,7 @@ run_clamscan_batches() {
         [ "${#targets[@]}" -gt 0 ] || break
         "$engine" "$@" "${targets[@]}"; batch_rc=$?
         if [ "$batch_rc" -gt 1 ]; then
-            : > "$odd_list.failed" || return 2
+            failed=1
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >&2
             printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >> "$AV_LOG_FILE"
         fi
@@ -185,6 +204,9 @@ run_clamscan_batches() {
         if [ "$batch_rc" = 1 ]; then rc=1
         elif [ "$rc" = 0 ] && [ "$batch_rc" -gt 1 ]; then rc=$batch_rc; fi
     done < "$odd_list"
+    # A batch's 1 stays 1 when the marker cannot be removed, so the caller alerts
+    # on status, never on output text; the marker left in place holds the stamps.
+    if [ "$failed" = 0 ]; then rm -f -- "$odd_list.pending" || { [ "$rc" = 1 ] && return 1; return 2; }; fi
     return "$rc"
 }
 
@@ -218,21 +240,43 @@ run_clamscan_checked() (
     if [ -n "${odd_list:-}" ] && [ -s "$odd_list" ]; then
         # Serialize only this trusted function, never any pathname, into code.
         # A single timeout bounds every scanner invocation in the worker.
+        : > "$odd_list.pending" || { log_err "cannot create batch pending marker"; return 2; }
         command=("$BASH" -c "$(declare -f run_clamscan_batches)"$'\nrun_clamscan_batches "$@"' \
             av-scan "$engine" "$list" "$odd_list" "${args[@]}")
     fi
     "${runner[@]}" "${command[@]}" 2>&1 | tee "$copy"
     local -a statuses=("${PIPESTATUS[@]}")
     rc=${statuses[0]}
-    if [ "${statuses[1]}" != 0 ]; then return 2; fi
-    if [ -n "${odd_list:-}" ] && [ -f "$odd_list.failed" ]; then
+    # Inspect output without consuming the rc=2 whitelist's read loop. If the
+    # threat marker cannot be written, report here before losing this evidence.
+    # Output text is searched only when the scanner was stopped (timeout, kill,
+    # signal: 124 and above). At 0 or 2 a FOUND line can be forged by a file name
+    # holding a newline inside clamscan's own warning, so status alone decides.
+    local marker_failed=0
+    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
+        touch "$scan_state/threat" || {
+            log_err "cannot write threat marker; stamps unchanged"
+            report_scan_threat
+            marker_failed=1
+        }
+    fi
+    if [ "${statuses[1]}" != 0 ] || [ "$marker_failed" = 1 ]; then
+        [ "$rc" -gt 1 ] || rc=2
+        return "$rc"
+    fi
+    if [ "$rc" -le 1 ] && grep -Eq '^Total errors: 0*[1-9][0-9]*$' "$copy"; then
+        log_err "clamscan summary reports errors; stamps unchanged so the next run retries"
+        [ "$rc" = 1 ] || rc=2
+        return "$rc"
+    fi
+    if [ -n "${odd_list:-}" ] && [ -e "$odd_list.pending" ]; then
         log_err "clamscan batch failed; stamps unchanged so the next run retries"
         return "$rc"
     fi
-    if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
-        touch "$scan_state/completed" || return 2
+    if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ] && [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ]; then
+        touch "$scan_state/completed" || { log_err "cannot write completed marker; stamps unchanged"; rc=2; marker_failed=1; }
     fi
-    if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ]; then
+    if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ] && [ "$marker_failed" = 0 ]; then
         while line=; IFS= read -r line || [ -n "$line" ]; do
             if [[ $line =~ $warning_re ]]; then
                 [ "$headers" = 0 ] || bad=1
@@ -311,6 +355,7 @@ run_scan() {
     local -A covered=() mount_index=()
     local p line mount fstype pattern matched escaped char label path_label REPLY i idx
     local cursor parent parent_idx steps reachable stage resolved
+    local unscannable_count=0
     local walk_failed=0 unscannable=0 list="" odd_list=""
     if [ -n "$AV_EXCLUDE_FSTYPES" ]; then
         [ -r "$AV_MOUNTINFO" ] || { log_err "cannot read mount table: $AV_MOUNTINFO; scan not started"; return 2; }
@@ -533,15 +578,18 @@ run_scan() {
                 printf '%s\0' "$file" >> "$odd_list" || return 2
             fi
         done < "$scan_state/walk"
+        if [ "$unscannable_count" -gt 20 ]; then
+            log_err "$unscannable_count unscannable paths; first 20 logged; stamps unchanged"
+        fi
         if [ ! -s "$list" ] && [ ! -s "$odd_list" ]; then
-            [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ] || return 2
+            [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ] || { log_err "incomplete scan: no scannable files remain; stamps unchanged"; return 2; }
+            touch "$scan_state/completed" || { log_err "cannot write completed marker; stamps unchanged"; return 2; }
             log_info "clean — nothing changed"
-            touch "$scan_state/completed" || return 2
             return 0
         fi
         scan_targets=()
     fi
-    local rc=0
+    local rc=0 threat_known=0
     local -a runner=()
     if [ "$AV_SCAN_TIMEOUT" != 0 ]; then
         runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")
@@ -551,18 +599,20 @@ run_scan() {
         if [ -n "$list" ] && [ ! -s "$odd_list" ]; then args+=("--file-list=$list"); fi
         run_clamscan_checked; rc=$?
         if [ "$walk_failed" = 1 ] || [ "$unscannable" = 1 ]; then
-            rm -f -- "$scan_state/completed" || return 2
+            rm -f -- "$scan_state/completed" || { log_err "cannot remove completed marker; stamps unchanged"; [ "$rc" != 1 ] || threat_known=1; [ "$rc" -gt 1 ] || rc=2; }
         fi
     else
         "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}"; rc=$?
         if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
-            touch "$scan_state/completed" || return 2
+            touch "$scan_state/completed" || { log_err "cannot write completed marker; stamps unchanged"; [ "$rc" != 1 ] || threat_known=1; rc=2; }
         fi
     fi
+    if [ "$rc" != 1 ] && { [ "$threat_known" = 1 ] || { [ -n "${scan_state:-}" ] && [ -f "$scan_state/threat" ]; }; }; then
+        report_scan_threat
+    fi
     case $rc in
-        0) log_info "clean — no threats in ${paths[*]}" ;;
-        1) log_warn "THREATS FOUND in ${paths[*]} (see $AV_LOG_FILE / quarantine)"
-           [ -n "${AV_ON_FOUND:-}" ] && eval "$AV_ON_FOUND" || true ;;
+        0) if [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ]; then log_info "clean — no threats in ${paths[*]}"; fi ;;
+        1) report_scan_threat ;;
         124) log_warn "scan stopped at its time limit ($AV_SCAN_TIMEOUT) and did not finish" ;;
         137) log_warn "scan was killed (SIGKILL: its time limit's kill-after, or another killer such as the OOM killer) and did not finish" ;;
         *) log_err  "scanner error (rc=$rc) on ${paths[*]}" ;;
@@ -571,7 +621,15 @@ run_scan() {
         log_err "partial walk: listed files scanned; stamps unchanged so the next run retries"
         [ "$rc" -gt 1 ] || rc=2
     fi
+    if [ "$unscannable" = 1 ]; then
+        log_err "incomplete scan: unscannable paths; stamps unchanged"
+        case "$rc" in
+            0|1)
     if [ "$unscannable" = 1 ]; then rc=2; fi
+                ;;
+        esac
+    fi
+    if [ -z "${scan_state:-}" ] && [ "$rc" -gt 1 ]; then log_err "scan failed (rc=$rc)"; fi
     return $rc
 }
 

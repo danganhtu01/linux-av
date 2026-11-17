@@ -31,7 +31,7 @@ else
     echo "scratch kept: $WORK"
 fi
 
-PASS=0; FAIL=0; ROW=""; ROW_FAILED=0
+PASS=0; FAIL=0; ROW=""; ROW_FAILED=0; D=""
 
 fail() { printf '  FAIL %s: %s\n' "$ROW" "$*"; ROW_FAILED=1; }
 assert_eq() { [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"; }
@@ -1238,7 +1238,38 @@ row_scan_vanished_after_summary() {
 row_scan_vanished_found() {
     scan_vanished_fixture; scan_vanished_summary
     printf '%s\n' '/scratch/eicar: Eicar-Test-Signature FOUND' >> "$D/output"
+    SCAN_ENV+=("AV_ON_FOUND=touch '$D/found'")
     scan_vanished_check; assert_eq "$RC" 2 "FOUND line with rc 2"
+    # Status 2 is an error, not a threat: the text cannot raise the alert.
+    assert_has "$(cat "$H/state/linux-av/av-scan.log")" 'scanner error (rc=2)' "FOUND line with rc 2 logged as an error"
+    assert_lacks "$OUT" 'THREATS FOUND' "FOUND line with rc 2 reports no threat"
+    assert_nofile "$D/found" "FOUND line with rc 2 runs no AV_ON_FOUND"
+}
+# OC-T-0084 round 3: only the scanner's status reports a threat. A file name
+# holding newlines splits clamscan's can't-open warning, so a middle fragment
+# can end in " FOUND" at status 2 (or even 0); that text must not alert.
+row_scan_forged_found_line() {
+    local status log
+    for status in 2 0; do
+        rm -rf -- "${WORK:?}/${ROW:?}"
+        scan_vanished_fixture
+        SCAN_ENV+=("SCAN_RC=$status" "AV_ON_FOUND=touch '$D/found'")
+        # Name: "$D/x", LF, "fake: Eicar-Test-Signature FOUND", LF, "y"
+        printf "WARNING: Can't open file %s\nfake: Eicar-Test-Signature FOUND\ny: No such file or directory\n" "$D/x" > "$D/output"
+        scan_vanished_check
+        log="$(cat "$H/state/linux-av/av-scan.log")"
+        assert_has "$OUT" 'fake: Eicar-Test-Signature FOUND' "status $status: the forged line reached the scan output"
+        assert_lacks "$OUT" 'THREATS FOUND' "status $status: forged FOUND text reports no threat"
+        assert_lacks "$log" 'THREATS FOUND' "status $status: forged FOUND text logs no threat"
+        assert_nofile "$D/found" "status $status: forged FOUND text runs no AV_ON_FOUND"
+        if [ "$status" = 2 ]; then
+            assert_eq "$RC" 2 'status 2 stays an error'
+            assert_has "$log" 'scanner error (rc=2)' 'status 2 is logged as an error'
+        else
+            assert_eq "$RC" 0 'status 0 stays clean'
+            assert_has "$log" 'clean —' 'status 0 is logged clean'
+        fi
+    done
 }
 row_scan_vanished_summary_shapes() {
     scan_vanished_fixture
@@ -2129,6 +2160,9 @@ STUB
     assert_has "$(cat "$L/av-scan.log")" 'partial walk' 'partial walk persisted in log'
     assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp unchanged'
     assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp unchanged'
+    assert_lacks "$OUT" 'clean —' 'failed walk never logs clean'
+    assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'failed walk closes with error'
+
 }
 row_scan_changed_odd_batches() {
     changed_fixture; changed_seed
@@ -2223,6 +2257,11 @@ row_scan_changed_walk_failure() {
     assert_has "$OUT" 'changed-files walk failed' 'walk failure diagnostic'
     assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'failed walk leaves stamp unchanged'
     assert_lacks "$(calls)" 'clamscan ' 'incomplete walk not scanned'
+    assert_lacks "$OUT" 'clean —' 'failed walk never logs clean'
+    assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'failed walk closes with error'
+
+    assert_has "$OUT" 'incomplete scan: no scannable files remain' 'empty failed walk diagnosed'
+
 }
 row_scan_changed_snapshot() {
     changed_fixture
@@ -2240,6 +2279,350 @@ STUB
     scan --path "$D/tree"
     assert_has "$(cat "$D/list" 2>/dev/null)" '/during-scan' 'change during previous scan retained'
 }
+# OC-T-0084: reporting, bounded diagnostics and conservative completion.
+row_scan_batch_marker_failure() {
+    case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do
+    case "$arg" in --file-list=*)
+        f=${arg#--file-list=}
+        [ -f "${f%/*}/odd.pending" ] || exit 3
+        echo 'plain: Test.Signature FOUND'; exit 1 ;;
+    esac
+done
+exit 2
+STUB
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    cp -p "$L/last-full-scan.stamp" "$D/full-before"
+    SCAN_ENV=("AV_ON_FOUND=touch '$D/found'")
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 1 'failed marker write cannot erase threat'
+    assert_file "$D/found" 'threat hook retained'
+    assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'threat logged'
+    assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp retained'
+    assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp retained'
+    assert_has "$(cat "$L/av-scan.log")" 'stamps unchanged' 'failure holds stamps'
+}
+row_scan_pending_create_failure() {
+    changed_fixture; changed_seed
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    cp -p "$L/last-full-scan.stamp" "$D/full-before"
+    stub find <<'STUB'
+for state in "$HOME/state/linux-av"/av-scan-state.*; do mkdir "$state/odd.pending"; done
+printf '%s\0' "${SCAN_ARGS%/*}/tree/odd"$'\n'
+STUB
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 2 'pending create failure stops scan'
+    assert_has "$OUT" 'cannot create batch pending marker' 'pending create error diagnosed'
+    assert_lacks "$(calls)" 'clamscan ' 'pending create failure calls no scanner'
+    assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp retained'
+    assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp retained'
+    assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'pending failure closes with error'
+}
+# The stub swaps the batch marker for a directory, so rm cannot remove it and the
+# marker stays in place. A batch status of 1 (threat) stays 1, alerts once and
+# holds the stamps; a batch status of 0 has no threat to keep, so the failure is
+# an error (2) that holds the stamps and never logs clean.
+row_scan_pending_remove_failure() {
+    local status log
+    for status in 1 0; do
+        rm -rf -- "${WORK:?}/${ROW:?}"
+        changed_fixture; changed_seed
+        touch "$D/tree/plain" "$D/tree/odd"$'\n'
+        cp -p "$L/last-good-scan.stamp" "$D/good-before"
+        cp -p "$L/last-full-scan.stamp" "$D/full-before"
+        stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do case "$arg" in --file-list=*)
+    f=${arg#--file-list=}; rm "${f%/*}/odd.pending"; mkdir "${f%/*}/odd.pending"
+    [ "$BATCH_RC" != 1 ] || echo 'plain: Test.Signature FOUND'
+    exit "$BATCH_RC" ;;
+esac; done
+exit 0
+STUB
+        SCAN_ENV=("BATCH_RC=$status" "AV_ON_FOUND=touch '$D/found'")
+        scan --changed --path "$D/tree"
+        log="$(cat "$L/av-scan.log")"
+        assert_has "$log" 'clamscan batch failed; stamps unchanged so the next run retries' "status $status: the marker left in place holds the stamps"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "status $status: good stamp retained"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "status $status: full stamp retained"
+        if [ "$status" = 1 ]; then
+            assert_eq "$RC" 1 'pending removal failure after a threat keeps status 1'
+            assert_file "$D/found" 'pending removal failure after a threat runs AV_ON_FOUND'
+            assert_has "$OUT" 'THREATS FOUND' 'pending removal failure after a threat reports it'
+            assert_eq "$(printf '%s\n' "$log" | grep -c 'THREATS FOUND')" 1 'threat logged once'
+            assert_lacks "$log" 'scanner error' 'status 1 is not a scanner error'
+            assert_lacks "$log" 'scan failed' 'status 1 does not close as a failed scan'
+        else
+            assert_eq "$RC" 2 'pending removal failure without a threat is an error'
+            assert_nofile "$D/found" 'pending removal failure without a threat runs no hook'
+            assert_lacks "$log" 'THREATS FOUND' 'no threat is reported'
+            assert_lacks "$log" 'clean —' 'held scan never logs clean'
+            assert_has "$log" 'scanner error (rc=2)' 'pending removal failure logs the error'
+            assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'pending removal failure closes with error'
+        fi
+    done
+}
+row_scan_state_marker_failure() {
+    local marker status
+    for marker in threat completed; do
+        for status in 1 124; do
+            [ "$marker:$status" != completed:124 ] || continue
+            case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+            changed_fixture; changed_seed
+            cp -p "$L/last-good-scan.stamp" "$D/good-before"
+            cp -p "$L/last-full-scan.stamp" "$D/full-before"
+            ln -s "$(command -v touch)" "$B/plain/touch"
+            stub touch <<'STUB'
+for arg in "$@"; do case "$arg" in */av-scan-state.*/"$FAIL_MARKER") exit 1 ;; esac; done
+exec "${BASH_SOURCE[0]%/*}/plain/touch" "$@"
+STUB
+            stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+echo 'plain: Test.Signature FOUND'
+exit "$SCAN_RC"
+STUB
+            SCAN_ENV=("FAIL_MARKER=$marker" "SCAN_RC=$status" "AV_ON_FOUND=touch '$D/found'; rc=0; walk_failed=0; unscannable=0")
+            scan --full-scan --path "$D/tree"
+            [ "$status" -gt 1 ] || status=2
+            assert_eq "$RC" "$status" 'marker failure preserves error or stop status'
+            assert_file "$D/found" 'marker failure retains alert'
+            assert_has "$OUT" 'THREATS FOUND' 'marker failure reports threat'
+            assert_has "$OUT" "cannot write $marker marker" 'marker error diagnosed'
+            assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp retained'
+            assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp retained'
+            assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'marker failure closes with error'
+        done
+    done
+}
+row_scan_completion_marker_failure() {
+    local mode
+    for mode in empty daemon partial; do
+        case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+        changed_fixture; changed_seed
+        cp -p "$L/last-good-scan.stamp" "$D/good-before"
+        cp -p "$L/last-full-scan.stamp" "$D/full-before"
+        ln -s "$(command -v touch)" "$B/plain/touch"
+        ln -s "$(command -v rm)" "$B/plain/rm"
+        stub touch <<'STUB'
+for arg in "$@"; do case "$arg" in */av-scan-state.*/completed) [ "$MARKER_MODE" = partial ] || exit 1 ;; esac; done
+exec "${BASH_SOURCE[0]%/*}/plain/touch" "$@"
+STUB
+        stub rm <<'STUB'
+for arg in "$@"; do case "$arg" in */av-scan-state.*/completed)
+    if [ "$MARKER_MODE" = partial ]; then
+        [ ! -e "$arg" ] || touch "$HOME/unexpected-completed"
+        exit 1
+    fi ;;
+esac; done
+exec "${BASH_SOURCE[0]%/*}/plain/rm" "$@"
+STUB
+        SCAN_ENV=("MARKER_MODE=$mode" "AV_ON_FOUND=touch '$D/found'")
+        case $mode in
+            empty)
+                stub find <<'STUB'
+exit 0
+STUB
+                scan --changed --path "$D/tree" ;;
+            daemon)
+                unstub clamscan
+                stub clamdscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+exit 1
+STUB
+                SCAN_ENV+=(AV_ENGINE=clamdscan)
+                scan --full-scan --path "$D/tree" ;;
+            partial)
+                stub find <<'STUB'
+printf '%s\0' "${SCAN_ARGS%/*}/tree/plain"
+exit 1
+STUB
+                SCAN_ENV+=(SCAN_RC=1)
+                scan --changed --path "$D/tree" ;;
+        esac
+        assert_eq "$RC" 2 'completion marker failure fails scan'
+        assert_nofile "$H/unexpected-completed" 'incomplete coverage never creates completion marker'
+        if [ "$mode" != empty ]; then
+            assert_file "$D/found" 'completion marker failure retains alert'
+            assert_has "$OUT" 'THREATS FOUND' 'completion marker failure reports threat'
+        fi
+        assert_lacks "$OUT" 'clean —' 'failed completion never logs clean'
+        assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'completion failure closes with error'
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" 'good stamp retained'
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" 'full stamp retained'
+    done
+}
+row_scan_hook_status_isolation() {
+    unscannable_fixture
+    printf '%s\0' "$D/tree/plain" >> "$D/walk"
+    SCAN_ENV=(SCAN_RC=1 "AV_ON_FOUND=touch '$D/found'; rc=0; walk_failed=0; unscannable=0")
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 2 'hook cannot clear incomplete coverage'
+    assert_file "$D/found" 'hook still runs'
+    assert_lacks "$OUT" 'clean —' 'hook cannot produce clean report'
+    assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'hook cannot clear closing error'
+}
+row_scan_stamp_failure_closing() {
+    local stamp
+    for stamp in full good; do
+        case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+        changed_fixture
+        ln -s "$(command -v touch)" "$B/plain/touch"
+        stub touch <<'STUB'
+for arg in "$@"; do case "$arg" in */av-scan-state.*/"$FAIL_STAMP") exit 1 ;; esac; done
+exec "${BASH_SOURCE[0]%/*}/plain/touch" "$@"
+STUB
+        SCAN_ENV=("FAIL_STAMP=$stamp")
+        scan --full-scan --path "$D/tree"
+        assert_eq "$RC" 2 'stamp write failure fails scan'
+        assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'stamp failure closes with error'
+        assert_eq "$(grep -c 'scan failed (rc=' "$L/av-scan.log")" 1 'one closing error'
+    done
+}
+unscannable_fixture() {
+    changed_fixture; changed_seed
+    local name
+    printf -v name '%4096s' ''; name="/${name:1}"
+    printf '%s\0' "$name" > "$D/walk"
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+}
+row_scan_unscannable_closing() {
+    local status
+    for status in 0 1 124 137 143; do
+        case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+        unscannable_fixture
+        printf '%s\0' "$D/tree/plain" >> "$D/walk"
+        SCAN_ENV=("SCAN_RC=$status")
+        scan --changed --path "$D/tree"
+        if [ "$status" -le 1 ]; then status=2; fi
+        assert_eq "$RC" "$status" 'unscannable preserves scanner failure status'
+        assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'last log line is error'
+        assert_lacks "$OUT" 'clean —' 'incomplete coverage never logs clean'
+    done
+}
+row_scan_unscannable_limit() {
+    unscannable_fixture
+    local name i
+    name="$(cat "$D/walk" | tr -d '\000')"
+    for ((i=1; i<25; i++)); do printf '%s\0' "$name" >> "$D/walk"; done
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 2 'unscannable-only run fails'
+    assert_eq "$(grep -c 'unscannable path (' "$L/av-scan.log")" 20 'only first 20 paths logged'
+    assert_has "$(cat "$L/av-scan.log")" '25 unscannable paths; first 20 logged' 'total count logged'
+}
+row_scan_summary_errors_hold() {
+    changed_fixture
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+echo 'plain: Test.Signature FOUND'
+printf '\n----------- SCAN SUMMARY -----------\nInfected files: 1\nTotal errors: 0002\n'
+exit 1
+STUB
+    SCAN_ENV=("AV_ON_FOUND=touch '$D/found'")
+    scan --full-scan --path "$D/tree"
+    assert_eq "$RC" 1 'summary error retains threat status'
+    assert_file "$D/found" 'summary error retains alert'
+    assert_nofile "$L/last-good-scan.stamp" 'summary errors hold good stamp'
+    assert_nofile "$L/last-full-scan.stamp" 'summary errors hold full stamp'
+    assert_has "$OUT" 'clamscan summary reports errors' 'summary error diagnosed'
+}
+row_scan_threat_before_stop() {
+    local status
+    for status in 124 137 143; do
+        case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+        changed_fixture; changed_seed
+        stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+echo 'plain: Test.Signature FOUND'
+exit "$SCAN_RC"
+STUB
+        SCAN_ENV=("SCAN_RC=$status" "AV_ON_FOUND=touch '$D/found'")
+        scan --full-scan --path "$D/tree"
+        assert_eq "$RC" "$status" 'stop status retained'
+        assert_file "$D/found" 'threat before stop alerts'
+        assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'threat before stop logged'
+        assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'stop closes with error'
+    done
+    case $D in "$WORK"/?*) rm -rf -- "$D" ;; esac
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    ln -s "$(command -v sleep)" "$B/sleep"
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; exit 1 ;; esac; done
+sleep 5
+STUB
+    SCAN_ENV=(AV_SCAN_TIMEOUT=0.2s "AV_ON_FOUND=touch '$D/found'")
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 124 'real worker timeout retained'
+    assert_file "$D/found" 'earlier batch threat alerts after real timeout'
+    assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'earlier batch threat logged'
+}
+row_scan_empty_remainder_hold() {
+    unscannable_fixture
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 2 'empty remainder holds stamps'
+    assert_lacks "$OUT" 'clean —' 'empty remainder never clean'
+    assert_lacks "$(calls)" 'clamscan ' 'empty remainder needs no engine'
+}
+
+# Keep OC-T-0084 mutants here: tests/mutants.sh is outside this card's edit scope.
+row_scan_low_mutants() {
+    local spec name expr rows dir out killed=0 survived=0
+    local -a mutations=(
+        'incomplete_completion_written~/^    if \[ "$rc" -le 1 \] \&\& \[ -n "${scan_state:-}" \]/s/ \&\& \[ "$walk_failed" = 0 \] \&\& \[ "$unscannable" = 0 \]//~scan_completion_marker_failure'
+        'threat_marker_alert_lost~/^            report_scan_threat$/d~scan_state_marker_failure'
+        'completed_marker_early_return~/touch "$scan_state\/completed".*rc=2;.*}/c\        touch "$scan_state/completed" || return 2~scan_state_marker_failure'
+        'daemon_marker_early_return~/touch "$scan_state\/completed".*threat_known/c\            touch "$scan_state/completed" || return 2~scan_completion_marker_failure'
+        'remove_marker_early_return~/rm -f -- "$scan_state\/completed".*threat_known/c\            rm -f -- "$scan_state/completed" || return 2~scan_completion_marker_failure'
+        'empty_clean_before_marker~/touch "$scan_state\/completed".*return 2;/i\            log_info "clean — nothing changed"~scan_completion_marker_failure'
+        'pending_create_ignored~/cannot create batch pending marker/c\        : > "$odd_list.pending" || true~scan_pending_create_failure'
+        'pending_remove_ignored~s/|| { \[ "$rc" = 1 \] \&\& return 1; return 2; }/|| true/~scan_pending_remove_failure'
+        'pending_remove_status_flattened~s/|| { \[ "$rc" = 1 \] \&\& return 1; return 2; }/|| return 2/~scan_pending_remove_failure'
+        'pending_check_file_only~s/\[ -e "$odd_list.pending" \]/[ -f "$odd_list.pending" ]/~scan_pending_remove_failure'
+        'found_search_unconditional~s/{ \[ "$rc" -ge 124 \] \&\& grep -Eq/{ grep -Eq/~scan_forged_found_line'
+        'found_search_unconditional_vanished~s/{ \[ "$rc" -ge 124 \] \&\& grep -Eq/{ grep -Eq/~scan_vanished_found'
+        'found_search_at_stop_removed~s/{ \[ "$rc" -ge 124 \] \&\& grep -Eq .* "$copy"; }/false/~scan_threat_before_stop'
+        'walk_clean_guard_removed~s/if \[ "$walk_failed" = 0 \] \&\& \[ "$unscannable" = 0 \]; then log_info/if [ "$unscannable" = 0 ]; then log_info/~scan_changed_vanishing_folder'
+        'empty_walk_diagnostic_removed~/incomplete scan: no scannable files remain/c\            [ "$walk_failed" = 0 ] && [ "$unscannable" = 0 ] || return 2~scan_changed_walk_failure'
+        'hook_scope_shared~s/( \[ -n "${AV_ON_FOUND:-}" \] \&\& eval "$AV_ON_FOUND" )/[ -n "${AV_ON_FOUND:-}" ] \&\& eval "$AV_ON_FOUND"/~scan_hook_status_isolation'
+        'stamp_closing_error_removed~/log_err "scan failed (rc=/d~scan_stamp_failure_closing'
+        'pending_missing~ /: > "$odd_list.pending" ||/d~scan_batch_marker_failure'
+        'pending_cleared_on_failure~s/if \[ "$failed" = 0 \]; then/if true; then/~scan_batch_marker_failure'
+        'unscannable_cap_removed~/\[ "$unscannable_count" -le 20 \] || return 1/d~scan_unscannable_limit'
+        'unscannable_status_flattened~s/^            0|1)/            *)/~scan_unscannable_closing'
+        'summary_errors_ignored~s/\&\& grep -Eq \x27\^Total errors:/\&\& false -Eq \x27^Total errors:/~scan_summary_errors_hold'
+        'earlier_threat_lost~s/touch "$scan_state\/threat"/true/~scan_threat_before_stop'
+        'empty_remainder_hold_removed~/\[ "$walk_failed" = 0 \] \&\& \[ "$unscannable" = 0 \] ||/c\            :~scan_empty_remainder_hold'
+        'closing_error_removed~/log_err "scan failed (rc=/d~scan_threat_before_stop'
+    )
+    for spec in "${mutations[@]}"; do
+        IFS='~' read -r name expr rows <<< "$spec"
+        dir="$WORK/m-$name"
+        mkdir -p "$dir"
+        cp -r "$REPO/bin" "$REPO/lib" "$REPO/tests" "$dir/"
+        # Prove the row green before judging its mutation.
+        if ! out="$(TMPDIR="$dir" AV_TEST_KEEP=0 AV_REPO_UNDER_TEST="$dir" "$BASH_BIN" "$dir/tests/run.sh" "$rows" 2>&1)"; then
+            fail "$name baseline failed: $out"; continue
+        fi
+        sed -i "$expr" "$dir/bin/av-scan"
+        if ! "$BASH_BIN" -n "$dir/bin/av-scan" || cmp -s "$REPO/bin/av-scan" "$dir/bin/av-scan"; then
+            fail "$name invalid or not applied"; survived=$((survived + 1)); continue
+        fi
+        out="$(TMPDIR="$dir" AV_TEST_KEEP=0 AV_REPO_UNDER_TEST="$dir" "$BASH_BIN" "$dir/tests/run.sh" "$rows" 2>&1)"
+        case "$out" in
+            *"FAIL $rows:"*) printf 'killed       %s red: %s\n' "$name" "$rows"; killed=$((killed + 1)) ;;
+            *) fail "$name survived: $out"; survived=$((survived + 1)) ;;
+        esac
+    done
+    printf 'OC-T-0084 mutants: %d killed, %d survived\n' "$killed" "$survived"
+}
+
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do

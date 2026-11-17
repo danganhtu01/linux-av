@@ -3685,7 +3685,7 @@ guard_install_setup() {
     guard_fixture preinstall
     B="$D/bin"; CALLS="$D/calls"; tree="$D/tree"
     mkdir -p "$B" "$tree/bin" "$R/run"; : > "$CALLS"
-    for t in id stat grep sed cut cmp cp mv rm mktemp install sha256sum cat; do
+    for t in id stat grep sed cut cmp cp mv rm mktemp install sha256sum cat chmod; do
         p="$(command -v "$t")" && ln -sf "$p" "$B/$t"
     done
     stub hostname <<'STUB'
@@ -3785,7 +3785,7 @@ row_guard_install_pin_mismatch() {
     guard_root_only || return 0
     local v before msg zeros
     zeros="$(printf '%064d' 0)"
-    for v in tampered pin_zeros no_pin two_pins other_path missing linked; do
+    for v in tampered pin_zeros no_pin two_pins other_path missing linked no_file; do
         guard_install_setup
         msg='SHA-256 differs from the pin'
         case $v in
@@ -3796,10 +3796,48 @@ row_guard_install_pin_mismatch() {
             other_path) sed -i 's|^\(# sha256 [0-9a-f]\{64\}\) bin/av-guard$|\1 lib/common.sh|' "$D/tree/root-install-guard.sh"; msg='no pin line for bin/av-guard' ;;
             missing) rm -f "$D/tree/bin/av-guard"; msg='bin/av-guard missing beside the script' ;;
             linked) mv "$D/tree/bin/av-guard" "$D/elsewhere"; ln -s "$D/elsewhere" "$D/tree/bin/av-guard"; msg='bin/av-guard missing beside the script' ;;
+            no_file) msg='cannot read my own header' ;;
         esac
-        before="$(guard_snapshot)"; guard_install_run
+        before="$(guard_snapshot)"
+        if [ "$v" = no_file ]; then
+            # the script text given to sh as a string: $0 is then a name that is no file, so there is no header to read
+            OUT="$(cd "$D/tree" && "$ENV_BIN" -i PATH="$B" HOME=/root CALLS="$CALLS" /bin/sh -c "$(cat "$D/tree/root-install-guard.sh")" nosuchscript 2>&1)"; RC=$?
+        else
+            guard_install_run
+        fi
         guard_install_refused "$before" "$msg" "pin: $v"
     done
+}
+# A backup that cannot be made stops the installer before it writes anything (the backups come first).
+row_guard_install_backup_failure() {
+    guard_root_only || return 0
+    local before
+    guard_install_setup; stub cp <<'STUB'
+exit 1
+STUB
+    before="$(guard_snapshot)"; guard_install_run
+    guard_install_stopped "$before" 'could not keep' 'a backup that cannot be made'
+}
+# A .new file left by an earlier run is replaced and a link in its place is not followed, even by an install that would not
+# replace an existing target itself (the stub refuses one, as a plain copy would).
+row_guard_install_stale_new() {
+    guard_root_only || return 0
+    local u l
+    guard_install_setup; u="$R/etc/systemd/system"; l="$R/usr/local/lib/linux-av"
+    stub install <<'STUB'
+shift 5
+[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1
+cp "$2" "$3" && chmod "$1" "$3"
+STUB
+    printf 'x\n' > "$D/elsewhere"
+    printf 'stale\n' > "$u/linux-av-scan.service.d/05-guard.conf.new"
+    ln -s "$D/elsewhere" "$l/bin/av-guard.new"
+    guard_install_run
+    assert_eq "$RC" 0 'installer exit status with stale .new files'
+    assert_eq "$(cat "$D/elsewhere")" x 'a .new link was not followed'
+    assert_nofile "$u/linux-av-scan.service.d/05-guard.conf.new" 'the stale .new file is gone'
+    assert_nofile "$l/bin/av-guard.new" 'the stale .new link is gone'
+    assert_same "$l/bin/av-guard" "$D/tree/bin/av-guard" 'the guard was installed'
 }
 row_guard_install_writes() {
     guard_root_only || return 0
@@ -3947,8 +3985,8 @@ row_guard_install_copy_differs() {
     sed -e "s|^base=\$|base='/scratch'|" -e "s|^PATH=.*|PATH='/scratch/bin'|" -e "s|^# sha256 [0-9a-f]\{64\} bin/av-guard\$|# sha256 $(printf '%064d' 0) bin/av-guard|" \
         "$REPO/root-install-guard.sh" > "$copy"
     assert_eq "$(diff "$REPO/root-install-guard.sh" "$copy" | grep -c '^<')" 3 'the test copy of the installer differs in three lines'
-    assert_eq "$(diff "$REPO/root-install-guard.sh" "$copy" | sed -n 's/^< \(base=\|PATH=\|# sha256\).*/\1/p' | tr '\n' ' ')" 'base= PATH= # sha256 ' \
-        'and they are base=, PATH= and the pin'
+    assert_eq "$(diff "$REPO/root-install-guard.sh" "$copy" | sed -n 's/^< \(base=\|PATH=\|# sha256\).*/\1/p' | tr '\n' ' ')" '# sha256 PATH= base= ' \
+        'and they are the pin line, PATH= and base= (in file order)'
 }
 row_guard_documented() {
     local f

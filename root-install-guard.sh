@@ -9,7 +9,8 @@
 # The runner checks this file's SHA-256 and the listed file's before it runs anything, and this script checks the same line itself
 # before it reads or writes anything else (defence in depth). The line below is the only one that may start with the hash word:
 # sha256 7a1e65b9164e17bca7c6242f427742bd8e8e47b0f5d9a64771aa1ad64872ead8 bin/av-guard
-# What it writes, all root:root (a second run writes the same bytes and keeps the first backups):
+# What it writes, all root:root (both backups are made before anything else is written; a second run writes the same bytes and
+# keeps the first backups):
 #   /usr/local/lib/linux-av/bin/av-guard                                   0755
 #   /etc/systemd/system/linux-av-scan.service.d/05-guard.conf              0644  ExecStartPre=/usr/local/lib/linux-av/bin/av-guard
 #   /etc/systemd/system/linux-av-rootkit.service.d/05-guard.conf           0644  the same
@@ -80,24 +81,26 @@ printf '%s\n' '# OC-T-0037: the unit starts only if av-guard finds every file it
     '[Service]' "ExecStartPre=$lib/bin/av-guard" > "$t/05-guard.conf"
 # put SRC MODE DEST: write DEST.new beside DEST, then rename over it (no link followed: the folders are root-only)
 put() {
-    [ ! -L "$3" ] || die "$3 is a link"
     if [ -f "$3" ] && cmp -s "$1" "$3" && [ "$(stat -c '%u %g %a' "$3")" = "0 0 ${2#0}" ]; then echo "unchanged: $3"; return 0; fi
     rm -f -- "$3.new"
     install -o root -g root -m "$2" "$1" "$3.new"
     mv -f -- "$3.new" "$3"
     echo "written: $3 ($(sha256sum < "$3" | cut -c1-64))"
 }
+# keep FILE: FILE's first copy, once (the units were checked above to be regular files, not links)
 keep() {
     [ -e "$1.before-OC-T-0037" ] && return 0
-    [ -f "$1" ] && [ ! -L "$1" ] || return 0
     cp -p -- "$1" "$1.before-OC-T-0037" || die "could not keep $1.before-OC-T-0037"
     echo "kept: $1.before-OC-T-0037"
 }
+# Both backups come first, so a backup that cannot be made leaves nothing written.
+for u in linux-av-scan.service linux-av-rootkit.service; do
+    cmp -s "$t/$u" "$units/$u" || keep "$units/$u"
+done
 put "$here/bin/av-guard" 0755 "$dst/bin/av-guard"
 put "$t/05-guard.conf" 0644 "$units/linux-av-scan.service.d/05-guard.conf"
 put "$t/05-guard.conf" 0644 "$units/linux-av-rootkit.service.d/05-guard.conf"
 for u in linux-av-scan.service linux-av-rootkit.service; do
-    cmp -s "$t/$u" "$units/$u" || keep "$units/$u"
     put "$t/$u" 0644 "$units/$u"
 done
 systemctl daemon-reload

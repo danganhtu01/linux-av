@@ -31,7 +31,7 @@ MUTANTS=(
 'odd_batch_arg_max_ignored~bin/av-scan~s/then limit=\$((arg_max \/ 2)); fi/then :; fi/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
 'odd_batch_arg_max_whole~bin/av-scan~s/then limit=\$((arg_max \/ 2)); fi/then limit=$arg_max; fi/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
 'odd_batch_arg_max_uncapped~bin/av-scan~s/ \&\& \[ \$((arg_max \/ 2)) -lt "$limit" \]; then/; then/~scan_changed_odd_batches_arg_max'
-'odd_batch_arg_max_unchecked~bin/av-scan~s/\[\[ \$arg_max =~ \^\[1-9\]\[0-9\]\*\$ \]\] \&\& //~scan_changed_odd_batches_arg_max'
+'odd_batch_arg_max_unchecked~bin/av-scan~s/\[\[ \$arg_max =. \^\[1-9\]\[0-9\]\*\$ \]\] \&\& //~scan_changed_odd_batches_arg_max'
 'odd_batch_arg_max_stderr~bin/av-scan~s/getconf ARG_MAX 2>\/dev\/null/getconf ARG_MAX/~scan_changed_odd_batches_arg_max'
 'odd_batch_arg_max_question~bin/av-scan~s/getconf ARG_MAX/getconf PAGESIZE/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
 'odd_batch_fallback_halved~bin/av-scan~s/local limit=1048576 arg_max/local limit=524288 arg_max/~scan_changed_odd_batches scan_changed_odd_batches_arg_max'

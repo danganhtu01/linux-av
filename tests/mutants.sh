@@ -18,6 +18,30 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0080 (FAULT-0017): odd names batch by bytes. odd_batch_d158e91_limits restores that commit's limits (a name count of 128
+# and 8192, now in bytes); odd_batch_count_limit restores the name count alone; each of the others moves a batch by a name or more.
+'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/:/~scan_changed_odd_batches'
+'odd_batch_d158e91_limits~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 8192 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_count_limit~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 1048576 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_overhead_dropped~bin/av-scan~s/REPLY=$((length + 9))/REPLY=$length/~scan_changed_odd_batches'
+'odd_batch_character_count~bin/av-scan~s/local LC_ALL=C length/local length/~scan_changed_odd_batches'
+'odd_batch_helper_unserialized~bin/av-scan~s/declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes/declare -f run_clamscan_batches run_clamscan_one/~scan_changed_odd_batches'
+# OC-T-0081 (FAULT-0019): the worker keeps a copy and a status for each run, and the whitelist judges each run alone. Each of the
+# mutants below removes one guard of that. batch_hold_status_2 restores d158e91's early return, which no batch of status 2 passed.
+'batch_hold_status_2~bin/av-scan~s/ \&\& \[ "$rc" != 2 \]; then/; then/~scan_changed_batch_vanished scan_changed_batch_worker_line'
+'batch_flag_dropped~bin/av-scan~s/^        batched=1$/        batched=0/~scan_changed_batch_vanished scan_changed_batch_worker_line'
+'batch_copy_whole_stream~bin/av-scan~s/copies+=("$copy_dir\/run.$((n + 1))")/copies+=("$copy")/~scan_changed_batch_vanished scan_changed_batch_worker_line'
+'batch_runs_unwritten~bin/av-scan~/printf .%s\\n. "${runs\[\*\]}" > "$runs_dir\/runs"/d~scan_changed_batch_vanished scan_changed_batch_worker_line'
+'batch_runner_unserialized~bin/av-scan~s/declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes/declare -f run_clamscan_batches scan_argv_bytes/~scan_changed_batch_vanished scan_changed_odd_batches'
+'batch_status_from_tee~bin/av-scan~s/batch_rc=${st\[0\]}/batch_rc=${st[1]}/~scan_changed_batch_vanished scan_changed_batch_worker_line scan_changed_batch_errors'
+'batch_statuses_unchecked~bin/av-scan~/\[\[ ${run_rcs\[\*\]:-} =. $runs_re \]\] || bad=1/d~scan_changed_batch_errors'
+'batch_status_routing~bin/av-scan~s/if \[ "${run_rcs\[n\]}" = 2 \]; then/if [ "$total_seen" = 1 ]; then/~scan_changed_batch_errors'
+'batch_tee_failure_forgiven~bin/av-scan~s/\[ "${st\[1\]}" = 0 \] || code=x/:/~scan_changed_batch_errors'
+'batch_stderr_dropped~bin/av-scan~s/"$@" 2>\&1 | (/"$@" | (/~scan_changed_batch_errors'
+# The seat's L4: the per-run tee sits in the process group the time limit stops, and without the ignore a FOUND line still in its pipe dies with it.
+'batch_tee_signals_unguarded~bin/av-scan~s/( trap .. TERM HUP INT; exec tee/( exec tee/~scan_changed_stop_keeps_found'
+'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors'
+'batch_failure_log_dropped~bin/av-scan~/^    if \[ -n "${odd_list:-}" \] \&\& \[ -e "$odd_list.pending" \]; then$/,/^    fi$/d~scan_pending_remove_failure scan_changed_batch_errors'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
 'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
 'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'
@@ -36,7 +60,6 @@ MUTANTS=(
 'walk_race_flag~bin/av-scan~s/ -ignore_readdir_race//~scan_changed_vanishing_folder'
 'walk_abort_partial~bin/av-scan~s/^                walk_failed=1$/                return 2/~scan_changed_vanishing_folder'
 'walk_partial_stamp~bin/av-scan~s/^                walk_failed=1$/                walk_failed=0/~scan_changed_vanishing_folder'
-'odd_batch_unbounded~bin/av-scan~s/"$chars" -lt 8192/"$chars" -lt 999999/;s/"${#targets\[@\]}" -lt 128/"${#targets[@]}" -lt 999999/~scan_changed_odd_batches'
 'odd_batch_error_lost~bin/av-scan~s/elif \[ "$rc" = 0 \] \&\& \[ "$batch_rc" -gt 1 \]; then rc=$batch_rc; fi/else rc=$batch_rc; fi/~scan_changed_odd_error'
 'scratch_component~bin/av-scan~s/(\^|\/)${REPLY}(\/|\$)/${REPLY}/~scan_scratch_components'
 'scan_stamp_exit~bin/av-scan~s/\[ "$rc" -le 1 \]/true/g~scan_changed_stamps'
@@ -62,7 +85,7 @@ MUTANTS=(
 'vanished_kept_paths~bin/av-scan~/\[ "$matched" = 1 \] || { bad=1; continue; }/d~scan_vanished_outside_paths'
 'scan_function_scope~bin/av-scan~/^run_scan() {/,/^}$/ { s/^run_scan() {/run_scan() (/; s/^}$/)/; }~scan_scheduled_no_engine scan_scheduled_hook_exit'
 'vanished_residual~MASTER.md~/^Residual: clamscan prints file names/d~scan_vanished_residual_documented'
-'vanished_count~bin/av-scan~s/\[ "$summary" = "$count" \]/true/~scan_vanished_mismatch'
+'vanished_count~bin/av-scan~s/\[ "$summary" = "$run_count" \]/true/~scan_vanished_mismatch scan_changed_batch_errors'
 'vanished_absent~bin/av-scan~s/\[ ! -L "$p" \] \&\& \[ ! -e "$p" \] || exit 1/:/~scan_vanished_reappeared'
 'vanished_daemon~bin/av-scan~s/if \[ "$engine" = clamscan \]; then/if true; then/g~scan_vanished_clamdscan'
 'vanished_cleanup~bin/av-scan~/trap .*rm -rf --.*copy_dir.* EXIT/d~scan_vanished_only'

@@ -435,15 +435,40 @@ total count. Other files still scan, including ordinary batch-mates; the run
 returns 2 (or the scanner's stop status, 124, 137 or 143) and holds both stamps
 even if a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
 individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
-Argument batches hold at most 128 names, with an additional size bound;
-all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
+Argument batches hold about 1 MiB of argv each, so long names no longer multiply
+database loads (FAULT-0017): a name counts its bytes under `LC_ALL=C`, its NUL and
+its 8-byte pointer, and a batch ends once it reaches 1048576, the name that reaches
+it included. That is half of the 2 MiB exec limit at the default 8 MiB stack. A
+stack limit under 4 MiB lowers the limit, and the exec then fails with E2BIG
+(status 126), an error that holds both stamps.
+All scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
 An earlier batch error cannot be erased by a later clean batch. The batch merge
 reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
 and invokes `AV_ON_FOUND`, while any batch error holds both
-stamps and logs that the next run will retry (FAULT-0016). A private pending
+stamps and, unless the vanished-file rule below forgives it, logs that the next run
+will retry (FAULT-0016). A private pending
 marker is created before the worker starts and removed only if no batch returned
 above 1. It preserves this distinction independently of the merged reporting
 status.
+Each scanner run of that worker tees its output into a private copy of its own
+beside the combined stream, and the worker leaves the status of every run in one
+list (FAULT-0019). When the merged status is 2, the vanished-file rule of
+MASTER.md judges the runs one by one, so several runs, each with its own summary,
+no longer fail it. Every run's status must be 0 or 2, so a run that failed
+outright (E2BIG, SIGKILL) beside one that only lost files, a copy that could not
+be written or a missing list forgives nothing. Each copy must hold exactly one
+summary, with `Infected files: 0` and, for a run of status 2, a `Total errors`
+equal to that run's own vanished-file warnings (a run of status 0 lists none and
+prints no other line). The worker's own `ERROR: clamscan batch failed` line goes
+to the output and the log but not into a copy, so it is never read as a scanner
+error; a forgiven batch of status 2 still leaves that line behind. Forgiven or not,
+the run holds both stamps.
+`AV_SCAN_TIMEOUT` stops the worker's whole process group, and each run's tee is in
+it. The tee ignores TERM, HUP and INT, so a `FOUND` line still in the pipe at that
+moment reaches the combined stream, and the stopped run still alerts. A KILL can
+still take the tee: `timeout` sends one to the group only if the worker outlives
+its 5-minute kill grace, and then what the scanner wrote and the tee had not yet
+read, at most one 64 KiB pipe buffer, is lost.
 The reporting priority matches
 [ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
 which selects infection before errors. Temporary lists and captured output are
@@ -525,6 +550,22 @@ remove the stamp hold, remove or raise the path bound, count characters instead
 of bytes, and remove the forced error status. FAULT-0017, FAULT-0019 and
 FAULT-0021 remain unchanged, including the existing memory limits and OVH CPU
 drop-in dependency.
+OC-T-0080 batches the odd names by bytes (FAULT-0017) and re-checks FAULT-0018:
+`scan_path_scannable` refuses every path of 4096 bytes or more before either
+route, so no argv string comes near MAX_ARG_STRLEN (131072), and a batch holds
+about 1 MiB. The unscannable-path regression, with its 131072-byte name, and its
+mutants still pin that bound. The new batch regression fails at `d158e91`, where
+names of 4000 bytes ran 3 to a batch; mutants restore that commit's limits, drop
+the NUL and pointer, count characters and leave the helper out of the worker.
+OC-T-0081 lets the vanished-file rule judge a worker's runs one by one (FAULT-0019).
+The two forgiveness regressions fail at the commit before it: there a batch of
+status 2 returned at the pending marker before the rule ran, and the runs'
+summaries would have failed it. The regression for errors that must stay unforgiven
+passes there too, since nothing was forgiven; only mutants pin it, each forgiving
+one more case: any status accepted, a failed tee, a run's stderr dropped, a clean
+run left unchecked, a run's status ignored when its total is read, and a total no
+longer compared with its own run's warnings. Other mutants restore the early
+return, parse the combined stream, drop the status list and take the status from tee.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

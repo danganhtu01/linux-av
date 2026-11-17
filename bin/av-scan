@@ -150,7 +150,7 @@ report_scan_threat() {
 
 # clamscan 1.5.4 reads file-list lines with fgets into a 1024-byte buffer.
 # Keep long names and LF/CR names byte-for-byte in argv instead. Scope the byte
-# locale here so the existing argument batching policy stays unchanged.
+# locale here, as scan_argv_bytes does, so the rest of the run keeps its locale.
 scan_file_list_safe() {
     local LC_ALL=C
     [[ $1 != *$'\n'* && $1 != *$'\r'* && ${#1} -lt 1022 ]]
@@ -168,42 +168,76 @@ scan_path_scannable() {
     return 1
 }
 
+# What one name adds to a scanner's argv, in REPLY: its bytes, the NUL that ends
+# it and the 8-byte pointer to it. The kernel counts the strings and their
+# pointers against an exec limit of a quarter of the stack limit (2 MiB at the
+# default 8 MiB). The byte locale is scoped here, so the scanner keeps its own.
+scan_argv_bytes() {
+    local LC_ALL=C length
+    length=${#1}
+    REPLY=$((length + 9))
+}
+
+# One scanner run for run_clamscan_batches, which shares its variables through
+# bash local scope. The run's output goes on to the caller's stream and, through
+# tee, into a copy of its own under runs_dir: the caller judges each run by its
+# own copy, so the worker's lines below never reach what it parses. The run's
+# status joins the runs list; a tee that failed leaves x, which nothing forgives.
+# The time limit stops the worker's whole process group, and that group holds this
+# tee. It ignores TERM, HUP and INT (the ignore outlives the exec), so a FOUND line
+# still in the pipe when the signal comes is handed on once clamscan has gone and
+# closed it. Only a KILL can take the tee: timeout sends one to the group only if
+# the worker outlives the kill grace, and then the bytes clamscan wrote and the tee
+# had not read, at most one pipe buffer, are lost.
+run_clamscan_one() {
+    local -a st
+    local code
+    "$@" 2>&1 | ( trap '' TERM HUP INT; exec tee "$runs_dir/run.$((${#runs[@]} + 1))" )
+    st=("${PIPESTATUS[@]}")
+    batch_rc=${st[0]}
+    code=$batch_rc
+    [ "${st[1]}" = 0 ] || code=x
+    runs+=("$code")
+    if [ "$batch_rc" -gt 1 ]; then
+        failed=1
+        printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >&2
+        printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >> "$AV_LOG_FILE"
+    fi
+}
+
 # Called inside one timeout by run_clamscan_checked. The ordinary list costs
-# one DB load; long and LF/CR names are quoted argv entries in bounded batches.
+# one DB load; long and LF/CR names are quoted argv entries, about 1 MiB of argv
+# a batch, so a long name no longer multiplies the database loads (FAULT-0017).
+# Every run leaves its status in runs_dir/runs and its output in runs_dir/run.N.
 # No pathname passes through shell source text.
 run_clamscan_batches() {
-    local engine="$1" list="$2" odd_list="$3" file chars rc=0 batch_rc failed=0
-    shift 3
-    local -a targets=()
+    local engine="$1" list="$2" odd_list="$3" runs_dir="$4" file bytes rc=0 batch_rc failed=0
+    shift 4
+    local -a targets=() runs=()
     if [ -s "$list" ]; then
-        "$engine" "$@" "--file-list=$list"; rc=$?
-        if [ "$rc" -gt 1 ]; then
-            failed=1
-            printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >&2
-            printf 'ERROR: clamscan batch failed (rc=%s)\n' "$rc" >> "$AV_LOG_FILE"
-        fi
+        run_clamscan_one "$engine" "$@" "--file-list=$list"; rc=$batch_rc
     fi
     while :; do
-        targets=(); chars=0
+        targets=(); bytes=0
         while IFS= read -r -d '' file; do
             targets+=("$file")
-            chars=$((chars + ${#file} + 1))
-            # At most 8192 characters plus one pathname, or 128 names, leaves
-            # room for multibyte names, environment, options and argv pointers.
-            [ "$chars" -lt 8192 ] && [ "${#targets[@]}" -lt 128 ] || break
+            scan_argv_bytes "$file"; bytes=$((bytes + REPLY))
+            # Up to 1 MiB of argv plus the one pathname (under 4096 bytes) that
+            # reaches it leaves the other half of the 2 MiB exec limit for the
+            # options and the environment. A stack limit under 4 MiB lowers that
+            # limit, and the exec then fails with E2BIG (126), which holds the stamps.
+            [ "$bytes" -lt 1048576 ] || break
         done
         [ "${#targets[@]}" -gt 0 ] || break
-        "$engine" "$@" "${targets[@]}"; batch_rc=$?
-        if [ "$batch_rc" -gt 1 ]; then
-            failed=1
-            printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >&2
-            printf 'ERROR: clamscan batch failed (rc=%s)\n' "$batch_rc" >> "$AV_LOG_FILE"
-        fi
+        run_clamscan_one "$engine" "$@" "${targets[@]}"
         # Infection takes reporting priority; the private failure marker keeps
         # completion independent of that merged status, in either batch order.
         if [ "$batch_rc" = 1 ]; then rc=1
         elif [ "$rc" = 0 ] && [ "$batch_rc" -gt 1 ]; then rc=$batch_rc; fi
     done < "$odd_list"
+    # The merged status keeps only the first error, so the caller reads every run's
+    # own status here. Without this file nothing is forgiven.
+    printf '%s\n' "${runs[*]}" > "$runs_dir/runs"
     # A batch's 1 stays 1 when the marker cannot be removed, so the caller alerts
     # on status, never on output text; the marker left in place holds the stamps.
     if [ "$failed" = 0 ]; then rm -f -- "$odd_list.pending" || { [ "$rc" = 1 ] && return 1; return 2; }; fi
@@ -214,9 +248,9 @@ run_clamscan_batches() {
 # Only the output copy, traps, pipe, and whitelist need a subshell.
 run_clamscan_checked() (
     local copy_dir copy resolved line p root matched kind probed rc=0
-    local escaped char i count=0 summary="" bad=0 headers=0 total_seen=0
+    local escaped char i n count=0 run_count=0 summary="" bad=0 headers=0 total_seen=0 batched=0
     local -A detail_seen=()
-    local warning_re="^WARNING: Can't open file (.+): No such file or directory$" summary_re="^Total errors: ([0-9]+)$"
+    local warning_re="^WARNING: Can't open file (.+): No such file or directory$" summary_re="^Total errors: ([0-9]+)$" runs_re='^[02]( [02])*$'
     local detail_re='^(Known viruses: [0-9]+|Engine version: [0-9][0-9.]*|Scanned directories: [0-9]+|Scanned files: [0-9]+|Infected files: 0|Data scanned: [0-9.]+ [KMGT]?i?B|Data read: [0-9.]+ [KMGT]?i?B \(ratio [0-9.]+:[0-9.]+\)|Time: [0-9.]+ sec \([0-9]+ m [0-9]+ s\)|Start Date: [0-9:]+ [0-9:]+|End Date: +[0-9:]+ [0-9:]+)$'
     copy_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/av-scan.XXXXXX")" || { log_err "cannot create scan output copy"; return 2; }
     trap 'rm -rf -- "$copy_dir"' EXIT
@@ -241,8 +275,9 @@ run_clamscan_checked() (
         # Serialize only this trusted function, never any pathname, into code.
         # A single timeout bounds every scanner invocation in the worker.
         : > "$odd_list.pending" || { log_err "cannot create batch pending marker"; return 2; }
-        command=("$BASH" -c "$(declare -f run_clamscan_batches)"$'\nrun_clamscan_batches "$@"' \
-            av-scan "$engine" "$list" "$odd_list" "${args[@]}")
+        command=("$BASH" -c "$(declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes)"$'\nrun_clamscan_batches "$@"' \
+            av-scan "$engine" "$list" "$odd_list" "$copy_dir" "${args[@]}")
+        batched=1
     fi
     "${runner[@]}" "${command[@]}" 2>&1 | tee "$copy"
     local -a statuses=("${PIPESTATUS[@]}")
@@ -269,7 +304,9 @@ run_clamscan_checked() (
         [ "$rc" = 1 ] || rc=2
         return "$rc"
     fi
-    if [ -n "${odd_list:-}" ] && [ -e "$odd_list.pending" ]; then
+    # A failed batch holds the stamps. Status 2 is judged below instead, by the
+    # whitelist over each run's own copy; whatever it does not forgive returns after it.
+    if [ -n "${odd_list:-}" ] && [ -e "$odd_list.pending" ] && [ "$rc" != 2 ]; then
         log_err "clamscan batch failed; stamps unchanged so the next run retries"
         return "$rc"
     fi
@@ -277,48 +314,72 @@ run_clamscan_checked() (
         touch "$scan_state/completed" || { log_err "cannot write completed marker; stamps unchanged"; rc=2; marker_failed=1; }
     fi
     if [ "$rc" = 2 ] && [ "${statuses[1]}" = 0 ] && [ "$marker_failed" = 0 ]; then
-        while line=; IFS= read -r line || [ -n "$line" ]; do
-            if [[ $line =~ $warning_re ]]; then
-                [ "$headers" = 0 ] || bad=1
-                p="${BASH_REMATCH[1]}"
-                [[ $p = /* ]] || { bad=1; continue; }
-                matched=0
-                for root in "${paths[@]}"; do
-                    if [[ $root = / || $p = "$root/"* ]]; then
-                        matched=1; break
-                    fi
-                done
-                # Do not probe a forged path outside the kept scan paths.
-                [ "$matched" = 1 ] || { bad=1; continue; }
-                # Never probe below a mount the scan skipped (FUSE, network, automount):
-                # clamscan did not walk there, so such a line is forged.
-                for root in "${skipped_points[@]}"; do
-                    if [[ $p = "$root" || $p = "$root/"* ]]; then matched=0; break; fi
-                done
-                [ "$matched" = 1 ] || { bad=1; continue; }
-                case "$p/" in */../*|*/./*|*//*) bad=1; continue ;; esac
-                count=$((count + 1))
-                printf '%s\0' "$p" >> "$copy_dir/vanished" || bad=1
-            elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then
-                headers=$((headers + 1))
-                [ "$headers" = 1 ] || bad=1
-            elif [[ $line =~ $summary_re ]]; then
-                [ "$headers" = 1 ] && [ "$total_seen" = 0 ] || bad=1
-                total_seen=1
-                summary="${BASH_REMATCH[1]}"
-                while [[ $summary = 0* ]]; do summary=${summary#0}; done
-            elif [ -z "$line" ]; then
-                :
-            elif [[ $line =~ $detail_re ]]; then
-                [ "$headers" = 1 ] || bad=1
-                kind="${line%%:*}"
-                [ "${detail_seen[$kind]:-0}" = 0 ] || bad=1
-                detail_seen[$kind]=1
+        # A plain run is one copy and the status 2. After batches there is one copy
+        # per run, and the worker has left each run's own status: only 0 and 2 are
+        # listed, so a run that failed outright (E2BIG, SIGKILL), a tee that failed
+        # or a worker that died leaves nothing to forgive. The merged status keeps only
+        # the first error and cannot say that.
+        local -a copies=("$copy") run_rcs=(2)
+        if [ "$batched" = 1 ]; then
+            run_rcs=(); copies=()
+            [ ! -r "$copy_dir/runs" ] || read -r -a run_rcs < "$copy_dir/runs"
+            [[ ${run_rcs[*]:-} =~ $runs_re ]] || bad=1
+            for ((n=0; n<${#run_rcs[@]}; n++)); do copies+=("$copy_dir/run.$((n + 1))"); done
+        fi
+        for ((n=0; n<${#copies[@]}; n++)); do
+            headers=0; total_seen=0; summary=""; run_count=0; detail_seen=()
+            while line=; IFS= read -r line || [ -n "$line" ]; do
+                if [[ $line =~ $warning_re ]]; then
+                    [ "$headers" = 0 ] || bad=1
+                    p="${BASH_REMATCH[1]}"
+                    [[ $p = /* ]] || { bad=1; continue; }
+                    matched=0
+                    for root in "${paths[@]}"; do
+                        if [[ $root = / || $p = "$root/"* ]]; then
+                            matched=1; break
+                        fi
+                    done
+                    # Do not probe a forged path outside the kept scan paths.
+                    [ "$matched" = 1 ] || { bad=1; continue; }
+                    # Never probe below a mount the scan skipped (FUSE, network, automount):
+                    # clamscan did not walk there, so such a line is forged.
+                    for root in "${skipped_points[@]}"; do
+                        if [[ $p = "$root" || $p = "$root/"* ]]; then matched=0; break; fi
+                    done
+                    [ "$matched" = 1 ] || { bad=1; continue; }
+                    case "$p/" in */../*|*/./*|*//*) bad=1; continue ;; esac
+                    count=$((count + 1)); run_count=$((run_count + 1))
+                    printf '%s\0' "$p" >> "$copy_dir/vanished" || bad=1
+                elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then
+                    headers=$((headers + 1))
+                    [ "$headers" = 1 ] || bad=1
+                elif [[ $line =~ $summary_re ]]; then
+                    [ "$headers" = 1 ] && [ "$total_seen" = 0 ] || bad=1
+                    total_seen=1
+                    summary="${BASH_REMATCH[1]}"
+                    while [[ $summary = 0* ]]; do summary=${summary#0}; done
+                elif [ -z "$line" ]; then
+                    :
+                elif [[ $line =~ $detail_re ]]; then
+                    [ "$headers" = 1 ] || bad=1
+                    kind="${line%%:*}"
+                    [ "${detail_seen[$kind]:-0}" = 0 ] || bad=1
+                    detail_seen[$kind]=1
+                else
+                    # Reject every unknown line, including split filename fragments.
+                    bad=1
+                fi
+            done < "${copies[n]}"
+            # Each copy holds one summary with its Infected line, and its total is the
+            # one its run's status promises: a run that returned 2 owes a positive total
+            # equal to its own vanished warnings, a run that returned 0 lists none.
+            [ "$headers" = 1 ] && [ "${detail_seen[Infected files]:-0}" = 1 ] || bad=1
+            if [ "${run_rcs[n]}" = 2 ]; then
+                [ "$total_seen" = 1 ] && [ -n "$summary" ] && [ "$summary" = "$run_count" ] || bad=1
             else
-                # Reject every unknown line, including split filename fragments.
-                bad=1
+                [ "$total_seen" = 0 ] && [ "$run_count" = 0 ] || bad=1
             fi
-        done < "$copy"
+        done
         # Probe every listed path under a kill limit, rejecting symlinks and
         # inaccessible existing parent directories before checking absence.
         if [ "$bad" = 0 ] && [ "$count" -gt 0 ]; then
@@ -337,10 +398,13 @@ run_clamscan_checked() (
                 printf "%s" "$n"' < "$copy_dir/vanished")" || bad=1
             [ "$probed" = "$count" ] || bad=1
         fi
-        if [ "$bad" = 0 ] && [ "$headers" = 1 ] && [ "$total_seen" = 1 ] && [ "${detail_seen[Infected files]:-0}" = 1 ] && [ -n "$summary" ] && [ "$count" -gt 0 ] && [ "$summary" = "$count" ]; then
+        if [ "$count" -gt 0 ] && [ "$bad" = 0 ]; then
             log_warn "scan finished; $count file(s) vanished while it ran (not scanned), no other errors"
             return 0
         fi
+    fi
+    if [ -n "${odd_list:-}" ] && [ -e "$odd_list.pending" ]; then
+        log_err "clamscan batch failed; stamps unchanged so the next run retries"
     fi
     return "$rc"
 )

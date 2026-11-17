@@ -238,15 +238,22 @@ remain included unless reached through a skipped mount. An empty setting
 disables this feature. `AV_SCAN_TIMEOUT` defaults to `12h`; `timeout` stops a longer
 scan, with a 5-minute kill grace, and logs that it did not finish (exit 124).
 A clamscan exit 2 becomes a warning and exits 0 only when every stdout and stderr line
-matches the vanished-file or scan-summary whitelist. Exactly one summary header follows
-all vanished warnings, with exactly one `Infected files: 0` line and one positive
-`Total errors` count matching the paths still absent under the kept scan paths.
-No summary line kind may appear twice. The private output copy uses its physical
+of each clamscan run matches the vanished-file or scan-summary whitelist. A full scan or
+a changed scan without odd names is one run; a changed scan with odd names runs in
+batches of about 1 MiB of arguments (OC-T-0080), and each batch's output is kept and
+judged on its own, against its own exit status recorded by the worker (OC-T-0081).
+Every run's status must be 0 or 2, and a failed copy, a run that failed outright or a
+missing status list forgives nothing. In each run exactly one summary header follows
+its vanished warnings, with exactly one `Infected files: 0` line and, for status 2,
+one positive `Total errors` count matching that run's paths still absent under the
+kept scan paths; a run of status 0 lists none. No summary line kind may appear twice
+in one run. The worker's own `ERROR: clamscan batch failed` line is logged, kept out
+of every run's copy, and stays in the log even when the batch is forgiven. The private output copy uses its physical
 directory path for both the copy and scanner exclusions, including with a symlinked
 `TMPDIR`. The clamscan output check runs in a subshell; missing-engine errors
 and an `exit` in `AV_ON_FOUND` still stop the foreground scheduled runner. Any unknown
 line or nonzero infected count keeps exit 2; other scanner errors remain failures.
-Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file.
+Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file. Since OC-T-0081 the same residual also reaches changed scans with odd names, whose batches until then always failed; os-config accepted it for full scans under C-39 (OC-T-0047, 2026-11-07), and the chief accepted its extension to changed scans on 2026-11-17 (os-config OC-T-0081). A forgiven run never advances a stamp, so the offset must be won again on every run.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.

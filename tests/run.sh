@@ -2262,21 +2262,189 @@ STUB
     assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'failed walk closes with error'
 
 }
+# OC-T-0080 (FAULT-0017): odd names batch by bytes. A name costs its bytes (counted under LC_ALL=C), its NUL and an
+# 8-byte pointer, and a run takes names until 1 MiB (1048576) is reached, the name that reaches it included.
+#   4000-byte names cost 4009: 262 fill a run (261 reach 1046349). d158e91's limit of 8192 characters made it 3 names.
+#   3955-byte names of 1980 characters cost 3964: 265 fill a run (264 reach 1046496). Counted as characters, 528 would.
+#   260 short names fit one run, where d158e91's limit of 128 names made three.
+# The names come through a find stub, so no file system holds them; the scanner stub counts the names of each run.
 row_scan_changed_odd_batches() {
+    changed_fixture
+    local LC_ALL=C pad name first second shape count want edge i
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0
+for arg in "$@"; do case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "${SCAN_ARGS%/*}/sizes"
+STUB
+    SCAN_ENV=(LC_ALL=C.utf8)
+    for shape in ascii utf8 short; do
+        changed_seed
+        : > "$D/walk"; : > "$D/sizes"
+        count=540; edge=0
+        case $shape in
+            ascii) printf -v pad '%3995s' ''; pad=${pad// /x}; want='262 262 16'; edge=262 ;;
+            utf8) printf -v pad '%1975s' ''; pad=${pad// /$'\xc3\xa9'}; want='265 265 10'; edge=265 ;;
+            short) pad=''; want=260; count=260; edge=130 ;;
+        esac
+        # The first name, the first of the second run, and the last: each reaches a scanner once.
+        for ((i=0; i<count; i++)); do
+            if [ "$shape" = short ]; then name="$D/tree/odd-$i"$'\n'; else printf -v name '/%04d%s' "$i" "$pad"; fi
+            [ "$i" != 0 ] || first=$name
+            [ "$i" != "$edge" ] || second=$name
+            printf '%s\0' "$name" >> "$D/walk"
+        done
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$shape: every batch completes"
+        assert_eq "$(tr '\n' ' ' < "$D/sizes")" "$want " "$shape: names in each run"
+        assert_scan_arg "$first"
+        assert_scan_arg "$second"
+        assert_scan_arg "$name"
+    done
+}
+# OC-T-0081 (FAULT-0019): a changed scan with odd names runs the scanner more than once, and each run has an output of
+# its own and a status of its own. batch_run K STATUS ERRORS [GONE...] writes run K's output as clamscan 1.5.4 prints
+# it, a warning for each file named and then the summary, with a Total errors line when ERRORS is not 0, and the
+# status the scanner stub returns for the run. The stub counts its runs in $D/run, answers run K with $D/out.K, with
+# $D/err.K on stderr if that exists, and with the status in $D/status.K.
+batch_run() {
+    local k="$1" status="$2" errors="$3" gone
+    shift 3
+    : > "$D/out.$k"
+    for gone; do printf "WARNING: Can't open file %s: No such file or directory\n" "$gone" >> "$D/out.$k"; done
+    printf '\n----------- SCAN SUMMARY -----------\nKnown viruses: 3628245\nEngine version: 1.5.4\nScanned directories: 1\nScanned files: 3\nInfected files: 0\n' >> "$D/out.$k"
+    [ "$errors" = 0 ] || printf 'Total errors: %s\n' "$errors" >> "$D/out.$k"
+    printf 'Data scanned: 0.00 MiB\nData read: 0.00 MiB (ratio 0.00:1)\nTime: 0.100 sec (0 m 0 s)\nStart Date: 2026:11:17 19:00:00\nEnd Date:   2026:11:17 19:00:00\n' >> "$D/out.$k"
+    printf '%s\n' "$status" > "$D/status.$k"
+}
+batch_fixture() {
     changed_fixture; changed_seed
-    local i=0 name
-    while [ "$i" -lt 260 ]; do
-        touch "$D/tree/odd-$i"$'\n'
-        i=$((i + 1))
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    stub clamscan <<'STUB'
+d=${SCAN_ARGS%/*}
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+k=1; [ ! -f "$d/run" ] || k=$(($(cat "$d/run") + 1))
+echo "$k" > "$d/run"
+[ -f "$d/out.$k" ] || exit 99
+cat "$d/out.$k"
+[ ! -f "$d/err.$k" ] || cat "$d/err.$k" >&2
+exit "$(cat "$d/status.$k")"
+STUB
+    cp -p "$L/last-good-scan.stamp" "$D/good-before"
+    cp -p "$L/last-full-scan.stamp" "$D/full-before"
+}
+batch_reset() { rm -f "$D"/run "$D"/out.* "$D"/err.* "$D"/status.*; : > "$L/av-scan.log"; }
+# The ordinary file and the LF-named one make two runs: the file-list run, then one batch. Vanished files in either
+# run, or in both, are forgiven when every run's summary matches its own warnings; the stamps stay where they were.
+# At d158e91 the worker held the stamps for any batch of status 2, and its two summaries would have failed the whitelist.
+row_scan_changed_batch_vanished() {
+    batch_fixture
+    local gone="$D/tree/gone" scenario count pad i
+    for scenario in listed odd many; do
+        batch_reset
+        case $scenario in
+            listed) batch_run 1 2 1 "$gone-a"; batch_run 2 0 0; count=1 ;;
+            odd) batch_run 1 0 0; batch_run 2 2 1 "$gone-a"; count=1 ;;
+            many)
+                # The file-list run and two batches (262 and 38 names of 4000 bytes), each with errors of its own.
+                stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+                printf '%s\0' "$D/tree/plain" > "$D/walk"
+                printf -v pad '%3995s' ''; pad=${pad// /x}
+                for ((i=0; i<300; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+                batch_run 1 2 2 "$gone-a" "$gone-b"; batch_run 2 2 1 "$gone-c"; batch_run 3 0 0; count=3 ;;
+        esac
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$scenario: vanished files in several runs are forgiven"
+        assert_has "$OUT" "scan finished; $count file(s) vanished while it ran (not scanned), no other errors" "$scenario: the vanished files are counted"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
     done
-    scan --path "$D/tree"
-    assert_eq "$RC" 0 'bounded batches complete'
-    i=0
-    while [ "$i" -lt 260 ]; do
-        assert_scan_arg "$D/tree/odd-$i"$'\n'
-        i=$((i + 1))
+}
+# The worker reports a batch that returned 2 on its own stderr and in the log. Those lines are not scanner output, so
+# they are not what the whitelist reads, and the vanished file is still forgiven; both lines still reach the reader.
+row_scan_changed_batch_worker_line() {
+    batch_fixture; batch_reset
+    batch_run 1 0 0; batch_run 2 2 1 "$D/tree/gone"
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 0 'the worker line is not a scanner error'
+    assert_has "$OUT" 'scan finished; 1 file(s) vanished while it ran (not scanned), no other errors' 'the vanished file is forgiven'
+    assert_has "$OUT" 'ERROR: clamscan batch failed (rc=2)' 'the worker line reaches the output'
+    assert_has "$(cat "$L/av-scan.log")" 'ERROR: clamscan batch failed (rc=2)' 'the worker line reaches the log'
+}
+# Each case holds a run of status 2 with a vanished file (forgiven alone) beside a second run with something else
+# wrong, and nothing is forgiven: the error stays at status 2, the log says the batch failed, the stamps stay.
+#   offset      the totals add up (2 and 2) but not run by run (a total of 1 for 2 warnings, then 1 for none)
+#   unexplained a run of status 2 whose summary lists no error
+#   hard        the second run failed outright (137) after printing a clean summary; the merged status keeps the 2
+#   text        a run prints a line the whitelist does not know
+#   stderr      the line is on the run's stderr
+#   no_summary  a run of status 2 has a warning and no summary
+#   duplicate   a run prints two summaries
+#   clean_lists a run of status 0 lists an error and a warning
+#   tee_failed  every copy of a run fails to be written, so the runs' statuses are unknown
+row_scan_changed_batch_errors() {
+    batch_fixture
+    local gone="$D/tree/gone" scenario
+    for scenario in offset unexplained hard text stderr no_summary duplicate clean_lists tee_failed; do
+        batch_reset
+        batch_run 1 2 1 "$gone-a"
+        case $scenario in
+            offset) batch_run 1 2 1 "$gone-a" "$gone-b"; batch_run 2 2 1 ;;
+            unexplained) batch_run 2 2 0 ;;
+            hard) batch_run 2 137 0 ;;
+            text) batch_run 2 0 0; printf 'LibClamAV Warning: the database is old\n' >> "$D/out.2" ;;
+            stderr) batch_run 2 0 0; printf 'LibClamAV Error: read failed\n' > "$D/err.2" ;;
+            no_summary) printf "WARNING: Can't open file %s: No such file or directory\n" "$gone-b" > "$D/out.2"; printf '2\n' > "$D/status.2" ;;
+            duplicate) batch_run 2 0 0; cat "$D/out.2" "$D/out.2" > "$D/out.dup"; mv "$D/out.dup" "$D/out.2" ;;
+            clean_lists) batch_run 2 0 1 "$gone-b" ;;
+            tee_failed)
+                batch_run 2 0 0
+                stub tee <<'STUB'
+printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
+stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
+"${BASH_SOURCE[0]%/*}/plain/tee" "$@"
+case "$1" in */run.*) exit 1 ;; esac
+STUB
+                ;;
+        esac
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 2 "$scenario: the error stays"
+        assert_lacks "$OUT" 'vanished while it ran' "$scenario: nothing is forgiven"
+        assert_has "$(cat "$L/av-scan.log")" 'clamscan batch failed; stamps unchanged so the next run retries' "$scenario: the batch failure is logged"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
     done
-    assert_eq "$(grep -c '^clamscan ' "$CALLS")" 3 '128 names maximum per batch'
+}
+# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The stub
+# tee waits 1.2 s before it reads, so the FOUND line that the scanner prints at once is still in the pipe when the limit
+# (0.5 s) stops the group. A tee that dies of that signal loses the line, and the run raises no alert. The stub's sleep
+# inherits the ignored signals from the stub, as the real tee does from its parent shell.
+row_scan_changed_stop_keeps_found() {
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    ln -s "$(command -v sleep)" "$B/sleep"
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 ;; esac; done
+STUB
+    stub tee <<'STUB'
+printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
+stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
+case "$1" in */run.*) sleep 1.2 ;; esac
+exec "${BASH_SOURCE[0]%/*}/plain/tee" "$@"
+STUB
+    SCAN_ENV=(AV_SCAN_TIMEOUT=0.5s "AV_ON_FOUND=touch '$D/found'")
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 124 'the scan is stopped at its time limit'
+    assert_has "$OUT" 'time limit' 'the stop is reported'
+    assert_has "$OUT" 'THREATS FOUND' 'the line still in the pipe at the stop alerts'
+    assert_file "$D/found" 'the line still in the pipe at the stop runs AV_ON_FOUND'
+    assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'the line still in the pipe at the stop is logged'
 }
 row_scan_changed_odd_timeout() {
     changed_fixture; changed_seed

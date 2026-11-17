@@ -243,7 +243,7 @@ verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os
 
 [[fault]]
 id = "FAULT-0017"
-status = "open"
+status = "fixed"
 raised = "202611160632VN"
 build = "OC-T-0067"
 severity = "Low"
@@ -257,10 +257,11 @@ Fix: batch by bytes up to about 1 MiB.
 base = "22f338a"
 head = "3cdbcd7"
 verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+fixed_by = "d38c7a2"
 
 [[fault]]
 id = "FAULT-0018"
-status = "open"
+status = "fixed"
 raised = "202611160632VN"
 build = "OC-T-0067"
 severity = "Low"
@@ -270,10 +271,11 @@ fault = "One LF or CR name over 128 KiB (MAX_ARG_STRLEN, by deep nesting) makes 
 base = "22f338a"
 head = "3cdbcd7"
 verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+fixed_by = "d38c7a2"
 
 [[fault]]
 id = "FAULT-0019"
-status = "open"
+status = "fixed"
 raised = "202611160632VN"
 build = "OC-T-0067"
 severity = "Low"
@@ -283,6 +285,7 @@ fault = "Any odd name makes at least two clamscan runs and two SCAN SUMMARY head
 base = "22f338a"
 head = "3cdbcd7"
 verdicts = "critic-security seat on 22f338a..3cdbcd7, 2026-11-16, subagent of os-config session 3188114e (HOLD on M1; FAULT-0007, FAULT-0005 and the CR half of FAULT-0006 confirmed closed); the chief ruled round 2 lands code-only with M1 open, round 3 next"
+fixed_by = "5c83e0b"
 
 [[fault]]
 id = "FAULT-0020"

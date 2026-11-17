@@ -186,9 +186,12 @@ scan_argv_bytes() {
 # The time limit stops the worker's whole process group, and that group holds this
 # tee. It ignores TERM, HUP and INT (the ignore outlives the exec), so a FOUND line
 # still in the pipe when the signal comes is handed on once clamscan has gone and
-# closed it. Only a KILL can take the tee: timeout sends one to the group only if
-# the worker outlives the kill grace, and then the bytes clamscan wrote and the tee
-# had not read, at most one pipe buffer, are lost.
+# closed it. The worker has no TERM handler and dies of the signal, so timeout
+# returns at once and never sends the KILL it keeps for the kill grace; nothing takes
+# the tee. The residual is a clamscan that survives TERM: the worker is gone, but
+# that clamscan and this tee keep the pipe open, and av-scan waits for them until
+# clamscan ends or systemd's TimeoutStartSec stops the unit (OC-T-0113 probes
+# whether real clamscan does that).
 run_clamscan_one() {
     local -a st
     local code

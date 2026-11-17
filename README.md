@@ -445,15 +445,16 @@ and the environment; a stack limit under 4 MiB lowers the bound with it. The
 environment's own size is not subtracted. Where getconf is missing or prints no
 number, the bound is 1048576. A batch that the kernel still refuses (E2BIG, status
 126) is an error that holds both stamps.
-All scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
+All scanner invocations run inside one `timeout`, so `AV_SCAN_TIMEOUT` bounds the
+whole worker, not each run.
 An earlier batch error cannot be erased by a later clean batch. The batch merge
 reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
 and invokes `AV_ON_FOUND`, while any batch error holds both
 stamps and, unless the vanished-file rule below forgives it, logs that the next run
 will retry (FAULT-0016). A private pending
-marker is created before the worker starts and removed only if no batch returned
-above 1. It preserves this distinction independently of the merged reporting
-status.
+marker is created before the worker starts and removed only if no run, the ordinary
+list's included, returned above 1. It preserves this distinction independently of the
+merged reporting status.
 Each scanner run of that worker tees its output into a private copy of its own
 beside the combined stream, and the worker leaves the status of every run in one
 list (FAULT-0019). When the merged status is 2, the vanished-file rule of
@@ -467,12 +468,16 @@ prints no other line). The worker's own `ERROR: clamscan batch failed` line goes
 to the output and the log but not into a copy, so it is never read as a scanner
 error; a forgiven batch of status 2 still leaves that line behind. Forgiven or not,
 the run holds both stamps.
-`AV_SCAN_TIMEOUT` stops the worker's whole process group, and each run's tee is in
-it. The tee ignores TERM, HUP and INT, so a `FOUND` line still in the pipe at that
-moment reaches the combined stream, and the stopped run still alerts. A KILL can
-still take the tee: `timeout` sends one to the group only if the worker outlives
-its 5-minute kill grace, and then what the scanner wrote and the tee had not yet
-read, at most one 64 KiB pipe buffer, is lost.
+`AV_SCAN_TIMEOUT` stops the worker's whole process group with TERM, and each run's
+tee is in it. The tee ignores TERM, HUP and INT, so a `FOUND` line still in the pipe
+at that moment reaches the combined stream once clamscan has closed it, and the
+stopped run still alerts. The worker has no TERM handler and dies of the signal, so
+`timeout` returns at once (124) and never sends the KILL it keeps for the 5-minute
+grace; nothing takes the tee. The residual is a clamscan that survives TERM: the
+worker is gone, but that clamscan and its tee keep the pipe open, and av-scan waits
+for them until clamscan ends or systemd's `TimeoutStartSec` stops the unit
+(`root-install.sh` sets 12h30min on OVH; `systemd/av-scan.service` sets none).
+os-config is probing whether real clamscan ever does that (OC-T-0113).
 The reporting priority matches
 [ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
 which selects infection before errors. Temporary lists and captured output are
@@ -574,6 +579,16 @@ one more case: any status accepted, a failed tee, a run's stderr dropped, a clea
 run left unchecked, a run's status ignored when its total is read, and a total no
 longer compared with its own run's warnings. Other mutants restore the early
 return, parse the combined stream, drop the status list and take the status from tee.
+OC-T-0111, OC-T-0112 and OC-T-0114 close the Lows the two seats left on that work.
+OC-T-0111 bounds a batch by the exec limit: one regression stubs getconf and a scanner
+that refuses an over-long argv as the kernel does, another runs the real getconf on a
+4 MiB soft stack, and mutants remove the lowering, its halving, the 1 MiB cap, the check
+for a number, the silenced stderr and the name asked for. OC-T-0112 searches the output
+of a run the worker records as stopped (124 or above) though an earlier run's 2 is the
+merged status; mutants drop the search, lower its threshold to 2, search the whole
+output in place of the run's own copy and skip the check for a number. OC-T-0114 orders
+the regression of the tee's ignored signals by cause (a marker the scanner's TERM trap
+writes, which the stub tee waits for), and `batch_tee_signals_unguarded` still kills it.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

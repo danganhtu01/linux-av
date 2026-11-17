@@ -462,12 +462,31 @@ MASTER.md judges the runs one by one, so several runs, each with its own summary
 no longer fail it. Every run's status must be 0 or 2, so a run that failed
 outright (E2BIG, SIGKILL) beside one that only lost files, a copy that could not
 be written or a missing list forgives nothing. Each copy must hold exactly one
-summary, with `Infected files: 0` and, for a run of status 2, a `Total errors`
-equal to that run's own vanished-file warnings (a run of status 0 lists none and
-prints no other line). The worker's own `ERROR: clamscan batch failed` line goes
+summary, with `Infected files: 0` and, for a run of status 2, at least one
+vanished-file entry and a `Total errors` (0 when the line is absent) equal to that
+run's old-form warnings alone (a run of status 0 lists none and prints no other
+line). The worker's own `ERROR: clamscan batch failed` line goes
 to the output and the log but not into a copy, so it is never read as a scanner
 error; a forgiven batch of status 2 still leaves that line behind. Forgiven or not,
 the run holds both stamps.
+A vanished-file entry is either the old form,
+`WARNING: Can't open file <path>: No such file or directory`, which ClamAV counts in
+`Total errors`, or, since OC-T-0118, a pair. ClamAV 1.5.4 prints a pair for a listed
+file that is gone before it reaches it (in `--file-list` mode and argv mode alike) and counts it in no total:
+the line `<path>: No such file or directory` and, on the very next line,
+`WARNING: <path>: Can't access file`. The second line must be that line exactly, with
+the same path, compared as a string and never as a pattern made from the path, so
+names holding `[`, `*`, `?` or `\` mean only themselves. A first line alone, a second line
+alone, a pair with any line between (a blank one too), a pair naming two paths and a
+first line that ends a run are unknown lines, and nothing is forgiven. The path of a
+pair goes through every guard of an old-form path (absolute, under a kept scan path,
+not at or under a skipped mount, no `.`, `..` or `//` segment) and into the same
+absence probe under its 60 s KILL limit: no link along the way, real parent folders,
+the path absent. A pair offsets no error: only old-form warnings count against
+`Total errors`, so an unreadable file hidden behind pairs raises the total above the
+old-form count and the run keeps its error. A gone name with a newline splits both
+lines at it, so it matches no pair and the run keeps its error as before. A status 1
+run still alerts; pairs never forgive it.
 `AV_SCAN_TIMEOUT` stops the worker's whole process group with TERM, and each run's
 tee is in it. The tee ignores TERM, HUP and INT, so a `FOUND` line still in the pipe
 at that moment reaches the combined stream once clamscan has closed it, and the

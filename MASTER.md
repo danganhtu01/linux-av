@@ -246,16 +246,27 @@ Each run's output, the ordinary `--file-list` run's (the first run) included, is
 and judged on its own, against its own exit status recorded by the worker (OC-T-0081).
 Every run's status must be 0 or 2, and a failed copy, a run that failed outright or a
 missing status list forgives nothing. In each run exactly one summary header follows
-its vanished warnings, with exactly one `Infected files: 0` line and, for status 2,
-one positive `Total errors` count matching that run's paths still absent under the
-kept scan paths; a run of status 0 lists none. No summary line kind may appear twice
-in one run. The worker's own `ERROR: clamscan batch failed` line is logged, kept out
+its vanished entries, with exactly one `Infected files: 0` line. An entry is the
+old-form warning `WARNING: Can't open file <path>: No such file or directory`, which
+ClamAV counts in `Total errors`, or a pair (OC-T-0118): the line
+`<path>: No such file or directory` and, on the very next line, exactly
+`WARNING: <path>: Can't access file` with the same path, compared as a string and never
+as a pattern. ClamAV 1.5.4 prints a pair for a listed file that is gone before it reaches
+it, in `--file-list` and argv mode alike, and counts it in no total. A pair's path passes
+every guard of an old-form path (absolute, under a kept scan path, not at or under a
+skipped mount, no `.`, `..` or `//` segment) and the same absence probe under its 60 s
+KILL limit. For status 2 a run owes at least one entry of either kind and a `Total errors`
+count (0 when the line is absent) equal to its old-form warnings alone, so a pair
+offsets no error; a run of status 0 lists none. A first line alone, a second line alone,
+a pair with another line between (a blank one too) or naming two paths is an unknown
+line. No summary line kind may appear twice in one run. The worker's own `ERROR: clamscan batch failed` line is logged, kept out
 of every run's copy, and stays in the log even when the batch is forgiven. The private output copy uses its physical
 directory path for both the copy and scanner exclusions, including with a symlinked
 `TMPDIR`. The clamscan output check runs in a subshell; missing-engine errors
 and an `exit` in `AV_ON_FOUND` still stop the foreground scheduled runner. Any unknown
 line or nonzero infected count keeps exit 2; other scanner errors remain failures.
 Residual: clamscan prints file names unescaped and, with --infected, counts some errors (an unreadable folder, a per-file read or engine error) without a line. A local user whose vanishing file names hold newlines and forged warnings can offset as many such errors as forged lines. ClamAV already passes files deeper than 15 folders, past --max-scantime or over --max-filesize as clean, so this adds no new way to hide a file. Since OC-T-0081 the same residual also reaches changed scans with odd names, whose batches until then always failed; os-config accepted it for full scans under C-39 (OC-T-0047, 2026-11-07), and the chief accepted its extension to changed scans on 2026-11-17 (os-config OC-T-0081). A forgiven run never advances a stamp, so the offset must be won again on every run.
+Residual of the pair (OC-T-0118): a gone name that holds a newline splits both lines of its pair at the newline, so no line pairs with another and the run keeps its error, as the old form does. A pair is counted in no total, so it cannot offset an error that ClamAV counts, and every pair in a forgiven run is a path the probe found absent. What a pair could still hide is an exit 2 that prints neither a line nor a count; none is known beside the gone path itself.
 Exit 137 reports SIGKILL, possibly from the time limit or another killer such as
 the OOM killer; both differ from threats found (exit 1). Set `AV_SCAN_TIMEOUT=0`
 for no limit. See README's settings section for exclusion limits.

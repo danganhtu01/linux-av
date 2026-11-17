@@ -478,7 +478,7 @@ the line `<path>: No such file or directory` and, on the very next line,
 the same path, compared as a string and never as a pattern made from the path, so
 names holding `[`, `*`, `?` or `\` mean only themselves. A first line alone, a second line
 alone, a pair with any line between (a blank one too), a pair naming two paths and a
-first line that ends a run are unknown lines, and nothing is forgiven. The path of a
+first line that ends a run are refused, and nothing is forgiven. The path of a
 pair goes through every guard of an old-form path (absolute, under a kept scan path,
 not at or under a skipped mount, no `.`, `..` or `//` segment) and into the same
 absence probe under its 60 s KILL limit: no link along the way, real parent folders,

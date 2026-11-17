@@ -257,9 +257,10 @@ every guard of an old-form path (absolute, under a kept scan path, not at or und
 skipped mount, no `.`, `..` or `//` segment) and the same absence probe under its 60 s
 KILL limit. For status 2 a run owes at least one entry of either kind and a `Total errors`
 count (0 when the line is absent) equal to its old-form warnings alone, so a pair
-offsets no error; a run of status 0 lists none. A first line alone, a second line alone,
-a pair with another line between (a blank one too) or naming two paths is an unknown
-line. No summary line kind may appear twice in one run. The worker's own `ERROR: clamscan batch failed` line is logged, kept out
+offsets no error; a run of status 0 lists none. A first line alone (also as the last line
+of a run), a second line alone, a pair with another line between (a blank one too) or
+naming two paths is refused, and nothing is forgiven. No summary line kind may appear
+twice in one run. The worker's own `ERROR: clamscan batch failed` line is logged, kept out
 of every run's copy, and stays in the log even when the batch is forgiven. The private output copy uses its physical
 directory path for both the copy and scanner exclusions, including with a symlinked
 `TMPDIR`. The clamscan output check runs in a subshell; missing-engine errors

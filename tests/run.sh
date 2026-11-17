@@ -1751,7 +1751,7 @@ row_root_install_render_empty() {
     assert_nofile "$lib/lib/common.sh.before-R-3377" 'no library backup after an empty render'
 }
 
-# OC-T-0083: the scan's CPU cap lives only in OVH's R-3377-cpu-cap.conf, which the installer never writes. Each row below
+# OC-T-0083: OVH's CPU cap for the scan comes from R-3377-cpu-cap.conf, which the installer never writes. Each row below
 # breaks that drop-in one way and runs the scratch installer from the checkout over an installed copy of every file the
 # installer writes. It must stop with the cap check's own message, run neither the installer tool nor systemctl, and leave
 # the whole scratch root as it was: no backup, no new file, no changed byte. The message is asserted, so a guard that is

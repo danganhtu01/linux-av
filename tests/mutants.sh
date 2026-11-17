@@ -114,7 +114,7 @@ MUTANTS=(
 'root_keep_brace_indent~root-install.sh~/^keep() {/,/^}/ s/^}$/  }/~root_install_functions_whole'
 'root_put_unindented~root-install.sh~/^put() {/a echo unindented~root_install_functions_whole'
 # OC-T-0083: each check of OVH's R-3377-cpu-cap.conf, each half of the mode check, the order before any keep or put, and the
-# read-back after the reload. root_cap_block_removed is root-install.sh as it was at bb42db6, without the guard.
+# read-back after the reload. root_cap_block_removed and root_readback_removed together give bb42db6's executable lines (no guard, no read-back).
 'root_cap_link_guard~root-install.sh~/^\[ ! -L "\$cap" \] || die/d~root_install_cap_link'
 'root_cap_regular_guard~root-install.sh~/^\[ -f "\$cap" \] || die/d~root_install_cap_missing'
 'root_cap_owner_guard~root-install.sh~/^\[ "\${perm%% \*}" = 0 \] || die/d~root_install_cap_foreign_owner'

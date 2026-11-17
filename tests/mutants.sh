@@ -3,8 +3,11 @@
 # checkout and shows the named tests/run.sh row(s) go red. A mutant that leaves its
 # rows green SURVIVED, and the script exits 1.
 #
-#   tests/mutants.sh           run every mutant
+#   tests/mutants.sh           run every mutant that runs as this user
 #   tests/mutants.sh NAME ...  run the named mutants only
+#
+# Mutants named guard_* (OC-T-0037) have rows that make real owners with chown, so they run only as root; every other mutant's
+# rows run av-scan, which refuses AV_ROOT as root, so they run only as another user. Run this script once as each.
 #
 # The checkout itself is never changed: each mutant is applied to a copy under
 # $TMPDIR. The copies are left in place (AV_TEST_KEEP=1 is passed to the rows);

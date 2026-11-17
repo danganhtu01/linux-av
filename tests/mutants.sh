@@ -57,7 +57,7 @@ MUTANTS=(
 'batch_killed_found_unread~bin/av-scan~s/ || \[ "\$stopped_found" = 1 \]//~scan_changed_batch_killed_found'
 'batch_stopped_threshold~bin/av-scan~s/\[ "\${stopped_rcs\[n\]}" -ge 124 \]/[ "${stopped_rcs[n]}" -ge 2 ]/~scan_changed_batch_killed_found'
 'batch_stopped_whole_output~bin/av-scan~s/"\$copy_dir\/run\.\$((n + 1))"; then$/"$copy"; then/~scan_changed_batch_killed_found'
-'batch_stopped_number_unchecked~bin/av-scan~s/\[\[ \${stopped_rcs\[n\]} =~ \^\[0-9\]+\$ \]\] \&\& //~scan_changed_batch_errors'
+'batch_stopped_number_unchecked~bin/av-scan~s/\[\[ \${stopped_rcs\[n\]} =. \^\[0-9\]+\$ \]\] \&\& //~scan_changed_batch_errors'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
 'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
 'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'

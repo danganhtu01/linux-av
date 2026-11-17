@@ -20,12 +20,21 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 MUTANTS=(
 # OC-T-0080 (FAULT-0017): odd names batch by bytes. odd_batch_d158e91_limits restores that commit's limits (a name count of 128
 # and 8192, now in bytes); odd_batch_count_limit restores the name count alone; each of the others moves a batch by a name or more.
-'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/:/~scan_changed_odd_batches'
-'odd_batch_d158e91_limits~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 8192 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
-'odd_batch_count_limit~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 1048576 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt "$limit" \] || break/:/~scan_changed_odd_batches'
+'odd_batch_d158e91_limits~bin/av-scan~s/\[ "$bytes" -lt "$limit" \] || break/[ "$bytes" -lt 8192 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_count_limit~bin/av-scan~s/\[ "$bytes" -lt "$limit" \] || break/[ "$bytes" -lt "$limit" ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
 'odd_batch_overhead_dropped~bin/av-scan~s/REPLY=$((length + 9))/REPLY=$length/~scan_changed_odd_batches'
 'odd_batch_character_count~bin/av-scan~s/local LC_ALL=C length/local length/~scan_changed_odd_batches'
 'odd_batch_helper_unserialized~bin/av-scan~s/declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes/declare -f run_clamscan_batches run_clamscan_one/~scan_changed_odd_batches'
+# OC-T-0111: the bound is the smaller of 1 MiB and half of getconf's ARG_MAX. Each mutant removes one part of that: the lowering, its
+# halving, the 1 MiB cap, the test that getconf gave a number, the silenced stderr, the name asked for, and the size of the fallback.
+'odd_batch_arg_max_ignored~bin/av-scan~s/then limit=\$((arg_max \/ 2)); fi/then :; fi/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
+'odd_batch_arg_max_whole~bin/av-scan~s/then limit=\$((arg_max \/ 2)); fi/then limit=$arg_max; fi/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
+'odd_batch_arg_max_uncapped~bin/av-scan~s/ \&\& \[ \$((arg_max \/ 2)) -lt "$limit" \]; then/; then/~scan_changed_odd_batches_arg_max'
+'odd_batch_arg_max_unchecked~bin/av-scan~s/\[\[ \$arg_max =. \^\[1-9\]\[0-9\]\*\$ \]\] \&\& //~scan_changed_odd_batches_arg_max'
+'odd_batch_arg_max_stderr~bin/av-scan~s/getconf ARG_MAX 2>\/dev\/null/getconf ARG_MAX/~scan_changed_odd_batches_arg_max'
+'odd_batch_arg_max_question~bin/av-scan~s/getconf ARG_MAX/getconf PAGESIZE/~scan_changed_odd_batches_arg_max scan_changed_odd_batches_small_stack'
+'odd_batch_fallback_halved~bin/av-scan~s/local limit=1048576 arg_max/local limit=524288 arg_max/~scan_changed_odd_batches scan_changed_odd_batches_arg_max'
 # OC-T-0081 (FAULT-0019): the worker keeps a copy and a status for each run, and the whitelist judges each run alone. Each of the
 # mutants below removes one guard of that. batch_hold_status_2 restores d158e91's early return, which no batch of status 2 passed.
 'batch_hold_status_2~bin/av-scan~s/ \&\& \[ "$rc" != 2 \]; then/; then/~scan_changed_batch_vanished scan_changed_batch_worker_line'
@@ -42,6 +51,13 @@ MUTANTS=(
 'batch_tee_signals_unguarded~bin/av-scan~s/( trap .. TERM HUP INT; exec tee/( exec tee/~scan_changed_stop_keeps_found'
 'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors'
 'batch_failure_log_dropped~bin/av-scan~/^    if \[ -n "${odd_list:-}" \] \&\& \[ -e "$odd_list.pending" \]; then$/,/^    fi$/d~scan_pending_remove_failure scan_changed_batch_errors'
+# OC-T-0112: a run the worker records as stopped (124 or above) has its own copy searched for a FOUND line, though the merged status
+# is 2. Each mutant removes one guard of that: the search itself, the threshold (status 2 text is forgeable), the run's own copy
+# (the whole output holds the other runs' forged text) and the test of a number (a tee that failed leaves x).
+'batch_killed_found_unread~bin/av-scan~s/ || \[ "\$stopped_found" = 1 \]//~scan_changed_batch_killed_found'
+'batch_stopped_threshold~bin/av-scan~s/\[ "\${stopped_rcs\[n\]}" -ge 124 \]/[ "${stopped_rcs[n]}" -ge 2 ]/~scan_changed_batch_killed_found'
+'batch_stopped_whole_output~bin/av-scan~s/"\$copy_dir\/run\.\$((n + 1))"; then$/"$copy"; then/~scan_changed_batch_killed_found'
+'batch_stopped_number_unchecked~bin/av-scan~s/\[\[ \${stopped_rcs\[n\]} =. \^\[0-9\]+\$ \]\] \&\& //~scan_changed_batch_errors'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
 'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
 'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'

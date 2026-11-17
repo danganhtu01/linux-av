@@ -186,9 +186,12 @@ scan_argv_bytes() {
 # The time limit stops the worker's whole process group, and that group holds this
 # tee. It ignores TERM, HUP and INT (the ignore outlives the exec), so a FOUND line
 # still in the pipe when the signal comes is handed on once clamscan has gone and
-# closed it. Only a KILL can take the tee: timeout sends one to the group only if
-# the worker outlives the kill grace, and then the bytes clamscan wrote and the tee
-# had not read, at most one pipe buffer, are lost.
+# closed it. The worker has no TERM handler and dies of the signal, so timeout
+# returns at once and never sends the KILL it keeps for the kill grace; nothing takes
+# the tee. The residual is a clamscan that survives TERM: the worker is gone, but
+# that clamscan and this tee keep the pipe open, and av-scan waits for them until
+# clamscan ends or systemd's TimeoutStartSec stops the unit (OC-T-0113 probes
+# whether real clamscan does that).
 run_clamscan_one() {
     local -a st
     local code
@@ -206,14 +209,25 @@ run_clamscan_one() {
 }
 
 # Called inside one timeout by run_clamscan_checked. The ordinary list costs
-# one DB load; long and LF/CR names are quoted argv entries, about 1 MiB of argv
+# one DB load; long and LF/CR names are quoted argv entries, up to 1 MiB of argv
 # a batch, so a long name no longer multiplies the database loads (FAULT-0017).
 # Every run leaves its status in runs_dir/runs and its output in runs_dir/run.N.
 # No pathname passes through shell source text.
 run_clamscan_batches() {
     local engine="$1" list="$2" odd_list="$3" runs_dir="$4" file bytes rc=0 batch_rc failed=0
+    local limit=1048576 arg_max
     shift 4
     local -a targets=() runs=()
+    # A run takes names until its argv reaches this bound, so it holds at most the one
+    # pathname (under 4096 bytes) that reaches it beyond. The kernel limits the strings
+    # and pointers of one exec to a quarter of the stack limit, which getconf reports as
+    # ARG_MAX (2 MiB at the default 8 MiB stack). The bound is the smaller of 1 MiB and
+    # half of that, which leaves the other half for the options and the environment, and
+    # a stack under 4 MiB lowers it; the environment's own size is not counted. Without
+    # a number from getconf it stays 1 MiB, and a batch the kernel still refuses (E2BIG,
+    # status 126) is an error that holds the stamps.
+    arg_max=$(getconf ARG_MAX 2>/dev/null)
+    if [[ $arg_max =~ ^[1-9][0-9]*$ ]] && [ $((arg_max / 2)) -lt "$limit" ]; then limit=$((arg_max / 2)); fi
     if [ -s "$list" ]; then
         run_clamscan_one "$engine" "$@" "--file-list=$list"; rc=$batch_rc
     fi
@@ -222,11 +236,7 @@ run_clamscan_batches() {
         while IFS= read -r -d '' file; do
             targets+=("$file")
             scan_argv_bytes "$file"; bytes=$((bytes + REPLY))
-            # Up to 1 MiB of argv plus the one pathname (under 4096 bytes) that
-            # reaches it leaves the other half of the 2 MiB exec limit for the
-            # options and the environment. A stack limit under 4 MiB lowers that
-            # limit, and the exec then fails with E2BIG (126), which holds the stamps.
-            [ "$bytes" -lt 1048576 ] || break
+            [ "$bytes" -lt "$limit" ] || break
         done
         [ "${#targets[@]}" -gt 0 ] || break
         run_clamscan_one "$engine" "$@" "${targets[@]}"
@@ -287,8 +297,23 @@ run_clamscan_checked() (
     # Output text is searched only when the scanner was stopped (timeout, kill,
     # signal: 124 and above). At 0 or 2 a FOUND line can be forged by a file name
     # holding a newline inside clamscan's own warning, so status alone decides.
-    local marker_failed=0
-    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
+    # The merged status of batches keeps only the first error, so a run killed after
+    # an earlier run returned 2 hides behind that 2. The worker leaves each run's own
+    # status, and a run it records as stopped has its own copy searched, which holds
+    # no other run's text. A status that is no number (a tee that failed) is not a
+    # stop and its text is not trusted. When the merged status is itself 124 or
+    # above, the search below reads the whole output, as it did before.
+    local marker_failed=0 stopped_found=0
+    local -a stopped_rcs=()
+    if [ "$batched" = 1 ] && [ -r "$copy_dir/runs" ]; then
+        read -r -a stopped_rcs < "$copy_dir/runs"
+        for ((n=0; n<${#stopped_rcs[@]}; n++)); do
+            if [[ ${stopped_rcs[n]} =~ ^[0-9]+$ ]] && [ "${stopped_rcs[n]}" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy_dir/run.$((n + 1))"; then
+                stopped_found=1; break
+            fi
+        done
+    fi
+    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || [ "$stopped_found" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
         touch "$scan_state/threat" || {
             log_err "cannot write threat marker; stamps unchanged"
             report_scan_threat

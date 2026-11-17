@@ -2268,6 +2268,7 @@ STUB
 #   3955-byte names of 1980 characters cost 3964: 265 fill a run (264 reach 1046496). Counted as characters, 528 would.
 #   260 short names fit one run, where d158e91's limit of 128 names made three.
 # The names come through a find stub, so no file system holds them; the scanner stub counts the names of each run.
+# This PATH holds no getconf, so the bound is the 1 MiB that OC-T-0111's rows below lower or keep by what getconf says.
 row_scan_changed_odd_batches() {
     changed_fixture
     local LC_ALL=C pad name first second shape count want edge i
@@ -2304,6 +2305,91 @@ STUB
         assert_scan_arg "$second"
         assert_scan_arg "$name"
     done
+}
+# OC-T-0111: a run takes the smaller of 1 MiB and half of getconf's ARG_MAX, a quarter of the stack limit, which is what the
+# kernel lets one exec carry. Where the stack is under 4 MiB, 1 MiB of argv is E2BIG (126). The getconf stub prints what $D/getconf
+# holds (and exits 1 where there is no such file), and the scanner stub does what the kernel does, with the same limit: it
+# refuses an argv of that many bytes (each argument's bytes, NUL and pointer) with 126. Every case splits 4009-byte names:
+#   stack4     ARG_MAX 1 MiB (a 4 MiB stack): half is 524288, so 131 names fill a run (130 reach 521170)
+#   stack8     2 MiB, the default: half is the 1 MiB cap, 262 names
+#   stack32    8 MiB: half would be 4 MiB, and the cap holds at 1 MiB
+#   stack_min  128 KiB, the least the kernel allows: half is 65536, so 17 names (16 reach 64144)
+#   garbage, empty, failed, absent   getconf gives no number: the 1 MiB it falls back to
+# and getconf's stderr never reaches the output, whether the tool is missing or fails.
+row_scan_changed_odd_batches_arg_max() {
+    changed_fixture
+    local LC_ALL=C pad i spec value limit count want
+    printf -v pad '%3995s' ''; pad=${pad// /x}
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+export LC_ALL=C
+d=${SCAN_ARGS%/*}
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0; bytes=0
+for arg in "$@"; do bytes=$((bytes + ${#arg} + 9)); case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "$d/sizes"
+[ "$bytes" -lt "$(cat "$d/exec-limit")" ] || exit 126
+STUB
+    stub getconf <<'STUB'
+cat "${SCAN_ARGS%/*}/getconf"
+STUB
+    SCAN_ENV=(LC_ALL=C.utf8)
+    for spec in stack4 stack8 stack32 stack_min garbage empty failed absent; do
+        changed_seed
+        : > "$D/walk"; : > "$D/sizes"; : > "$CALLS"; rm -f "$D/getconf"
+        value=''; limit=2097152; count=540; want='262 262 16'
+        case $spec in
+            stack4) value=1048576; limit=$value; want='131 131 131 131 16' ;;
+            stack8) value=2097152 ;;
+            stack32) value=8388608; limit=$value ;;
+            stack_min) value=131072; limit=$value; count=40; want='17 17 6' ;;
+            garbage) value=undefined ;;
+        esac
+        # failed leaves no file for the stub to print, and absent is the last case, so no stub is left for it.
+        case $spec in
+            failed) : ;;
+            absent) unstub getconf ;;
+            *) printf '%s\n' "$value" > "$D/getconf" ;;
+        esac
+        printf '%s\n' "$limit" > "$D/exec-limit"
+        for ((i=0; i<count; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$spec: every batch fits the exec limit"
+        assert_eq "$(tr '\n' ' ' < "$D/sizes")" "$want " "$spec: names in each run"
+        assert_lacks "$OUT" 'getconf' "$spec: getconf's own errors stay out of the output"
+        if [ "$spec" = absent ]; then assert_lacks "$(calls)" 'getconf' 'absent: nothing stands in for getconf'
+        else assert_has "$(calls)" 'getconf ARG_MAX' "$spec: the worker asks for ARG_MAX"; fi
+    done
+}
+# OC-T-0111, on the kernel itself: a soft stack limit of 4 MiB makes the kernel's exec limit 1 MiB (a quarter), and the real getconf
+# says so. The old bound let a run reach 1 MiB of argv, and its exec failed with E2BIG (126); now each run is half of that.
+# The names are 4000 bytes: 131 fill a run (524288 is reached by the 131st), and 300 names make 131, 131 and 38.
+row_scan_changed_odd_batches_small_stack() {
+    changed_fixture
+    local LC_ALL=C pad i saved
+    printf -v pad '%3995s' ''; pad=${pad// /x}
+    ln -s "$(command -v getconf)" "$B/getconf" || { fail 'the host has no getconf'; return; }
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0
+for arg in "$@"; do case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "${SCAN_ARGS%/*}/sizes"
+STUB
+    : > "$D/walk"; : > "$D/sizes"
+    for ((i=0; i<300; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+    SCAN_ENV=(LC_ALL=C.utf8)
+    saved=$(ulimit -S -s)
+    ulimit -S -s 4096 || { fail 'cannot lower the soft stack limit'; return; }
+    scan --changed --path "$D/tree"
+    ulimit -S -s "$saved"
+    assert_eq "$RC" 0 'no run of the 4 MiB stack fails to exec'
+    assert_lacks "$OUT" 'Argument list too long' 'the kernel refused no run'
+    assert_eq "$(tr '\n' ' ' < "$D/sizes")" '131 131 38 ' 'names in each run'
 }
 # OC-T-0081 (FAULT-0019): a changed scan with odd names runs the scanner more than once, and each run has an output of
 # its own and a status of its own. batch_run K STATUS ERRORS [GONE...] writes run K's output as clamscan 1.5.4 prints
@@ -2415,31 +2501,93 @@ STUB
         scan --changed --path "$D/tree"
         assert_eq "$RC" 2 "$scenario: the error stays"
         assert_lacks "$OUT" 'vanished while it ran' "$scenario: nothing is forgiven"
+        # A run whose status is no number (x, a tee that failed) is read as a stop by no test of a number.
+        assert_lacks "$OUT" 'integer expression' "$scenario: every status is read as what it is"
         assert_has "$(cat "$L/av-scan.log")" 'clamscan batch failed; stamps unchanged so the next run retries' "$scenario: the batch failure is logged"
         assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
         assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
     done
 }
-# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The stub
-# tee waits 1.2 s before it reads, so the FOUND line that the scanner prints at once is still in the pipe when the limit
-# (0.5 s) stops the group. A tee that dies of that signal loses the line, and the run raises no alert. The stub's sleep
-# inherits the ignored signals from the stub, as the real tee does from its parent shell.
+# batch_line K STATUS [LINE...] makes run K print exactly these lines (none for no output) and return STATUS, as a run does that
+# was stopped before its summary.
+batch_line() {
+    local k="$1" status="$2"
+    shift 2
+    : > "$D/out.$k"
+    [ "$#" = 0 ] || printf '%s\n' "$@" >> "$D/out.$k"
+    printf '%s\n' "$status" > "$D/status.$k"
+}
+# OC-T-0112: the worker's merged status keeps only the first error, so a run that is stopped (124 or above, as by the OOM killer's
+# 137) after an earlier run returned 2 leaves a merged 2, and the caller searched the output for a FOUND line at 124 and above
+# only. Each run's own status, from the worker's list, now sends that run's own copy to the search; a run of status 0 or 2 never
+# does, since a file name with a newline can forge a FOUND line inside clamscan's warning. Status 2 and the stamps hold in all cases.
+#   killed_late    run 1 returns 2, then run 2 prints a FOUND line and is stopped: the alert runs (red before OC-T-0112)
+#   killed_first   run 1 prints a FOUND line and is stopped, then run 2 is clean: the merged status is the stop's
+#   forged         run 1 returns 2 with a FOUND line forged inside a warning by a name with a newline, and run 2 is clean: no alert
+#   forged_killed  the same forged run 1, then run 2 is stopped with no FOUND line of its own: the forged line is not run 2's
+#   quiet_killed   run 1 returns 2, then run 2 is stopped without a line: no alert
+row_scan_changed_batch_killed_found() {
+    batch_fixture
+    local gone="$D/tree/gone" spec scenario status want alert log
+    for spec in killed_late:124 killed_late:137 killed_late:143 killed_first:137 forged:0 forged_killed:137 quiet_killed:137; do
+        scenario=${spec%:*}; status=${spec#*:}
+        batch_reset; rm -f "$D/found"
+        alert=0; want=2
+        case $scenario in
+            killed_late) batch_run 1 2 1 "$gone-a"; batch_line 2 "$status" 'odd: Test.Signature FOUND'; alert=1 ;;
+            killed_first) batch_line 1 "$status" 'plain: Test.Signature FOUND'; batch_run 2 0 0; alert=1; want=$status ;;
+            forged) batch_line 1 2 "WARNING: Can't open file $gone-a" 'fake: Eicar-Test-Signature FOUND' 'y: No such file or directory'; batch_run 2 0 0 ;;
+            forged_killed) batch_line 1 2 "WARNING: Can't open file $gone-a" 'fake: Eicar-Test-Signature FOUND' 'y: No such file or directory'; batch_line 2 "$status" ;;
+            quiet_killed) batch_run 1 2 1 "$gone-a"; batch_line 2 "$status" ;;
+        esac
+        SCAN_ENV=("AV_ON_FOUND=touch '$D/found'")
+        scan --changed --path "$D/tree"
+        log="$(cat "$L/av-scan.log")"
+        assert_eq "$RC" "$want" "$scenario $status: the status stays what the runs made it"
+        if [ "$alert" = 1 ]; then
+            assert_has "$OUT" 'THREATS FOUND' "$scenario $status: the stopped run's line alerts"
+            assert_file "$D/found" "$scenario $status: the stopped run's line runs AV_ON_FOUND"
+            assert_has "$log" 'THREATS FOUND' "$scenario $status: the stopped run's line is logged"
+        else
+            assert_lacks "$OUT" 'THREATS FOUND' "$scenario $status: no alert"
+            assert_nofile "$D/found" "$scenario $status: no AV_ON_FOUND"
+            assert_lacks "$log" 'THREATS FOUND' "$scenario $status: no alert logged"
+        fi
+        assert_lacks "$OUT" 'vanished while it ran' "$scenario $status: nothing is forgiven"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario $status: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario $status: full stamp kept"
+    done
+}
+# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The order
+# of the row is by cause (OC-T-0114): the scanner stub traps TERM and leaves a marker, and a run's stub tee reads nothing until
+# that marker exists (it gives up after 2 s), so the FOUND line that the scanner printed at once is still in the pipe when the group
+# has been signalled, whatever the clock does. A tee that dies of that signal loses the line, and the run raises no alert.
+# The stub tee records that the marker, not its 2 s, released it, and the row asserts that record. The limit (0.5 s) is the one
+# time left in the row: it only has to pass after the scanner has printed. The stub's sleep inherits the ignored signals from
+# the stub, as the real tee does from its parent shell.
 row_scan_changed_stop_keeps_found() {
     changed_fixture; changed_seed
     touch "$D/tree/plain" "$D/tree/odd"$'\n'
     ln -s "$(command -v sleep)" "$B/sleep"
     stub clamscan <<'STUB'
 printf '%s\0' "$@" >> "$SCAN_ARGS"
-for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 ;; esac; done
+trap 'touch "${SCAN_ARGS%/*}/termed"; exit 143' TERM
+for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 & wait ;; esac; done
 STUB
     stub tee <<'STUB'
 printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
 stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
-case "$1" in */run.*) sleep 1.2 ;; esac
+case "$1" in */run.*)
+    i=0
+    while [ ! -e "${SCAN_ARGS%/*}/termed" ] && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+    [ ! -e "${SCAN_ARGS%/*}/termed" ] || : > "${SCAN_ARGS%/*}/tee-saw-termed" ;;
+esac
 exec "${BASH_SOURCE[0]%/*}/plain/tee" "$@"
 STUB
     SCAN_ENV=(AV_SCAN_TIMEOUT=0.5s "AV_ON_FOUND=touch '$D/found'")
     scan --changed --path "$D/tree"
+    assert_file "$D/termed" 'the scanner was signalled'
+    assert_file "$D/tee-saw-termed" 'the tee read after the signal, released by the scanner and not by its own bound'
     assert_eq "$RC" 124 'the scan is stopped at its time limit'
     assert_has "$OUT" 'time limit' 'the stop is reported'
     assert_has "$OUT" 'THREATS FOUND' 'the line still in the pipe at the stop alerts'

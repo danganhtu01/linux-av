@@ -239,9 +239,11 @@ disables this feature. `AV_SCAN_TIMEOUT` defaults to `12h`; `timeout` stops a lo
 scan, with a 5-minute kill grace, and logs that it did not finish (exit 124).
 A clamscan exit 2 becomes a warning and exits 0 only when every stdout and stderr line
 of each clamscan run matches the vanished-file or scan-summary whitelist. A full scan or
-a changed scan without odd names is one run; a changed scan with odd names runs in
-batches of about 1 MiB of arguments (OC-T-0080), and each batch's output is kept and
-judged on its own, against its own exit status recorded by the worker (OC-T-0081).
+a changed scan without odd names is one run; a changed scan with odd names runs its
+ordinary list once and its odd names in batches of the size the worker computes, the
+smaller of 1 MiB of arguments and half of `getconf ARG_MAX` (OC-T-0080, OC-T-0111).
+Each run's output, the ordinary `--file-list` run's (the first run) included, is kept
+and judged on its own, against its own exit status recorded by the worker (OC-T-0081).
 Every run's status must be 0 or 2, and a failed copy, a run that failed outright or a
 missing status list forgives nothing. In each run exactly one summary header follows
 its vanished warnings, with exactly one `Infected files: 0` line and, for status 2,

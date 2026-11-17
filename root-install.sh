@@ -4,7 +4,7 @@
 # (a tree step of linux-av@<commit>; C-10). OC-T-0046, R-3377: his words 2026-11-05, "Stop the antivirus scans jobs now.
 # Resume it after the fix is live, which could be later." This is the fix; a separate card starts the timer.
 # The runner checks this file's SHA-256 and each listed file's before it runs anything:
-# sha256 b681f0d6c3a8324414f6a33d60734d60b1defc58ee1a513f90e9e8188f8cda16 bin/av-scan
+# sha256 44b822a15a239c1c3464e7f0e895557a2d716485d9814213463d5cf4f22342c2 bin/av-scan
 # sha256 1ee5629599004961efafe99e43c791ae1b0d18e50f606f3b4d17733f6a57c747 lib/common.sh
 # sha256 ae1283589ae0b920d1f72dbb72d74b1668e8312d36b9b7f8ca876317dd396684 systemd/av-scan.service
 # What it writes, all root:root:

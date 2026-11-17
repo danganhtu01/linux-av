@@ -299,9 +299,10 @@ run_clamscan_checked() (
     # holding a newline inside clamscan's own warning, so status alone decides.
     # The merged status of batches keeps only the first error, so a run killed after
     # an earlier run returned 2 hides behind that 2. The worker leaves each run's own
-    # status, and a run it records as stopped has its own copy searched, never the
-    # whole output, which holds the other runs' text. A status that is no number (a
-    # tee that failed) is not a stop and its text is not trusted.
+    # status, and a run it records as stopped has its own copy searched, which holds
+    # no other run's text. A status that is no number (a tee that failed) is not a
+    # stop and its text is not trusted. When the merged status is itself 124 or
+    # above, the search below reads the whole output, as it did before.
     local marker_failed=0 stopped_found=0
     local -a stopped_rcs=()
     if [ "$batched" = 1 ] && [ -r "$copy_dir/runs" ]; then

@@ -510,8 +510,9 @@ after such a stop: a run that ends with status 0 or 2 alerts on status alone, so
 clamscan's own warning, raises no alert. A changed scan with odd names holds that
 rule run by run (OC-T-0112): the merged status keeps only the first error, so a run
 killed after an earlier run returned 2 would hide behind that 2. The worker's list
-gives every run's own status, and a run of 124 or above has its own output searched;
-the output of a run of status 0 or 2 never is. The clamdscan engine
+gives every run's own status, and a run of 124 or above has its own output searched
+even when the merged status is 2. When the merged status is itself 124 or above, the
+whole output is searched, other runs' text included. The clamdscan engine
 alerts on exit status 1; it does not recover threats from interrupted output.
 Unscannable-path diagnostics log the first 20 paths and then the total count
 when there are more. Under `--now`, failures returned by the scan or stamp

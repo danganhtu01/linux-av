@@ -42,6 +42,13 @@ MUTANTS=(
 'batch_tee_signals_unguarded~bin/av-scan~s/( trap .. TERM HUP INT; exec tee/( exec tee/~scan_changed_stop_keeps_found'
 'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors'
 'batch_failure_log_dropped~bin/av-scan~/^    if \[ -n "${odd_list:-}" \] \&\& \[ -e "$odd_list.pending" \]; then$/,/^    fi$/d~scan_pending_remove_failure scan_changed_batch_errors'
+# OC-T-0112: a run the worker records as stopped (124 or above) has its own copy searched for a FOUND line, though the merged status
+# is 2. Each mutant removes one guard of that: the search itself, the threshold (status 2 text is forgeable), the run's own copy
+# (the whole output holds the other runs' forged text) and the test of a number (a tee that failed leaves x).
+'batch_killed_found_unread~bin/av-scan~s/ || \[ "\$stopped_found" = 1 \]//~scan_changed_batch_killed_found'
+'batch_stopped_threshold~bin/av-scan~s/\[ "\${stopped_rcs\[n\]}" -ge 124 \]/[ "${stopped_rcs[n]}" -ge 2 ]/~scan_changed_batch_killed_found'
+'batch_stopped_whole_output~bin/av-scan~s/"\$copy_dir\/run\.\$((n + 1))"; then$/"$copy"; then/~scan_changed_batch_killed_found'
+'batch_stopped_number_unchecked~bin/av-scan~s/\[\[ \${stopped_rcs\[n\]} =~ \^\[0-9\]+\$ \]\] \&\& //~scan_changed_batch_errors'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
 'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
 'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'

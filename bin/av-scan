@@ -287,8 +287,22 @@ run_clamscan_checked() (
     # Output text is searched only when the scanner was stopped (timeout, kill,
     # signal: 124 and above). At 0 or 2 a FOUND line can be forged by a file name
     # holding a newline inside clamscan's own warning, so status alone decides.
-    local marker_failed=0
-    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
+    # The merged status of batches keeps only the first error, so a run killed after
+    # an earlier run returned 2 hides behind that 2. The worker leaves each run's own
+    # status, and a run it records as stopped has its own copy searched, never the
+    # whole output, which holds the other runs' text. A status that is no number (a
+    # tee that failed) is not a stop and its text is not trusted.
+    local marker_failed=0 stopped_found=0
+    local -a stopped_rcs=()
+    if [ "$batched" = 1 ] && [ -r "$copy_dir/runs" ]; then
+        read -r -a stopped_rcs < "$copy_dir/runs"
+        for ((n=0; n<${#stopped_rcs[@]}; n++)); do
+            if [[ ${stopped_rcs[n]} =~ ^[0-9]+$ ]] && [ "${stopped_rcs[n]}" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy_dir/run.$((n + 1))"; then
+                stopped_found=1; break
+            fi
+        done
+    fi
+    if [ -n "${scan_state:-}" ] && { [ "$rc" = 1 ] || [ "$stopped_found" = 1 ] || { [ "$rc" -ge 124 ] && grep -Eq ': .+ FOUND$' "$copy"; }; }; then
         touch "$scan_state/threat" || {
             log_err "cannot write threat marker; stamps unchanged"
             report_scan_threat

@@ -2415,9 +2415,61 @@ STUB
         scan --changed --path "$D/tree"
         assert_eq "$RC" 2 "$scenario: the error stays"
         assert_lacks "$OUT" 'vanished while it ran' "$scenario: nothing is forgiven"
+        # A run whose status is no number (x, a tee that failed) is read as a stop by no test of a number.
+        assert_lacks "$OUT" 'integer expression' "$scenario: every status is read as what it is"
         assert_has "$(cat "$L/av-scan.log")" 'clamscan batch failed; stamps unchanged so the next run retries' "$scenario: the batch failure is logged"
         assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
         assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
+    done
+}
+# batch_line K STATUS [LINE...] makes run K print exactly these lines (none for no output) and return STATUS, as a run does that
+# was stopped before its summary.
+batch_line() {
+    local k="$1" status="$2"
+    shift 2
+    : > "$D/out.$k"
+    [ "$#" = 0 ] || printf '%s\n' "$@" >> "$D/out.$k"
+    printf '%s\n' "$status" > "$D/status.$k"
+}
+# OC-T-0112: the worker's merged status keeps only the first error, so a run that is stopped (124 or above, as by the OOM killer's
+# 137) after an earlier run returned 2 leaves a merged 2, and the caller searched the output for a FOUND line at 124 and above
+# only. Each run's own status, from the worker's list, now sends that run's own copy to the search; a run of status 0 or 2 never
+# does, since a file name with a newline can forge a FOUND line inside clamscan's warning. Status 2 and the stamps hold in all cases.
+#   killed_late    run 1 returns 2, then run 2 prints a FOUND line and is stopped: the alert runs (red before OC-T-0112)
+#   killed_first   run 1 prints a FOUND line and is stopped, then run 2 is clean: the merged status is the stop's
+#   forged         run 1 returns 2 with a FOUND line forged inside a warning by a name with a newline, and run 2 is clean: no alert
+#   forged_killed  the same forged run 1, then run 2 is stopped with no FOUND line of its own: the forged line is not run 2's
+#   quiet_killed   run 1 returns 2, then run 2 is stopped without a line: no alert
+row_scan_changed_batch_killed_found() {
+    batch_fixture
+    local gone="$D/tree/gone" spec scenario status want alert log
+    for spec in killed_late:124 killed_late:137 killed_late:143 killed_first:137 forged:0 forged_killed:137 quiet_killed:137; do
+        scenario=${spec%:*}; status=${spec#*:}
+        batch_reset; rm -f "$D/found"
+        alert=0; want=2
+        case $scenario in
+            killed_late) batch_run 1 2 1 "$gone-a"; batch_line 2 "$status" 'odd: Test.Signature FOUND'; alert=1 ;;
+            killed_first) batch_line 1 "$status" 'plain: Test.Signature FOUND'; batch_run 2 0 0; alert=1; want=$status ;;
+            forged) batch_line 1 2 "WARNING: Can't open file $gone-a" 'fake: Eicar-Test-Signature FOUND' 'y: No such file or directory'; batch_run 2 0 0 ;;
+            forged_killed) batch_line 1 2 "WARNING: Can't open file $gone-a" 'fake: Eicar-Test-Signature FOUND' 'y: No such file or directory'; batch_line 2 "$status" ;;
+            quiet_killed) batch_run 1 2 1 "$gone-a"; batch_line 2 "$status" ;;
+        esac
+        SCAN_ENV=("AV_ON_FOUND=touch '$D/found'")
+        scan --changed --path "$D/tree"
+        log="$(cat "$L/av-scan.log")"
+        assert_eq "$RC" "$want" "$scenario $status: the status stays what the runs made it"
+        if [ "$alert" = 1 ]; then
+            assert_has "$OUT" 'THREATS FOUND' "$scenario $status: the stopped run's line alerts"
+            assert_file "$D/found" "$scenario $status: the stopped run's line runs AV_ON_FOUND"
+            assert_has "$log" 'THREATS FOUND' "$scenario $status: the stopped run's line is logged"
+        else
+            assert_lacks "$OUT" 'THREATS FOUND' "$scenario $status: no alert"
+            assert_nofile "$D/found" "$scenario $status: no AV_ON_FOUND"
+            assert_lacks "$log" 'THREATS FOUND' "$scenario $status: no alert logged"
+        fi
+        assert_lacks "$OUT" 'vanished while it ran' "$scenario $status: nothing is forgiven"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario $status: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario $status: full stamp kept"
     done
 }
 # The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The stub

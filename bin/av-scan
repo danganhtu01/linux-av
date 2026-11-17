@@ -206,14 +206,25 @@ run_clamscan_one() {
 }
 
 # Called inside one timeout by run_clamscan_checked. The ordinary list costs
-# one DB load; long and LF/CR names are quoted argv entries, about 1 MiB of argv
+# one DB load; long and LF/CR names are quoted argv entries, up to 1 MiB of argv
 # a batch, so a long name no longer multiplies the database loads (FAULT-0017).
 # Every run leaves its status in runs_dir/runs and its output in runs_dir/run.N.
 # No pathname passes through shell source text.
 run_clamscan_batches() {
     local engine="$1" list="$2" odd_list="$3" runs_dir="$4" file bytes rc=0 batch_rc failed=0
+    local limit=1048576 arg_max
     shift 4
     local -a targets=() runs=()
+    # A run takes names until its argv reaches this bound, so it holds at most the one
+    # pathname (under 4096 bytes) that reaches it beyond. The kernel limits the strings
+    # and pointers of one exec to a quarter of the stack limit, which getconf reports as
+    # ARG_MAX (2 MiB at the default 8 MiB stack). The bound is the smaller of 1 MiB and
+    # half of that, which leaves the other half for the options and the environment, and
+    # a stack under 4 MiB lowers it; the environment's own size is not counted. Without
+    # a number from getconf it stays 1 MiB, and a batch the kernel still refuses (E2BIG,
+    # status 126) is an error that holds the stamps.
+    arg_max=$(getconf ARG_MAX 2>/dev/null)
+    if [[ $arg_max =~ ^[1-9][0-9]*$ ]] && [ $((arg_max / 2)) -lt "$limit" ]; then limit=$((arg_max / 2)); fi
     if [ -s "$list" ]; then
         run_clamscan_one "$engine" "$@" "--file-list=$list"; rc=$batch_rc
     fi
@@ -222,11 +233,7 @@ run_clamscan_batches() {
         while IFS= read -r -d '' file; do
             targets+=("$file")
             scan_argv_bytes "$file"; bytes=$((bytes + REPLY))
-            # Up to 1 MiB of argv plus the one pathname (under 4096 bytes) that
-            # reaches it leaves the other half of the 2 MiB exec limit for the
-            # options and the environment. A stack limit under 4 MiB lowers that
-            # limit, and the exec then fails with E2BIG (126), which holds the stamps.
-            [ "$bytes" -lt 1048576 ] || break
+            [ "$bytes" -lt "$limit" ] || break
         done
         [ "${#targets[@]}" -gt 0 ] || break
         run_clamscan_one "$engine" "$@" "${targets[@]}"

@@ -435,12 +435,16 @@ total count. Other files still scan, including ordinary batch-mates; the run
 returns 2 (or the scanner's stop status, 124, 137 or 143) and holds both stamps
 even if a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
 individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
-Argument batches hold about 1 MiB of argv each, so long names no longer multiply
+Argument batches hold up to 1 MiB of argv each, so long names no longer multiply
 database loads (FAULT-0017): a name counts its bytes under `LC_ALL=C`, its NUL and
-its 8-byte pointer, and a batch ends once it reaches 1048576, the name that reaches
-it included. That is half of the 2 MiB exec limit at the default 8 MiB stack. A
-stack limit under 4 MiB lowers the limit, and the exec then fails with E2BIG
-(status 126), an error that holds both stamps.
+its 8-byte pointer, and a batch ends once it reaches its bound, the name that reaches
+it included. The bound is the smaller of 1048576 and half of `getconf ARG_MAX`
+(OC-T-0111). On Linux ARG_MAX is a quarter of the stack limit, 2 MiB at the default
+8 MiB stack, so the bound is 1 MiB there and the other half is left to the options
+and the environment; a stack limit under 4 MiB lowers the bound with it. The
+environment's own size is not subtracted. Where getconf is missing or prints no
+number, the bound is 1048576. A batch that the kernel still refuses (E2BIG, status
+126) is an error that holds both stamps.
 All scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
 An earlier batch error cannot be erased by a later clean batch. The batch merge
 reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`

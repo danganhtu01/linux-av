@@ -2268,6 +2268,7 @@ STUB
 #   3955-byte names of 1980 characters cost 3964: 265 fill a run (264 reach 1046496). Counted as characters, 528 would.
 #   260 short names fit one run, where d158e91's limit of 128 names made three.
 # The names come through a find stub, so no file system holds them; the scanner stub counts the names of each run.
+# This PATH holds no getconf, so the bound is the 1 MiB that OC-T-0111's rows below lower or keep by what getconf says.
 row_scan_changed_odd_batches() {
     changed_fixture
     local LC_ALL=C pad name first second shape count want edge i
@@ -2304,6 +2305,91 @@ STUB
         assert_scan_arg "$second"
         assert_scan_arg "$name"
     done
+}
+# OC-T-0111: a run takes the smaller of 1 MiB and half of getconf's ARG_MAX, a quarter of the stack limit, which is what the
+# kernel lets one exec carry. Where the stack is under 4 MiB, 1 MiB of argv is E2BIG (126). The getconf stub prints what $D/getconf
+# holds (and exits 1 where there is no such file), and the scanner stub does what the kernel does, with the same limit: it
+# refuses an argv of that many bytes (each argument's bytes, NUL and pointer) with 126. Every case splits 4009-byte names:
+#   stack4     ARG_MAX 1 MiB (a 4 MiB stack): half is 524288, so 131 names fill a run (130 reach 521170)
+#   stack8     2 MiB, the default: half is the 1 MiB cap, 262 names
+#   stack32    8 MiB: half would be 4 MiB, and the cap holds at 1 MiB
+#   stack_min  128 KiB, the least the kernel allows: half is 65536, so 17 names (16 reach 64144)
+#   garbage, empty, failed, absent   getconf gives no number: the 1 MiB it falls back to
+# and getconf's stderr never reaches the output, whether the tool is missing or fails.
+row_scan_changed_odd_batches_arg_max() {
+    changed_fixture
+    local LC_ALL=C pad i spec value limit count want
+    printf -v pad '%3995s' ''; pad=${pad// /x}
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+export LC_ALL=C
+d=${SCAN_ARGS%/*}
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0; bytes=0
+for arg in "$@"; do bytes=$((bytes + ${#arg} + 9)); case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "$d/sizes"
+[ "$bytes" -lt "$(cat "$d/exec-limit")" ] || exit 126
+STUB
+    stub getconf <<'STUB'
+cat "${SCAN_ARGS%/*}/getconf"
+STUB
+    SCAN_ENV=(LC_ALL=C.utf8)
+    for spec in stack4 stack8 stack32 stack_min garbage empty failed absent; do
+        changed_seed
+        : > "$D/walk"; : > "$D/sizes"; : > "$CALLS"; rm -f "$D/getconf"
+        value=''; limit=2097152; count=540; want='262 262 16'
+        case $spec in
+            stack4) value=1048576; limit=$value; want='131 131 131 131 16' ;;
+            stack8) value=2097152 ;;
+            stack32) value=8388608; limit=$value ;;
+            stack_min) value=131072; limit=$value; count=40; want='17 17 6' ;;
+            garbage) value=undefined ;;
+        esac
+        # failed leaves no file for the stub to print, and absent is the last case, so no stub is left for it.
+        case $spec in
+            failed) : ;;
+            absent) unstub getconf ;;
+            *) printf '%s\n' "$value" > "$D/getconf" ;;
+        esac
+        printf '%s\n' "$limit" > "$D/exec-limit"
+        for ((i=0; i<count; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$spec: every batch fits the exec limit"
+        assert_eq "$(tr '\n' ' ' < "$D/sizes")" "$want " "$spec: names in each run"
+        assert_lacks "$OUT" 'getconf' "$spec: getconf's own errors stay out of the output"
+        if [ "$spec" = absent ]; then assert_lacks "$(calls)" 'getconf' 'absent: nothing stands in for getconf'
+        else assert_has "$(calls)" 'getconf ARG_MAX' "$spec: the worker asks for ARG_MAX"; fi
+    done
+}
+# OC-T-0111, on the kernel itself: a soft stack limit of 4 MiB makes the kernel's exec limit 1 MiB (a quarter), and the real getconf
+# says so. The old bound let a run reach 1 MiB of argv, and its exec failed with E2BIG (126); now each run is half of that.
+# The names are 4000 bytes: 131 fill a run (524288 is reached by the 131st), and 300 names make 131, 131 and 38.
+row_scan_changed_odd_batches_small_stack() {
+    changed_fixture
+    local LC_ALL=C pad i saved
+    printf -v pad '%3995s' ''; pad=${pad// /x}
+    ln -s "$(command -v getconf)" "$B/getconf" || { fail 'the host has no getconf'; return; }
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0
+for arg in "$@"; do case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "${SCAN_ARGS%/*}/sizes"
+STUB
+    : > "$D/walk"; : > "$D/sizes"
+    for ((i=0; i<300; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+    SCAN_ENV=(LC_ALL=C.utf8)
+    saved=$(ulimit -S -s)
+    ulimit -S -s 4096 || { fail 'cannot lower the soft stack limit'; return; }
+    scan --changed --path "$D/tree"
+    ulimit -S -s "$saved"
+    assert_eq "$RC" 0 'no run of the 4 MiB stack fails to exec'
+    assert_lacks "$OUT" 'Argument list too long' 'the kernel refused no run'
+    assert_eq "$(tr '\n' ' ' < "$D/sizes")" '131 131 38 ' 'names in each run'
 }
 # OC-T-0081 (FAULT-0019): a changed scan with odd names runs the scanner more than once, and each run has an output of
 # its own and a status of its own. batch_run K STATUS ERRORS [GONE...] writes run K's output as clamscan 1.5.4 prints

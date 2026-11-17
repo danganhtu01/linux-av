@@ -13,7 +13,11 @@
 #   /etc/systemd/system/linux-av-scan.service.d/limits.conf   0644  MemoryHigh/MemoryMax
 #   /etc/systemd/system/linux-av-scan.service.d/30-time-limit.conf   0644  TimeoutStartSec=12h30min
 #   /etc/needrestart/conf.d/linux-av.conf   0644  needrestart never restarts linux-av-* (a restart waits for a whole scan)
-# Then systemctl daemon-reload. It starts, stops, enables and disables nothing.
+# What it reads and never writes (OC-T-0083):
+#   /etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf   the scan's only CPUQuota= and CPUWeight=; it must be
+#   a regular file (not a link), owned by root, not group- or other-writable, with both lines set, or nothing is installed
+# Then systemctl daemon-reload, and a read-back of the unit's TimeoutStartUSec, CPUQuotaPerSecUSec, CPUWeight, MemoryHigh and
+# MemoryMax. It starts, stops, enables and disables nothing.
 # A second run writes the same bytes and keeps the first backups.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -44,6 +48,18 @@ keep() {
   cp -p -- "$1" "$1.before-R-3377" || die "could not keep $1.before-R-3377"
   echo "kept: $1.before-R-3377"
 }
+# OC-T-0083: the CPU bounds of linux-av-scan.service are in OVH's R-3377-cpu-cap.conf and nowhere this script writes (limits.conf
+# holds memory only). If that drop-in is gone or edited, the scan falls back to the base unit's CPU bounds without a word, so
+# refuse before anything is rendered, kept or put: it must be a regular file and not a link, owned by root, not writable by
+# group or others (the folder is already root-only), and set CPUQuota= and CPUWeight= to a value (an empty one resets it).
+cap=/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf
+[ ! -L "$cap" ] || die "$cap is a link; nothing was installed"
+[ -f "$cap" ] || die "$cap is missing or not a regular file; nothing was installed"
+perm=$(stat -c '%u %A' "$cap")
+[ "${perm%% *}" = 0 ] || die "$cap is not owned by root (uid ${perm%% *}); nothing was installed"
+case ${perm#* } in ?????[!w]??[!w]?) ;; *) die "$cap is writable by group or others (${perm#* }); nothing was installed" ;; esac
+grep -q '^CPUQuota=[[:space:]]*[^[:space:]]' "$cap" || die "$cap has no CPUQuota= line with a value; nothing was installed"
+grep -q '^CPUWeight=[[:space:]]*[^[:space:]]' "$cap" || die "$cap has no CPUWeight= line with a value; nothing was installed"
 # OC-T-0067: everything is rendered and checked in $t first, and only then is anything kept or put, so a failure
 # while preparing changes nothing installed (run card 23989 replaced av-scan and common.sh, then stopped).
 t=$(mktemp -d /run/linux-av-root-install.XXXXXXXX)
@@ -79,5 +95,7 @@ systemctl daemon-reload
 echo "read back:"
 sha256sum "$dst/bin/av-scan" "$dst/lib/common.sh" /etc/systemd/system/linux-av-scan.service.d/limits.conf
 echo "TimeoutStartUSec=$(systemctl show linux-av-scan.service -p TimeoutStartUSec --value)"
+# OC-T-0083: the effective bounds as systemd now holds them (CPU from R-3377-cpu-cap.conf, memory from limits.conf), one Name=value per line.
+systemctl show linux-av-scan.service -p CPUQuotaPerSecUSec -p CPUWeight -p MemoryHigh -p MemoryMax
 echo "timer: $(systemctl is-active linux-av-scan.timer 2>/dev/null) (this card leaves it as it was)"
 echo "root-install: done"

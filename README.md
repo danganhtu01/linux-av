@@ -222,6 +222,14 @@ path the new code reads or edits under `/etc` and `/var`; the rows point it at a
 put stubs for `systemctl`, `systemd-run`, `rkhunter`, `aideinit`, `aide` and `id` first on a
 `PATH` that holds nothing else.
 
+The rows named `guard_*` (OC-T-0037: `bin/av-guard`, `root-install-guard.sh`) make real root-owned and
+uid-1000-owned fixtures with `chown`, so they run only as root, in a throwaway container; as any other user they
+print `skip` and the summary counts them. Run them as root by name
+(`tests/run.sh $(grep -o '^row_guard[a-z_]*' tests/run.sh | sed 's/^row_//')`). `tests/mutants.sh` runs the mutants named
+`guard_*` only as root and every other mutant only as another user, so run it once as each. Neither file has a hook for
+the tests: the guard runs as a copy whose `base=` line names the scratch root, and the installer as a copy whose
+`base=`, `PATH=` and pin lines differ; a row proves each copy differs by those lines alone.
+
 ### Real-time (on-access) scanning — optional
 ```bash
 av-setup onaccess   # appends OnAccess* to /etc/clamav/clamd.conf, enables clamav-clamonacc
@@ -562,6 +570,39 @@ now holds for the scan.
 The installer never enables, starts or restarts
 units and leaves the timer state alone (R-3377). Starting remains a separate
 card; do not restart the scan as part of this build or install.
+
+**The guard on OVH's two root units (OC-T-0037).** `linux-av-scan.service` and `linux-av-rootkit.service` run as
+root, so they must never run or source a file a user can change. OVH's drop-in `root-owned.conf` already points
+`ExecStart` at the root-owned copy in `/usr/local/lib/linux-av`, but the base unit files still named
+`/usr/local/bin/av-scan`, a link into a checkout a user can write (losing the drop-in fell back to it), and nothing
+checked ownership at start. `root-install-guard.sh` closes both, run as root by `/usr/local/sbin/ovh-root-run` from a
+run card. Its one `# sha256` line pins `bin/av-guard`; the runner checks it, and so does the installer, before it writes
+anything.
+
+- `bin/av-guard` is installed root:root 0755 as `/usr/local/lib/linux-av/bin/av-guard` and run as `ExecStartPre=` by a
+  new drop-in, `05-guard.conf`, in each unit's `.d` folder. It prints one line, `av-guard: <path>: <reason>`, and exits
+  1 (the unit fails to start) unless every component from `/` down to each target is not a link, is owned by uid 0 and
+  is not writable by group or others. The targets are: the guard itself; `bin/av-scan` and `lib/common.sh` of the
+  installed copy; each config file `av-scan` would source, if it exists (`/etc/linux-av/av.env`,
+  `/root/.config/linux-av/av.env`, `/usr/local/lib/linux-av/config/av.env`; a missing one is allowed, but the folders
+  above it that exist are still checked, so nobody else can create it); both unit files in `/etc/systemd/system`; and
+  both drop-in folders with every entry in them (dot files and links too; a folder inside is checked, not entered,
+  because systemd reads only the files directly in a drop-in folder). Any other missing target refuses. It reads no
+  argument, file or environment variable and sets its own `PATH`; names with spaces or newlines are safe (a newline
+  shows as `\n` so the refusal stays one line). It does not check ACLs or extended attributes, or units under `/run`
+  and `/usr/lib` (only root writes there).
+- The installer rewrites each base unit file so `ExecStart` names `/usr/local/lib/linux-av/bin/av-scan --now`
+  (`--rootkit` for the rootkit unit), changing no other byte; the old file is kept once as
+  `<unit>.before-OC-T-0037`. `root-owned.conf` and the `/usr/local/bin/av-scan` link stay as they are, and
+  `bin/av-scan` and `lib/common.sh` do not change.
+- It refuses, writing nothing, if its pin does not match; if the folders it writes into (`/usr/local/lib`,
+  `/usr/local/lib/linux-av`, its `bin`, `/etc/systemd/system` and both drop-in folders) or the two unit files are
+  links, are not owned by root or are group- or other-writable; if a file it would write is a link or not a regular
+  file; or if a unit's `ExecStart=` line is not the old line or the new one. Then `systemctl daemon-reload`; a
+  read-back of `ExecStartPre` and `ExecStart` of both units, refused unless systemd holds the guard (errors not
+  ignored) and `av-scan` with its argument; and one run of the installed guard, so the card shows at once whether this
+  host passes it. It starts, stops, enables, disables and restarts nothing, and a second run writes the same bytes and
+  keeps the first backups.
 
 `av-scan --render-scan-limits` renders that drop-in without installing or
 activating anything. It shares memory defaults/validation with `--install-timer`

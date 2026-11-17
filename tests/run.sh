@@ -1880,6 +1880,234 @@ row_scan_vanished_noncanonical() {
     scan --path "$D/kept"; assert_eq "$RC" 2 "a // spelling is refused"
     assert_lacks "$(calls)" 'timeout -s KILL' "no probe for a non-canonical path"
 }
+
+# OC-T-0118: the vanished-file pair. A listed file that is gone before clamscan 1.5.4 reaches it prints two adjacent lines,
+# "PATH: No such file or directory" and "WARNING: PATH: Can't access file", and no Total errors line counts it (probed on corsair
+# 2026-11-18 with av-scan's flags, stderr merged); the old form "WARNING: Can't open file PATH: No such file or directory" is still
+# counted. vanished_pairs, defined with batch_run, prints the pair lines; scan_vanished_tail ends a run with the summary, with a
+# Total errors line only when it is given a number (a run of pairs alone has none).
+# Each row below holds a defect beside valid entries, so that it goes red through one guard only.
+scan_vanished_pairs_fixture() { # PATH...: a run that lists these as pairs and prints nothing else yet
+    scan_vanished_fixture
+    vanished_pairs "$@" > "$D/output"
+}
+scan_vanished_tail() { # [TOTAL]
+    printf '\n----------- SCAN SUMMARY -----------\nKnown viruses: 3628245\nEngine version: 1.5.4\nScanned directories: 1\nScanned files: 3\nInfected files: 0\n' >> "$D/output"
+    [ "${1:-0}" = 0 ] || printf 'Total errors: %s\n' "$1" >> "$D/output"
+    printf 'Data scanned: 0.00 MiB\nData read: 0.00 MiB (ratio 0.00:1)\nTime: 0.100 sec (0 m 0 s)\nStart Date: 2026:11:18 01:00:00\nEnd Date:   2026:11:18 01:00:00\n' >> "$D/output"
+}
+scan_vanished_forgiven() { # LABEL COUNT
+    scan_vanished_check
+    assert_eq "$RC" 0 "$1: forgiven"
+    assert_has "$OUT" "scan finished; $2 file(s) vanished while it ran (not scanned), no other errors" "$1: counted"
+    assert_has "$OUT" "$(cat "$D/output")" "$1: scanner output unchanged and ordered"
+    assert_nofile "$H/state/linux-av/last-good-scan.stamp" "$1: forgiven error keeps good stamp absent"
+    assert_nofile "$H/state/linux-av/last-full-scan.stamp" "$1: forgiven error keeps full stamp absent"
+}
+scan_vanished_unforgiven() { # LABEL
+    scan_vanished_check
+    assert_eq "$RC" 2 "$1: the error stays"
+    assert_lacks "$OUT" 'vanished while it ran' "$1: nothing is forgiven"
+    assert_lacks "$OUT" 'THREATS FOUND' "$1: no alert"
+    assert_nofile "$H/state/linux-av/last-good-scan.stamp" "$1: good stamp held"
+    assert_nofile "$H/state/linux-av/last-full-scan.stamp" "$1: full stamp held"
+}
+row_scan_vanished_pair_only() {
+    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    scan_vanished_forgiven "one pair" 1
+}
+row_scan_vanished_pair_many() {
+    scan_vanished_fixture; : > "$D/output"
+    local n
+    for ((n=1; n<=21; n++)); do vanished_pairs "$D/gone$n" >> "$D/output"; done
+    scan_vanished_tail
+    scan_vanished_forgiven "21 pairs" 21
+}
+row_scan_vanished_pair_mixed() {
+    scan_vanished_fixture; : > "$D/output"
+    vanished_pairs "$D/gone1" >> "$D/output"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone2" >> "$D/output"
+    vanished_pairs "$D/gone3" "$D/gone4" >> "$D/output"
+    printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone5" >> "$D/output"
+    scan_vanished_tail 2
+    scan_vanished_forgiven "3 pairs among 2 old-form warnings, Total errors 2" 5
+}
+row_scan_vanished_pair_folder_gone() {
+    scan_vanished_pairs_fixture "$D/nodir/sub/gone" "$D/nodir/gone"; scan_vanished_tail
+    scan_vanished_forgiven "pairs whose folders are gone too" 2
+}
+# Names with [ * ? and a backslash are paths, never patterns: truly absent they are forgiven, with files beside them that a glob or
+# a regular expression made of the name would match; a second line that names such a file is another path (below).
+row_scan_vanished_pair_pattern_names() {
+    scan_vanished_fixture
+    touch "$D/g1" "$D/aa" "$D/b" "$D/bx" "$D/c.d" "$D/e" "$D/ex"
+    vanished_pairs "$D/g[12]" "$D/a*" "$D/b?" "$D/c\\.d" "$D/e*[x]?\\" > "$D/output"; scan_vanished_tail
+    scan_vanished_forgiven "names with [ * ? and a backslash" 5
+}
+row_scan_vanished_pair_pattern_other() {
+    scan_vanished_fixture
+    local spec p q
+    for spec in 'g[12]:g1' 'a*:aa' 'b?:bx' 'b?:b' 'c\.d:c.d' 'e*:e'; do
+        p="$D/${spec%%:*}"; q="$D/${spec#*:}"
+        touch "$q"
+        printf "%s: No such file or directory\nWARNING: %s: Can't access file\n" "$p" "$q" > "$D/output"; scan_vanished_tail
+        scan_vanished_unforgiven "line 1 names $p, line 2 names $q"
+    done
+}
+row_scan_vanished_pair_first_alone() {
+    scan_vanished_fixture
+    local after total
+    for after in blank oldform; do
+        vanished_pairs "$D/gone1" > "$D/output"
+        printf '%s: No such file or directory\n' "$D/gone2" >> "$D/output"
+        total=0
+        if [ "$after" = oldform ]; then
+            printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone3" >> "$D/output"; total=1
+        fi
+        scan_vanished_tail "$total"
+        scan_vanished_unforgiven "a first line alone, then $after"
+    done
+}
+row_scan_vanished_pair_first_last() {
+    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    printf '%s: No such file or directory\n' "$D/gone2" >> "$D/output"
+    scan_vanished_unforgiven "a first line that is the last line"
+}
+row_scan_vanished_pair_second_alone() {
+    scan_vanished_fixture
+    local where
+    for where in after_pair first; do
+        : > "$D/output"
+        case $where in
+            after_pair) vanished_pairs "$D/gone1" >> "$D/output"; printf "WARNING: %s: Can't access file\n" "$D/gone2" >> "$D/output" ;;
+            first) printf "WARNING: %s: Can't access file\n" "$D/gone2" >> "$D/output"; vanished_pairs "$D/gone1" >> "$D/output" ;;
+        esac
+        scan_vanished_tail
+        scan_vanished_unforgiven "a second line alone, $where"
+    done
+}
+# A blank line is otherwise allowed, and an old-form warning is a whole entry: neither may sit between the two lines.
+row_scan_vanished_pair_line_between() {
+    scan_vanished_fixture
+    local between total
+    for between in blank oldform other; do
+        vanished_pairs "$D/gone1" > "$D/output"
+        printf '%s: No such file or directory\n' "$D/gone2" >> "$D/output"
+        total=0
+        case $between in
+            blank) printf '\n' >> "$D/output" ;;
+            oldform) printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone3" >> "$D/output"; total=1 ;;
+            other) printf '%s: No such file or directory\n' "$D/gone4" >> "$D/output" ;;
+        esac
+        printf "WARNING: %s: Can't access file\n" "$D/gone2" >> "$D/output"
+        scan_vanished_tail "$total"
+        scan_vanished_unforgiven "a $between line between the two lines"
+    done
+}
+row_scan_vanished_pair_different_paths() {
+    scan_vanished_pairs_fixture "$D/gone1"
+    printf "%s: No such file or directory\nWARNING: %s: Can't access file\n" "$D/gone2" "$D/gone3" >> "$D/output"
+    scan_vanished_tail
+    scan_vanished_unforgiven "a pair naming two paths, both absent and under the kept path"
+}
+row_scan_vanished_pair_exists() {
+    scan_vanished_pairs_fixture "$D/gone1" "$D/gone2"; scan_vanished_tail
+    touch "$D/gone2"
+    scan_vanished_unforgiven "a pair whose path exists"
+}
+row_scan_vanished_pair_reappeared() {
+    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" > "$SCAN_ARGS"
+cat "$OUTPUT"
+: > "$BACK"
+exit "$SCAN_RC"
+STUB
+    SCAN_ENV+=("BACK=$D/gone1")
+    scan_vanished_unforgiven "a path that is back after the scan printed it"
+    assert_file "$D/gone1" "the stub put the path back, after printing it"
+}
+row_scan_vanished_pair_total_higher() {
+    scan_vanished_fixture
+    local shape total
+    for shape in one_pair two_pairs mixed; do
+        case $shape in
+            one_pair) vanished_pairs "$D/gone1" > "$D/output"; total=1 ;;
+            two_pairs) vanished_pairs "$D/gone1" "$D/gone2" > "$D/output"; total=2 ;;
+            mixed) vanished_pairs "$D/gone1" > "$D/output"
+                printf "WARNING: Can't open file %s: No such file or directory\n" "$D/gone2" >> "$D/output"; total=2 ;;
+        esac
+        scan_vanished_tail "$total"
+        scan_vanished_unforgiven "Total errors $total over $shape, whose old-form warnings are fewer"
+    done
+}
+row_scan_vanished_pair_outside_paths() {
+    scan_vanished_pairs_fixture "$D/gone1" /nonexistent-outside-scan; scan_vanished_tail
+    scan_vanished_unforgiven "a pair outside the kept scan paths"
+}
+row_scan_vanished_pair_skipped_mount() {
+    scan_vanished_fixture; mkdir -p "$D/kept/m"
+    mount_entry "$D/kept/m" fuse.sshfs
+    printf 'exec %q "$@"\n' "$TIMEOUT_BIN" | stub timeout
+    vanished_pairs "$D/kept/m/gone" > "$D/output"; scan_vanished_tail
+    scan --path "$D/kept"; assert_eq "$RC" 2 "no probe below a skipped mount"
+    assert_lacks "$(calls)" 'timeout -s KILL' "probe not started below a skipped mount"
+}
+row_scan_vanished_pair_noncanonical() {
+    scan_vanished_fixture; mkdir -p "$D/kept/m" "$D/outside"
+    mount_entry "$D/kept/m" fuse.sshfs
+    printf 'exec %q "$@"\n' "$TIMEOUT_BIN" | stub timeout
+    local path
+    for path in "$D/kept/./m/gone" "$D/kept//m/gone" "$D/kept/../outside/gone"; do
+        vanished_pairs "$path" > "$D/output"; scan_vanished_tail
+        scan --path "$D/kept"; assert_eq "$RC" 2 "a pair path spelled $path is refused"
+    done
+    assert_lacks "$(calls)" 'timeout -s KILL' "no probe for a non-canonical path"
+}
+row_scan_vanished_pair_symlink_component() {
+    scan_vanished_fixture; mkdir -p "$D/kept" "$D/outside"
+    ln -s "$D/outside" "$D/kept/d"
+    vanished_pairs "$D/kept/d/gone" > "$D/output"; scan_vanished_tail
+    scan --path "$D/kept"; assert_eq "$RC" 2 "probe refuses a symlinked component of a pair path"
+}
+row_scan_vanished_pair_unsearchable() {
+    scan_vanished_fixture; mkdir "$D/locked"; touch "$D/locked/present"
+    vanished_pairs "$D/locked/present" > "$D/output"; scan_vanished_tail
+    chmod 000 "$D/locked"
+    scan_vanished_unforgiven "an unsearchable parent cannot prove a pair path absent"
+    chmod 700 "$D/locked"
+}
+# A name with a newline splits both lines of its pair, so no line pairs with another and each is an unknown line: the run stays an
+# error (the same residual as the old form's, MASTER.md).
+row_scan_vanished_pair_newline() {
+    scan_vanished_pairs_fixture "$D/gone1"
+    printf "%s\n%s: No such file or directory\nWARNING: %s\n%s: Can't access file\n" "$D/line" 'break' "$D/line" 'break' >> "$D/output"
+    scan_vanished_tail
+    scan_vanished_unforgiven "a gone name with a newline"
+}
+row_scan_vanished_pair_after_summary() {
+    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    vanished_pairs "$D/gone2" >> "$D/output"
+    scan_vanished_unforgiven "a pair after the summary"
+}
+row_scan_vanished_pair_documented() {
+    assert_has "$(cat "$REPO/MASTER.md")" 'Residual of the pair (OC-T-0118): a gone name that holds a newline splits both lines of its pair at the newline, so no line pairs with another and the run keeps its error, as the old form does. A pair is counted in no total, so it cannot offset an error that ClamAV counts, and every pair in a forgiven run is a path the probe found absent. What a pair could still hide is an exit 2 that prints neither a line nor a count; none is known beside the gone path itself.' "pair residual documented verbatim"
+    assert_has "$(cat "$REPO/README.md")" 'A pair offsets no error: only old-form warnings count against' "README says what a pair counts for"
+}
+# Status 1 alerts as before: the pair forgives nothing. What a status 1 run does to the stamps is not this row's to change; the
+# note below says what it does with a pair and no Total errors line (a threat plus a vanished file counted in Total errors holds them).
+row_scan_vanished_pair_threat() {
+    scan_vanished_pairs_fixture "$D/gone1"; scan_vanished_tail
+    SCAN_ENV+=(SCAN_RC=1 "AV_ON_FOUND=touch '$D/found'")
+    scan_vanished_check
+    assert_eq "$RC" 1 "threat exit"
+    assert_has "$OUT" 'THREATS FOUND' "threat warning"
+    assert_file "$D/found" "AV_ON_FOUND runs"
+    assert_lacks "$OUT" 'vanished while it ran' "a threat forgives nothing"
+    printf '  note %s: status 1 with a pair and no Total errors: good stamp %s, full stamp %s\n' "$ROW" \
+        "$([ -e "$H/state/linux-av/last-good-scan.stamp" ] && echo advanced || echo held)" \
+        "$([ -e "$H/state/linux-av/last-full-scan.stamp" ] && echo advanced || echo held)"
+}
 row_installer_hash_lines() {
     local line hash path count=0 actual
     while IFS= read -r line; do
@@ -2401,10 +2629,33 @@ batch_run() {
     shift 3
     : > "$D/out.$k"
     for gone; do printf "WARNING: Can't open file %s: No such file or directory\n" "$gone" >> "$D/out.$k"; done
+    batch_summary "$k" "$status" "$errors"
+}
+batch_summary() { # K STATUS ERRORS: the summary of run K and its status
+    local k="$1" status="$2" errors="$3"
     printf '\n----------- SCAN SUMMARY -----------\nKnown viruses: 3628245\nEngine version: 1.5.4\nScanned directories: 1\nScanned files: 3\nInfected files: 0\n' >> "$D/out.$k"
     [ "$errors" = 0 ] || printf 'Total errors: %s\n' "$errors" >> "$D/out.$k"
     printf 'Data scanned: 0.00 MiB\nData read: 0.00 MiB (ratio 0.00:1)\nTime: 0.100 sec (0 m 0 s)\nStart Date: 2026:11:17 19:00:00\nEnd Date:   2026:11:17 19:00:00\n' >> "$D/out.$k"
     printf '%s\n' "$status" > "$D/status.$k"
+}
+# OC-T-0118: batch_gone K STATUS ERRORS ENTRY... is batch_run with entries of both forms. An ENTRY is old:PATH, the warning that
+# is counted in Total errors, or pair:PATH, the two adjacent lines clamscan 1.5.4 prints for a file that is gone before it
+# reaches it (probed on corsair 2026-11-18, av-scan's flags, stderr merged), which no Total errors counts.
+batch_gone() {
+    local k="$1" status="$2" errors="$3" entry
+    shift 3
+    : > "$D/out.$k"
+    for entry; do
+        case $entry in
+            old:*) printf "WARNING: Can't open file %s: No such file or directory\n" "${entry#old:}" >> "$D/out.$k" ;;
+            pair:*) vanished_pairs "${entry#pair:}" >> "$D/out.$k" ;;
+        esac
+    done
+    batch_summary "$k" "$status" "$errors"
+}
+vanished_pairs() { # PATH...: each as a listed file that is gone before its lstat is printed by clamscan 1.5.4
+    local gone
+    for gone; do printf "%s: No such file or directory\nWARNING: %s: Can't access file\n" "$gone" "$gone"; done
 }
 batch_fixture() {
     changed_fixture; changed_seed
@@ -2464,8 +2715,9 @@ row_scan_changed_batch_worker_line() {
 }
 # Each case holds a run of status 2 with a vanished file (forgiven alone) beside a second run with something else
 # wrong, and nothing is forgiven: the error stays at status 2, the log says the batch failed, the stamps stay.
-#   offset      the totals add up (2 and 2) but not run by run (a total of 1 for 2 warnings, then 1 for none)
-#   unexplained a run of status 2 whose summary lists no error
+#   offset      the totals add up (3 and 3) but not run by run (a total of 1 for 2 warnings, then 2 for 1; a run
+#               with no entry at all is bad by itself since OC-T-0118, so run 2 lists one and its total is what is wrong)
+#   unexplained a run of status 2 whose summary lists no error and no entry
 #   hard        the second run failed outright (137) after printing a clean summary; the merged status keeps the 2
 #   text        a run prints a line the whitelist does not know
 #   stderr      the line is on the run's stderr
@@ -2480,7 +2732,7 @@ row_scan_changed_batch_errors() {
         batch_reset
         batch_run 1 2 1 "$gone-a"
         case $scenario in
-            offset) batch_run 1 2 1 "$gone-a" "$gone-b"; batch_run 2 2 1 ;;
+            offset) batch_run 1 2 1 "$gone-a" "$gone-b"; batch_run 2 2 2 "$gone-c" ;;
             unexplained) batch_run 2 2 0 ;;
             hard) batch_run 2 137 0 ;;
             text) batch_run 2 0 0; printf 'LibClamAV Warning: the database is old\n' >> "$D/out.2" ;;
@@ -2502,6 +2754,74 @@ STUB
         assert_eq "$RC" 2 "$scenario: the error stays"
         assert_lacks "$OUT" 'vanished while it ran' "$scenario: nothing is forgiven"
         # A run whose status is no number (x, a tee that failed) is read as a stop by no test of a number.
+        assert_lacks "$OUT" 'integer expression' "$scenario: every status is read as what it is"
+        assert_has "$(cat "$L/av-scan.log")" 'clamscan batch failed; stamps unchanged so the next run retries' "$scenario: the batch failure is logged"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
+    done
+}
+# OC-T-0118: vanished-file pairs in the runs of a changed scan, the ordinary --file-list run (run 1) and the argv batches that follow.
+# A run's Total errors counts its old-form warnings alone, so a run of pairs has none; the stamps stay where they were.
+#   listed  pairs in the file-list run, a clean batch after
+#   odd     a clean file-list run, pairs in the batch
+#   both    pairs in both runs, one of them with its folder gone too
+#   mixed   pairs among old-form warnings in both runs, each Total errors counting its old-form warnings alone
+#   many    the file-list run and two batches (262 and 38 names of 4000 bytes), pairs in both batches
+row_scan_changed_batch_pair_vanished() {
+    batch_fixture
+    local gone="$D/tree/gone" scenario count pad i
+    for scenario in listed odd both mixed many; do
+        batch_reset
+        case $scenario in
+            listed) batch_gone 1 2 0 "pair:$gone-a" "pair:$gone-b"; batch_gone 2 0 0; count=2 ;;
+            odd) batch_gone 1 0 0; batch_gone 2 2 0 "pair:$gone-a"; count=1 ;;
+            both) batch_gone 1 2 0 "pair:$gone-a"; batch_gone 2 2 0 "pair:$gone-b" "pair:$D/tree/folder/gone"; count=3 ;;
+            mixed)
+                batch_gone 1 2 1 "pair:$gone-a" "old:$gone-b" "pair:$gone-c"
+                batch_gone 2 2 2 "old:$gone-d" "pair:$gone-e" "old:$gone-f"; count=6 ;;
+            many)
+                stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+                printf '%s\0' "$D/tree/plain" > "$D/walk"
+                printf -v pad '%3995s' ''; pad=${pad// /x}
+                for ((i=0; i<300; i++)); do printf '/%04d%s\0' "$i" "$pad" >> "$D/walk"; done
+                batch_gone 1 0 0; batch_gone 2 2 0 "pair:$gone-a" "pair:$gone-b"; batch_gone 3 2 0 "pair:$gone-c"; count=3 ;;
+        esac
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$scenario: pairs in several runs are forgiven"
+        assert_has "$OUT" "scan finished; $count file(s) vanished while it ran (not scanned), no other errors" "$scenario: the vanished files are counted"
+        assert_has "$OUT" "WARNING: $gone-a: Can't access file" "$scenario: the pair lines reach the output"
+        assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"
+        assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
+    done
+}
+# Each case holds a run with a pair (forgiven alone) beside a second run with something else wrong, and nothing is forgiven:
+#   empty_run     run 2 returned 2 with a clean summary, no entry and no total: a run of status 2 owes an entry
+#   clean_pair    run 2 returned 0 and lists a pair
+#   total_hidden  run 2 has one pair and Total errors 1, as an unreadable file behind it prints: the pair offsets nothing
+#   total_pairs   run 2 has two pairs and Total errors 2, as if a pair were counted
+#   straddle      run 1 ends with a pair's first line and run 2 begins with its second line: no pair crosses two runs
+row_scan_changed_batch_pair_errors() {
+    batch_fixture
+    local gone="$D/tree/gone" scenario
+    for scenario in empty_run clean_pair total_hidden total_pairs straddle; do
+        batch_reset
+        batch_gone 1 2 0 "pair:$gone-a"
+        case $scenario in
+            empty_run) batch_gone 2 2 0 ;;
+            clean_pair) batch_gone 2 0 0 "pair:$gone-b" ;;
+            total_hidden) batch_gone 2 2 1 "pair:$gone-b" ;;
+            total_pairs) batch_gone 2 2 2 "pair:$gone-b" "pair:$gone-c" ;;
+            straddle)
+                printf '%s: No such file or directory\n' "$gone-b" >> "$D/out.1"
+                batch_gone 2 2 0 "pair:$gone-c"
+                { printf "WARNING: %s: Can't access file\n" "$gone-b"; cat "$D/out.2"; } > "$D/out.2.new"
+                mv "$D/out.2.new" "$D/out.2" ;;
+        esac
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 2 "$scenario: the error stays"
+        assert_lacks "$OUT" 'vanished while it ran' "$scenario: nothing is forgiven"
         assert_lacks "$OUT" 'integer expression' "$scenario: every status is read as what it is"
         assert_has "$(cat "$L/av-scan.log")" 'clamscan batch failed; stamps unchanged so the next run retries' "$scenario: the batch failure is logged"
         assert_eq "$(stat -c %y "$L/last-good-scan.stamp")" "$(stat -c %y "$D/good-before")" "$scenario: good stamp kept"

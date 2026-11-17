@@ -258,9 +258,10 @@ run_clamscan_batches() {
 # Only the output copy, traps, pipe, and whitelist need a subshell.
 run_clamscan_checked() (
     local copy_dir copy resolved line p root matched kind probed rc=0
-    local escaped char i n count=0 run_count=0 summary="" bad=0 headers=0 total_seen=0 batched=0
+    local escaped char i n count=0 run_count=0 run_old=0 summary="" bad=0 headers=0 total_seen=0 batched=0 entry gone=""
     local -A detail_seen=()
     local warning_re="^WARNING: Can't open file (.+): No such file or directory$" summary_re="^Total errors: ([0-9]+)$" runs_re='^[02]( [02])*$'
+    local gone_re='^(/.+): No such file or directory$'
     local detail_re='^(Known viruses: [0-9]+|Engine version: [0-9][0-9.]*|Scanned directories: [0-9]+|Scanned files: [0-9]+|Infected files: 0|Data scanned: [0-9.]+ [KMGT]?i?B|Data read: [0-9.]+ [KMGT]?i?B \(ratio [0-9.]+:[0-9.]+\)|Time: [0-9.]+ sec \([0-9]+ m [0-9]+ s\)|Start Date: [0-9:]+ [0-9:]+|End Date: +[0-9:]+ [0-9:]+)$'
     copy_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/av-scan.XXXXXX")" || { log_err "cannot create scan output copy"; return 2; }
     trap 'rm -rf -- "$copy_dir"' EXIT
@@ -352,11 +353,21 @@ run_clamscan_checked() (
             for ((n=0; n<${#run_rcs[@]}; n++)); do copies+=("$copy_dir/run.$((n + 1))"); done
         fi
         for ((n=0; n<${#copies[@]}; n++)); do
-            headers=0; total_seen=0; summary=""; run_count=0; detail_seen=()
+            headers=0; total_seen=0; summary=""; run_count=0; run_old=0; gone=""; detail_seen=()
             while line=; IFS= read -r line || [ -n "$line" ]; do
-                if [[ $line =~ $warning_re ]]; then
+                entry=""
+                # OC-T-0118: clamscan 1.5.4 prints a listed file that is gone before its lstat as two adjacent lines,
+                # "<path>: No such file or directory" and "WARNING: <path>: Can't access file", with no Total errors
+                # count. The line right after the first (a blank one too) must be the second, with the same path,
+                # compared as a string and never as a pattern made from the path; any other line leaves the first
+                # alone. The second line has no branch of its own: alone, it is an unknown line.
+                if [ -n "$gone" ]; then
+                    if [ "$line" = "WARNING: $gone: Can't access file" ]; then entry=pair; p="$gone"; else bad=1; fi
+                    gone=""
+                fi
+                if [ -z "$entry" ] && [[ $line =~ $warning_re ]]; then entry=old; p="${BASH_REMATCH[1]}"; fi
+                if [ -n "$entry" ]; then
                     [ "$headers" = 0 ] || bad=1
-                    p="${BASH_REMATCH[1]}"
                     [[ $p = /* ]] || { bad=1; continue; }
                     matched=0
                     for root in "${paths[@]}"; do
@@ -374,7 +385,10 @@ run_clamscan_checked() (
                     [ "$matched" = 1 ] || { bad=1; continue; }
                     case "$p/" in */../*|*/./*|*//*) bad=1; continue ;; esac
                     count=$((count + 1)); run_count=$((run_count + 1))
+                    if [ "$entry" = old ]; then run_old=$((run_old + 1)); fi
                     printf '%s\0' "$p" >> "$copy_dir/vanished" || bad=1
+                elif [[ $line =~ $gone_re ]]; then
+                    gone="${BASH_REMATCH[1]}"
                 elif [ "$line" = '----------- SCAN SUMMARY -----------' ]; then
                     headers=$((headers + 1))
                     [ "$headers" = 1 ] || bad=1
@@ -395,12 +409,17 @@ run_clamscan_checked() (
                     bad=1
                 fi
             done < "${copies[n]}"
-            # Each copy holds one summary with its Infected line, and its total is the
-            # one its run's status promises: a run that returned 2 owes a positive total
-            # equal to its own vanished warnings, a run that returned 0 lists none.
+            # Each copy holds one summary with its Infected line, and its total is the one its run's
+            # status promises. A run that returned 2 owes at least one entry, of either form, and a
+            # Total errors that equals its old-form warnings alone (the line is absent when that is
+            # 0): clamscan counts a pair in no total, so a pair offsets no error, and an unreadable
+            # file hidden behind pairs raises the total above the old-form count. A run that
+            # returned 0 lists none and has no total. A first line still pending ends the run bad.
+            [ -z "$gone" ] || bad=1
             [ "$headers" = 1 ] && [ "${detail_seen[Infected files]:-0}" = 1 ] || bad=1
             if [ "${run_rcs[n]}" = 2 ]; then
-                [ "$total_seen" = 1 ] && [ -n "$summary" ] && [ "$summary" = "$run_count" ] || bad=1
+                [ "$run_count" -gt 0 ] || bad=1
+                [ "${summary:-0}" = "$run_old" ] || bad=1
             else
                 [ "$total_seen" = 0 ] && [ "$run_count" = 0 ] || bad=1
             fi

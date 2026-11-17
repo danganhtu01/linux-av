@@ -10,6 +10,10 @@
 # for systemctl, systemd-run, rkhunter, aideinit, aide, id (and mail/sendmail in the
 # rows that want a mailer). Nothing outside the scratch directory is read or written.
 #
+# The rows named guard_* (OC-T-0037: bin/av-guard and root-install-guard.sh) build root-owned and uid-1000-owned fixtures with
+# chown, so most of them run only as root, in a throwaway container. As any other user such a row prints "skip" and the summary
+# counts it as skipped; the gate runs them as root by name: tests/run.sh $(grep -o '^row_guard[a-z_]*' tests/run.sh | sed 's/^row_//').
+#
 # Environment:
 #   AV_REPO_UNDER_TEST  the checkout to test (default: the one this file is in);
 #                       tests/mutants.sh points it at a mutated copy
@@ -31,7 +35,7 @@ else
     echo "scratch kept: $WORK"
 fi
 
-PASS=0; FAIL=0; ROW=""; ROW_FAILED=0; D=""
+PASS=0; FAIL=0; SKIP=0; ROW=""; ROW_FAILED=0; ROW_SKIPPED=0; D=""
 
 fail() { printf '  FAIL %s: %s\n' "$ROW" "$*"; ROW_FAILED=1; }
 assert_eq() { [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"; }
@@ -3367,6 +3371,632 @@ row_scan_low_mutants() {
     done
     printf 'OC-T-0084 mutants: %d killed, %d survived\n' "$killed" "$survived"
 }
+# ---------------------------------------------------------------------------
+# OC-T-0037: bin/av-guard, the ExecStartPre= of OVH's two root units, and root-install-guard.sh, which installs it.
+# The guard refuses owners, and a scratch tree owned by this user is not root's, so these rows build real fixtures
+# (root-owned entries, and entries chowned to uid 1000) and run as root; the gate runs them as root in its container with
+# `tests/run.sh <the row names>`. As any other user a row prints "skip" and is counted as skipped, never as passed.
+# The guard runs as a copy whose one base= line names the scratch root (guard_copy_differs proves that); the installer runs as
+# a copy whose base=, PATH= and pin lines differ (guard_install_copy_differs). Neither the guard nor the installer reads
+# anything from the environment, so the production file has no hook for a test to use.
+# ---------------------------------------------------------------------------
+guard_root_only() {
+    [ "$(id -u)" = 0 ] && return 0
+    ROW_SKIPPED=1; return 1
+}
+
+# guard_unit_text scan|rootkit old|new: OVH's unit file as `cat` showed it on 2026-11-18; the old and new text differ in the
+# ExecStart line alone (the comment on the first line still names /usr/local/bin/av-scan, and an unanchored rewrite would change it).
+guard_unit_text() {
+    local exe=/usr/local/bin/av-scan
+    [ "$2" = new ] && exe=/usr/local/lib/linux-av/bin/av-scan
+    if [ "$1" = scan ]; then
+        cat <<EOF
+# Rendered by \`av-scan --install-timer\` (placeholders /usr/local/bin/av-scan / / filled in).
+# Installed to /etc/systemd/system/<AV_TIMER_NAME>.service on every distro
+# (Arch, Debian, Ubuntu all use systemd, so this file is identical everywhere).
+[Unit]
+Description=linux-av scheduled ClamAV scan
+Documentation=https://github.com/danganhtu01/linux-av
+After=clamav-daemon.service
+
+[Service]
+Type=oneshot
+# Runs as root so system paths are readable. AV_* env can be overridden in
+# /etc/linux-av/av.env (loaded by the script) or with systemd drop-ins.
+Environment=HOME=/root
+Environment=AV_COLOR=never
+Environment=AV_LOG_DIR=/var/log/linux-av
+Environment=AV_SCAN_PATHS=/
+ExecStart=$exe --now
+Nice=10
+IOSchedulingClass=idle
+EOF
+    else
+        cat <<EOF
+# Rendered by \`av-scan --install-rootkit-timer\` (placeholder /usr/local/bin/av-scan filled in).
+# Installed to /etc/systemd/system/<AV_ROOTKIT_TIMER_NAME>.service. Driven by the
+# generic av-scan.timer. Identical on Arch/Debian/Ubuntu (all use systemd).
+[Unit]
+Description=linux-av scheduled rootkit scan (rkhunter + chkrootkit)
+Documentation=https://github.com/danganhtu01/linux-av
+
+[Service]
+Type=oneshot
+# Runs as root; rootkit scanners need to read system files. AV_* overridable via
+# /etc/linux-av/av.env.
+Environment=HOME=/root
+Environment=AV_COLOR=never
+Environment=AV_LOG_DIR=/var/log/linux-av
+ExecStart=$exe --rootkit
+Nice=15
+IOSchedulingClass=idle
+EOF
+    fi
+}
+
+# guard_copy_guard ROOT DEST: the test copy of bin/av-guard, its base= line naming ROOT (quoted, so a space is safe).
+guard_copy_guard() { sed "s|^base=\$|base='$1'|" "$REPO/bin/av-guard" > "$2"; }
+
+# guard_fixture [installed|preinstall] [ROOTNAME]: sets D, R (the scratch root, the guard's base) and G (the guard's path in it),
+# and starts over each time it is called. Every entry is owned by root and is 0755 (folders, av-scan, av-guard), 0644 or, for
+# R/root, 0700. installed: OVH as the guard expects it, with all three config files; preinstall: OVH before this card (no
+# guard, no 05-guard.conf, the old unit files).
+guard_fixture() {
+    local state="${1:-installed}" name="${2:-root}" x u l
+    umask 022
+    D="$WORK/$ROW"; R="$D/$name"
+    case $D in "$WORK"/?*) rm -rf -- "$D" ;; *) fail "the scratch folder $D is not under $WORK"; return 1 ;; esac
+    l="$R/usr/local/lib/linux-av"; u="$R/etc/systemd/system"; G="$l/bin/av-guard"
+    mkdir -p "$l/bin" "$l/lib" "$l/config" "$R/etc/linux-av" "$R/root/.config/linux-av" \
+        "$u/linux-av-scan.service.d" "$u/linux-av-rootkit.service.d"
+    chmod 0700 "$R/root"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$l/bin/av-scan"; chmod 0755 "$l/bin/av-scan"
+    printf '# lib/common.sh\n' > "$l/lib/common.sh"
+    for x in "$R/etc/linux-av/av.env" "$R/root/.config/linux-av/av.env" "$l/config/av.env"; do printf 'AV_ENGINE=clamscan\n' > "$x"; done
+    printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$u/linux-av-scan.service.d/root-owned.conf"
+    printf '[Service]\nTimeoutStartSec=12h30min\n' > "$u/linux-av-scan.service.d/30-time-limit.conf"
+    printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$u/linux-av-rootkit.service.d/root-owned.conf"
+    if [ "$state" = installed ]; then
+        guard_unit_text scan new > "$u/linux-av-scan.service"; guard_unit_text rootkit new > "$u/linux-av-rootkit.service"
+        for x in scan rootkit; do
+            printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$u/linux-av-$x.service.d/05-guard.conf"
+        done
+        guard_copy_guard "$R" "$G"; chmod 0755 "$G"
+        grep -qxF "base='$R'" "$G" || fail "the test copy of bin/av-guard has no base= line to set"
+    else
+        guard_unit_text scan old > "$u/linux-av-scan.service"; guard_unit_text rootkit old > "$u/linux-av-rootkit.service"
+    fi
+}
+
+# guard_run [NAME=value ...]: the test copy of the guard in an empty environment plus the arguments; sets OUT (both streams), RC.
+guard_run() { OUT="$("$ENV_BIN" -i PATH=/usr/bin:/bin "$@" /bin/sh "$G" 2>&1)"; RC=$?; }
+guard_ok() { assert_eq "$RC" 0 "$1: exit status"; assert_eq "$OUT" 'av-guard: ok' "$1: output"; }
+guard_refused() { # PATH REASON LABEL: exit 1 and exactly that one line
+    assert_eq "$RC" 1 "$3: exit status"
+    assert_eq "$OUT" "av-guard: $1: $2" "$3: the one line"
+}
+
+# guard_apply DEFECT PATH: gw, ow (group or others may write), owner (a foreign owner), link (PATH becomes a link to its old self),
+# missing. guard_reason DEFECT PATH: the reason the guard gives for PATH once it has that defect.
+guard_apply() {
+    case $1 in
+        gw) chmod g+w "$2" ;;
+        ow) chmod o+w "$2" ;;
+        owner) chown 1000:1000 "$2" ;;
+        link) mv "$2" "$2.real" && ln -s "$2.real" "$2" ;;
+        missing) rm -rf -- "$2" ;;
+    esac
+}
+guard_reason() {
+    case $1 in
+        gw|ow) printf 'is writable by group or others (%s)' "$(stat -c %A "$2")" ;;
+        owner) printf 'is owned by uid 1000, not root' ;;
+        link) printf 'is a link' ;;
+    esac
+}
+# guard_defects_on LABEL REL...: each defect in turn, alone, on each REL (below R) of a fresh fixture; the guard names that path.
+guard_defects_on() {
+    local label="$1" rel d; shift
+    for rel in "$@"; do
+        for d in gw ow owner link; do
+            guard_fixture; guard_apply "$d" "$R/$rel"; guard_run
+            guard_refused "$R/$rel" "$(guard_reason "$d" "$R/$rel")" "$label $rel $d"
+        done
+    done
+}
+# guard_sweep DEFECT KIND LABEL: every file (KIND f) or folder (KIND d) of the fixture, alone with the defect, makes the guard
+# refuse and name it. Every entry of the fixture lies on a checked path, so this covers each target and each component above one.
+guard_sweep() {
+    local rel list
+    guard_fixture; list="$(cd "$R" && find . -mindepth 1 -type "$2" -printf '%P\n' | sort)"
+    while IFS= read -r rel; do
+        guard_fixture; guard_apply "$1" "$R/$rel"; guard_run
+        guard_refused "$R/$rel" "$(guard_reason "$1" "$R/$rel")" "$3 $rel"
+    done <<EOF
+$list
+EOF
+}
+
+row_guard_clean_passes() {
+    guard_root_only || return 0
+    guard_fixture; guard_run; guard_ok 'OVH as the guard expects it, all three config files present'
+    guard_run AV_CONFIG=/nonexistent; guard_ok 'the same with an unrelated variable set'
+}
+row_guard_group_writable_leaf() { guard_root_only || return 0; guard_sweep gw f 'group-writable file'; }
+row_guard_group_writable_parent() { guard_root_only || return 0; guard_sweep gw d 'group-writable folder'; }
+row_guard_world_writable_leaf() { guard_root_only || return 0; guard_sweep ow f 'other-writable file'; }
+row_guard_world_writable_parent() { guard_root_only || return 0; guard_sweep ow d 'other-writable folder'; }
+row_guard_foreign_owner_leaf() { guard_root_only || return 0; guard_sweep owner f 'foreign-owned file'; }
+row_guard_foreign_owner_parent() { guard_root_only || return 0; guard_sweep owner d 'foreign-owned folder'; }
+row_guard_link_leaf() { guard_root_only || return 0; guard_sweep link f 'file that is a link'; }
+row_guard_link_parent() { guard_root_only || return 0; guard_sweep link d 'folder that is a link'; }
+# The folder the walk starts from (/ in production) is checked like every other component.
+row_guard_base_unsafe() {
+    guard_root_only || return 0
+    local d
+    for d in gw ow owner link; do
+        guard_fixture; guard_apply "$d" "$R"; guard_run
+        guard_refused "$R" "$(guard_reason "$d" "$R")" "the base itself, $d"
+    done
+}
+row_guard_config_unsafe() {
+    guard_root_only || return 0
+    guard_defects_on 'config file' etc/linux-av/av.env root/.config/linux-av/av.env usr/local/lib/linux-av/config/av.env
+}
+row_guard_config_missing_optional() {
+    guard_root_only || return 0
+    guard_fixture; rm -f "$R/etc/linux-av/av.env"; guard_run; guard_ok 'no /etc/linux-av/av.env'
+    guard_fixture; rm -rf "$R/root/.config"; guard_run; guard_ok 'no /root/.config at all'
+    guard_fixture; rm -rf "$R/usr/local/lib/linux-av/config"; guard_run; guard_ok 'no config folder in the installed copy'
+    guard_fixture; rm -rf "$R/etc/linux-av" "$R/root/.config" "$R/usr/local/lib/linux-av/config"; guard_run; guard_ok 'no config file or folder'
+}
+# A config file that is missing is not sourced, but the folder it would be created in still has to be root's alone.
+row_guard_config_missing_parent_unsafe() {
+    guard_root_only || return 0
+    local rel d
+    for rel in etc/linux-av root/.config/linux-av usr/local/lib/linux-av/config; do
+        for d in gw ow owner; do
+            guard_fixture; rm -f "$R/$rel/av.env"; guard_apply "$d" "$R/$rel"; guard_run
+            guard_refused "$R/$rel" "$(guard_reason "$d" "$R/$rel")" "missing config in $rel, $d"
+        done
+    done
+}
+row_guard_missing_required() {
+    guard_root_only || return 0
+    local rel
+    for rel in usr/local/lib/linux-av/bin/av-scan usr/local/lib/linux-av/lib/common.sh etc/systemd/system/linux-av-scan.service \
+        etc/systemd/system/linux-av-rootkit.service etc/systemd/system/linux-av-scan.service.d etc/systemd/system/linux-av-rootkit.service.d; do
+        guard_fixture; guard_apply missing "$R/$rel"; guard_run
+        guard_refused "$R/$rel" 'is missing' "missing $rel"
+    done
+}
+row_guard_dropin_folder_unsafe() {
+    guard_root_only || return 0
+    guard_defects_on 'drop-in folder' etc/systemd/system/linux-av-scan.service.d etc/systemd/system/linux-av-rootkit.service.d
+}
+row_guard_dropin_file_unsafe() {
+    guard_root_only || return 0
+    local s=etc/systemd/system
+    guard_defects_on 'file in a drop-in folder' $s/linux-av-scan.service.d/05-guard.conf $s/linux-av-scan.service.d/30-time-limit.conf \
+        $s/linux-av-scan.service.d/root-owned.conf $s/linux-av-rootkit.service.d/05-guard.conf $s/linux-av-rootkit.service.d/root-owned.conf
+}
+row_guard_unit_file_unsafe() {
+    guard_root_only || return 0
+    guard_defects_on 'unit file' etc/systemd/system/linux-av-scan.service etc/systemd/system/linux-av-rootkit.service
+}
+# A name with a space, a newline, a leading dot or dash or a glob character is an entry like any other: root's own passes, a
+# foreign one is refused by its whole name, on one line (a newline is shown as \n), and a link that points nowhere is refused.
+row_guard_odd_names() {
+    guard_root_only || return 0
+    local sub dir name shown
+    for sub in linux-av-scan.service.d linux-av-rootkit.service.d; do
+        for name in 'a b.conf' $'x\ny.conf' '.hidden.conf' '..double.conf' '-n.conf' 'star*.conf' '[b].conf'; do
+            guard_fixture; dir="$R/etc/systemd/system/$sub"; shown="${name//$'\n'/\\n}"
+            : > "$dir/$name"; guard_run; guard_ok "root-owned entry [$shown] in $sub"
+            chown 1000:1000 "$dir/$name"; guard_run
+            guard_refused "$dir/$shown" 'is owned by uid 1000, not root' "foreign-owned entry [$shown] in $sub"
+            chown 0:0 "$dir/$name"; chmod 0666 "$dir/$name"; guard_run
+            guard_refused "$dir/$shown" "is writable by group or others ($(stat -c %A "$dir/$name"))" "writable entry [$shown] in $sub"
+        done
+        guard_fixture; dir="$R/etc/systemd/system/$sub"; ln -s /nonexistent/nowhere "$dir/dangling.conf"; guard_run
+        guard_refused "$dir/dangling.conf" 'is a link' "a link to nowhere in $sub"
+        guard_fixture; dir="$R/etc/systemd/system/$sub"; mkdir "$dir/sub folder"; guard_run; guard_ok "a root-owned folder in $sub is not entered"
+        chown 1000:1000 "$dir/sub folder"; guard_run
+        guard_refused "$dir/sub folder" 'is owned by uid 1000, not root' "a foreign-owned folder in $sub"
+    done
+}
+# The scratch root itself has a space in its name: every check and the folder glob quote it.
+row_guard_space_in_base() {
+    guard_root_only || return 0
+    local d rel
+    guard_fixture installed 'with space/root'; guard_run; guard_ok 'a base with a space in it'
+    for d in gw ow owner link; do
+        for rel in usr/local/lib/linux-av/bin/av-scan usr/local/lib/linux-av/bin etc/systemd/system/linux-av-scan.service.d/root-owned.conf; do
+            guard_fixture installed 'with space/root'; guard_apply "$d" "$R/$rel"; guard_run
+            guard_refused "$R/$rel" "$(guard_reason "$d" "$R/$rel")" "base with a space, $rel $d"
+        done
+    done
+}
+# Nothing in the environment changes what is checked: a variable that names other files, or a copy of stat earlier in PATH.
+row_guard_environment_ignored() {
+    guard_root_only || return 0
+    local evil
+    guard_fixture; evil="$D/evil"; mkdir -p "$evil/xdg/linux-av"
+    printf 'x\n' > "$evil/av.env"; cp "$evil/av.env" "$evil/xdg/linux-av/av.env"; chmod 0666 "$evil/av.env" "$evil/xdg/linux-av/av.env"
+    chown 1000:1000 "$evil/av.env" "$evil/xdg/linux-av/av.env"
+    guard_run AV_CONFIG="$evil/av.env" XDG_CONFIG_HOME="$evil/xdg" HOME="$evil" AV_HOME="$evil" AV_ROOT="$evil" base="$evil"
+    guard_ok 'AV_CONFIG, XDG_CONFIG_HOME, HOME, AV_HOME, AV_ROOT and base in the environment'
+    guard_apply owner "$R/usr/local/lib/linux-av/bin/av-scan"
+    guard_run AV_ROOT=/ base=/ AV_CONFIG="$evil/av.env"
+    guard_refused "$R/usr/local/lib/linux-av/bin/av-scan" 'is owned by uid 1000, not root' 'a foreign av-scan with base and AV_ROOT in the environment'
+}
+row_guard_path_fixed() {
+    guard_root_only || return 0
+    guard_fixture; mkdir -p "$D/fake"
+    printf '#!/bin/sh\necho "0 -rw-r--r--"\n' > "$D/fake/stat"; chmod 0755 "$D/fake/stat"
+    guard_apply owner "$R/usr/local/lib/linux-av/bin/av-scan"
+    OUT="$("$ENV_BIN" -i PATH="$D/fake:/usr/bin:/bin" /bin/sh "$G" 2>&1)"; RC=$?
+    guard_refused "$R/usr/local/lib/linux-av/bin/av-scan" 'is owned by uid 1000, not root' 'a fake stat first in PATH'
+}
+# The production file: base= is empty and set once, and the target list is exactly this one.
+row_guard_base_fixed() {
+    assert_eq "$(grep -c '^[[:space:]]*base=' "$REPO/bin/av-guard")" 1 'bin/av-guard assigns base once'
+    assert_eq "$(grep -c '^base=$' "$REPO/bin/av-guard")" 1 'and to nothing'
+    assert_eq "$(grep -c '^[[:space:]]*PATH=/usr/sbin:/usr/bin:/sbin:/bin$' "$REPO/bin/av-guard")" 1 'and sets its own PATH'
+}
+row_guard_targets_fixed() {
+    assert_eq "$(grep -E '^(walk|dropins) ' "$REPO/bin/av-guard")" "$(printf '%s\n' \
+        'walk req usr/local/lib/linux-av/bin/av-guard' 'walk req usr/local/lib/linux-av/bin/av-scan' \
+        'walk req usr/local/lib/linux-av/lib/common.sh' 'walk opt etc/linux-av/av.env' 'walk opt root/.config/linux-av/av.env' \
+        'walk opt usr/local/lib/linux-av/config/av.env' 'walk req etc/systemd/system/linux-av-scan.service' \
+        'walk req etc/systemd/system/linux-av-rootkit.service' 'dropins etc/systemd/system/linux-av-scan.service.d' \
+        'dropins etc/systemd/system/linux-av-rootkit.service.d')" 'the production target list'
+}
+# The three config paths are what av-scan sources under the unit's own environment (HOME=/root, no AV_CONFIG, AV_HOME the
+# installed copy); a change to that chain in lib/common.sh or to HOME in the units must change the guard too.
+row_guard_config_chain() {
+    assert_eq "$(sed -n '/^for _cfg in/,/^do$/p' "$REPO/lib/common.sh")" "$(printf '%s\n' 'for _cfg in \' '    "${AV_CONFIG:-}" \' \
+        '    "$XDG_CONFIG_HOME/linux-av/av.env" \' '    "/etc/linux-av/av.env" \' '    "$AV_HOME/config/av.env"' 'do')" \
+        'the config chain lib/common.sh sources'
+    assert_has "$(cat "$REPO/lib/common.sh")" ': "${XDG_CONFIG_HOME:=$HOME/.config}"' 'XDG_CONFIG_HOME defaults under HOME'
+    assert_has "$(cat "$REPO/systemd/av-scan.service")" 'Environment=HOME=/root' 'the scan unit sets HOME=/root'
+    assert_has "$(cat "$REPO/systemd/av-rootkit.service")" 'Environment=HOME=/root' 'the rootkit unit sets HOME=/root'
+    assert_lacks "$(cat "$REPO/systemd/av-scan.service" "$REPO/systemd/av-rootkit.service")" 'AV_CONFIG' 'neither unit sets AV_CONFIG'
+}
+row_guard_copy_differs() {
+    local copy="$WORK/guard-copy"
+    guard_copy_guard /scratch/root "$copy"
+    assert_eq "$(diff "$REPO/bin/av-guard" "$copy" | sed -n 's/^< //p')" 'base=' 'the test copy drops only the empty base= line'
+    assert_eq "$(diff "$REPO/bin/av-guard" "$copy" | sed -n 's/^> //p')" "base='/scratch/root'" 'and sets it to the scratch root'
+}
+
+# --- the installer ----------------------------------------------------------------------------------------------------------
+# guard_show UNIT ARG: what `systemctl show UNIT -p ExecStartPre -p ExecStart` prints once systemd holds what was meant.
+guard_show() {
+    local g=/usr/local/lib/linux-av/bin/av-guard s=/usr/local/lib/linux-av/bin/av-scan t='start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
+    printf 'ExecStartPre={ path=%s ; argv[]=%s ; ignore_errors=no ; %s\n' "$g" "$g" "$t" > "$D/show.$1"
+    printf 'ExecStart={ path=%s ; argv[]=%s %s ; ignore_errors=no ; %s\n' "$s" "$s" "$2" "$t" >> "$D/show.$1"
+}
+# guard_install_setup: a preinstall fixture, the tools and stubs in B, and the tree the runner would give the installer in
+# $D/tree: bin/av-guard (the test copy, base= set) and root-install-guard.sh (base=, PATH= and its one pin line changed).
+guard_install_setup() {
+    local tree t p sum
+    guard_fixture preinstall
+    B="$D/bin"; CALLS="$D/calls"; tree="$D/tree"
+    mkdir -p "$B" "$tree/bin" "$R/run"; : > "$CALLS"
+    for t in id stat grep sed cut cmp cp mv rm mktemp install sha256sum cat chmod; do
+        p="$(command -v "$t")" && ln -sf "$p" "$B/$t"
+    done
+    stub hostname <<'STUB'
+echo OVH
+STUB
+    stub systemctl <<'STUB'
+case "$1" in
+    show) [ ! -e "${CALLS%/*}/show-fails" ] || exit 1; cat "${CALLS%/*}/show.$2"; exit 0 ;;
+esac
+exit 0
+STUB
+    guard_show linux-av-scan.service --now; guard_show linux-av-rootkit.service --rootkit
+    guard_copy_guard "$R" "$tree/bin/av-guard"
+    sum="$(sha256sum < "$tree/bin/av-guard" | cut -c1-64)"
+    sed -e "s|^base=\$|base='$R'|" -e "s|^PATH=.*|PATH='$B'|" -e "s|^# sha256 [0-9a-f]\{64\} bin/av-guard\$|# sha256 $sum bin/av-guard|" \
+        "$REPO/root-install-guard.sh" > "$tree/root-install-guard.sh"
+}
+guard_install_run() {
+    OUT="$(cd "$D/tree" && "$ENV_BIN" -i PATH="$B" HOME=/root CALLS="$CALLS" /bin/sh "$D/tree/root-install-guard.sh" 2>&1)"; RC=$?
+}
+# Every entry under R with its type, mode, owner, link target and, for a file, its SHA-256 (no times).
+guard_snapshot() {
+    (cd "$R" && { find . ! -type d -printf '%p %y %m %u %g %l\n'; find . -type d -printf '%p %y %m %u %g\n'; find . -type f -exec sha256sum {} +; } | sort)
+}
+# The installer stopped, and nothing under R changed; with 'nothing was installed' said too when it refused before writing.
+guard_install_stopped() { # BEFORE MESSAGE LABEL
+    [ "$RC" != 0 ] || fail "$3: the installer went on"
+    assert_has "$OUT" "$2" "$3: its refusal"
+    assert_eq "$(guard_snapshot)" "$1" "$3: every file under the scratch root untouched"
+    assert_lacks "$(cat "$CALLS")" 'systemctl' "$3: no systemctl call"
+    assert_lacks "$OUT" 'written: ' "$3: no file written"
+    assert_lacks "$OUT" 'kept: ' "$3: no backup made"
+    assert_lacks "$OUT" 'root-install-guard: done' "$3: it stopped"
+}
+guard_install_refused() { # BEFORE MESSAGE LABEL
+    guard_install_stopped "$1" "$2" "$3"
+    assert_has "$OUT" 'nothing was installed' "$3: it says nothing was installed"
+}
+# guard_install_sweep KIND REL...: each defect on each REL (a folder or a file, KIND), alone, in a fresh preinstall fixture.
+guard_install_sweep() {
+    local kind="$1" rel d msg before; shift
+    for rel in "$@"; do
+        for d in link owner gw ow missing; do
+            guard_install_setup; guard_apply "$d" "$R/$rel"; before="$(guard_snapshot)"; guard_install_run
+            case $d in
+                link) msg="$R/$rel is a link" ;;
+                owner) msg="$R/$rel is not owned by root (uid 1000)" ;;
+                missing) msg="$R/$rel is missing or is not a $kind" ;;
+                *) msg="$R/$rel is writable by group or others (" ;;
+            esac
+            guard_install_refused "$before" "$msg" "$rel $d"
+        done
+    done
+}
+row_guard_install_refuses_dropin_folders() {
+    guard_root_only || return 0
+    guard_install_sweep folder etc/systemd/system/linux-av-scan.service.d etc/systemd/system/linux-av-rootkit.service.d
+}
+row_guard_install_refuses_unsafe() {
+    guard_root_only || return 0
+    guard_install_sweep folder usr/local/lib usr/local/lib/linux-av usr/local/lib/linux-av/bin etc/systemd/system
+    guard_install_sweep file etc/systemd/system/linux-av-scan.service etc/systemd/system/linux-av-rootkit.service
+}
+# Everything the installer will write, if it is there already, must be a regular file, not a link: put would stop on a link
+# after the first files were written, so this is the preflight's own check.
+row_guard_install_refuses_dest() {
+    guard_root_only || return 0
+    local rel before s=etc/systemd/system
+    for rel in usr/local/lib/linux-av/bin/av-guard $s/linux-av-scan.service.d/05-guard.conf $s/linux-av-rootkit.service.d/05-guard.conf \
+        $s/linux-av-scan.service.before-OC-T-0037 $s/linux-av-rootkit.service.before-OC-T-0037; do
+        guard_install_setup; printf 'x\n' > "$D/elsewhere"; ln -s "$D/elsewhere" "$R/$rel"; before="$(guard_snapshot)"; guard_install_run
+        guard_install_refused "$before" "$R/$rel is a link" "$rel is a link"
+        guard_install_setup; mkdir "$R/$rel"; before="$(guard_snapshot)"; guard_install_run
+        guard_install_refused "$before" "$R/$rel is not a regular file" "$rel is a folder"
+    done
+}
+row_guard_install_not_root() {
+    guard_root_only || return 0
+    local before
+    guard_install_setup; stub id <<'STUB'
+echo 1000
+STUB
+    before="$(guard_snapshot)"; guard_install_run
+    guard_install_stopped "$before" 'not root' 'not root'
+}
+row_guard_install_not_ovh() {
+    guard_root_only || return 0
+    local before
+    guard_install_setup; stub hostname <<'STUB'
+echo corsair
+STUB
+    before="$(guard_snapshot)"; guard_install_run
+    guard_install_stopped "$before" 'this card is for OVH, not corsair' 'not OVH'
+}
+# The chief's own request: the installer checks the pin in its header itself, and refuses, writing nothing, when it does not match.
+row_guard_install_pin_mismatch() {
+    guard_root_only || return 0
+    local v before msg zeros
+    zeros="$(printf '%064d' 0)"
+    for v in tampered pin_zeros no_pin two_pins other_path missing linked no_file; do
+        guard_install_setup
+        msg='SHA-256 differs from the pin'
+        case $v in
+            tampered) printf 'x\n' >> "$D/tree/bin/av-guard" ;;
+            pin_zeros) sed -i "s/^# sha256 [0-9a-f]\{64\} bin/# sha256 $zeros bin/" "$D/tree/root-install-guard.sh" ;;
+            no_pin) sed -i '/^# sha256 /d' "$D/tree/root-install-guard.sh"; msg='no pin line for bin/av-guard' ;;
+            two_pins) sed -i '/^# sha256 /p' "$D/tree/root-install-guard.sh"; msg='more than one pin line' ;;
+            other_path) sed -i 's|^\(# sha256 [0-9a-f]\{64\}\) bin/av-guard$|\1 lib/common.sh|' "$D/tree/root-install-guard.sh"; msg='no pin line for bin/av-guard' ;;
+            missing) rm -f "$D/tree/bin/av-guard"; msg='bin/av-guard missing beside the script' ;;
+            linked) mv "$D/tree/bin/av-guard" "$D/elsewhere"; ln -s "$D/elsewhere" "$D/tree/bin/av-guard"; msg='bin/av-guard missing beside the script' ;;
+            no_file) msg='cannot read my own header' ;;
+        esac
+        before="$(guard_snapshot)"
+        if [ "$v" = no_file ]; then
+            # the script text given to sh as a string: $0 is then a name that is no file, so there is no header to read
+            OUT="$(cd "$D/tree" && "$ENV_BIN" -i PATH="$B" HOME=/root CALLS="$CALLS" /bin/sh -c "$(cat "$D/tree/root-install-guard.sh")" nosuchscript 2>&1)"; RC=$?
+        else
+            guard_install_run
+        fi
+        guard_install_refused "$before" "$msg" "pin: $v"
+    done
+}
+# A backup that cannot be made stops the installer before it writes anything (the backups come first).
+row_guard_install_backup_failure() {
+    guard_root_only || return 0
+    local before
+    guard_install_setup; stub cp <<'STUB'
+exit 1
+STUB
+    before="$(guard_snapshot)"; guard_install_run
+    guard_install_stopped "$before" 'could not keep' 'a backup that cannot be made'
+}
+# A .new file left by an earlier run is replaced and a link in its place is not followed, even by an install that would not
+# replace an existing target itself (the stub refuses one, as a plain copy would).
+row_guard_install_stale_new() {
+    guard_root_only || return 0
+    local u l
+    guard_install_setup; u="$R/etc/systemd/system"; l="$R/usr/local/lib/linux-av"
+    stub install <<'STUB'
+shift 5
+[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1
+cp "$2" "$3" && chmod "$1" "$3"
+STUB
+    printf 'x\n' > "$D/elsewhere"
+    printf 'stale\n' > "$u/linux-av-scan.service.d/05-guard.conf.new"
+    ln -s "$D/elsewhere" "$l/bin/av-guard.new"
+    guard_install_run
+    assert_eq "$RC" 0 'installer exit status with stale .new files'
+    assert_eq "$(cat "$D/elsewhere")" x 'a .new link was not followed'
+    assert_nofile "$u/linux-av-scan.service.d/05-guard.conf.new" 'the stale .new file is gone'
+    assert_nofile "$l/bin/av-guard.new" 'the stale .new link is gone'
+    assert_same "$l/bin/av-guard" "$D/tree/bin/av-guard" 'the guard was installed'
+}
+row_guard_install_writes() {
+    guard_root_only || return 0
+    local u l x before after
+    guard_install_setup; u="$R/etc/systemd/system"; l="$R/usr/local/lib/linux-av"
+    cp -p "$u/linux-av-scan.service" "$D/orig-scan"; cp -p "$u/linux-av-rootkit.service" "$D/orig-rootkit"
+    before="$(guard_snapshot)"; guard_install_run
+    after="$(guard_snapshot)"
+    assert_eq "$RC" 0 'installer exit status'
+    assert_has "$OUT" 'root-install-guard: done' 'the installer ran to its end'
+    assert_has "$OUT" 'av-guard: ok' 'the installed guard passes on the result'
+    assert_same "$l/bin/av-guard" "$D/tree/bin/av-guard" 'the installed guard is the pinned file'
+    assert_eq "$(stat -c '%u %g %a' "$l/bin/av-guard")" '0 0 755' 'guard: root:root 0755'
+    for x in scan rootkit; do
+        assert_eq "$(grep -v '^#' "$u/linux-av-$x.service.d/05-guard.conf")" "$(printf '%s\n' '[Service]' \
+            'ExecStartPre=/usr/local/lib/linux-av/bin/av-guard')" "$x drop-in: its lines"
+        assert_eq "$(stat -c '%u %g %a' "$u/linux-av-$x.service.d/05-guard.conf")" '0 0 644' "$x drop-in: root:root 0644"
+        assert_eq "$(stat -c '%u %g %a' "$u/linux-av-$x.service")" '0 0 644' "$x unit: root:root 0644"
+        assert_same "$u/linux-av-$x.service.before-OC-T-0037" "$D/orig-$x" "$x unit: the old file kept"
+        guard_unit_text "$x" new > "$D/want-$x"
+        assert_same "$u/linux-av-$x.service" "$D/want-$x" "$x unit: the old file with its ExecStart line changed and every other byte as it was"
+    done
+    # The paths that changed are these and no others (a file with new bytes shows in its SHA-256 line, a new file in both kinds).
+    assert_eq "$(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sed -n -e 's/^[<>] \(\.[^ ]*\) .*/\1/p' \
+        -e 's/^[<>] [0-9a-f]\{64\}  //p' | LC_ALL=C sort -u)" "$(printf '%s\n' \
+        ./etc/systemd/system/linux-av-rootkit.service ./etc/systemd/system/linux-av-rootkit.service.before-OC-T-0037 \
+        ./etc/systemd/system/linux-av-rootkit.service.d/05-guard.conf ./etc/systemd/system/linux-av-scan.service \
+        ./etc/systemd/system/linux-av-scan.service.before-OC-T-0037 ./etc/systemd/system/linux-av-scan.service.d/05-guard.conf \
+        ./usr/local/lib/linux-av/bin/av-guard | LC_ALL=C sort)" 'the installer wrote only its own files'
+    assert_nofile "$u/linux-av-scan.service.d/05-guard.conf.new" 'no leftover .new'
+    assert_eq "$(ls "$R/run")" '' 'its scratch folder is gone'
+}
+# The unit's rewrite must change only the ExecStart line, whatever else the file holds: the comment on the rootkit unit's first
+# line names /usr/local/bin/av-scan too (row_guard_install_writes compares every byte); here an extra line and a missing final newline.
+row_guard_install_exec_line_only() {
+    guard_root_only || return 0
+    local u
+    guard_install_setup; u="$R/etc/systemd/system"
+    printf '# /usr/local/bin/av-scan --now\nExecStartPost=/usr/local/bin/av-scan --now\nWorkingDirectory=/usr/local/bin/av-scan\n' >> "$u/linux-av-scan.service"
+    printf 'Nice=3' >> "$u/linux-av-scan.service"
+    cp -p "$u/linux-av-scan.service" "$D/orig"; guard_install_run
+    assert_eq "$RC" 0 'installer exit status'
+    assert_eq "$(diff "$D/orig" "$u/linux-av-scan.service" | sed -n 's/^< //p')" 'ExecStart=/usr/local/bin/av-scan --now' 'only the ExecStart line left the old file'
+    assert_eq "$(diff "$D/orig" "$u/linux-av-scan.service" | sed -n 's/^> //p')" 'ExecStart=/usr/local/lib/linux-av/bin/av-scan --now' 'and its new line came in'
+    assert_eq "$(tail -c 6 "$u/linux-av-scan.service")" 'Nice=3' 'the missing final newline stays missing'
+}
+row_guard_install_exec_unknown() {
+    guard_root_only || return 0
+    local v u before msg
+    for v in other_path other_arg two_lines reset_line; do
+        guard_install_setup; u="$R/etc/systemd/system/linux-av-scan.service"
+        msg='its ExecStart= line is neither'
+        case $v in
+            other_path) sed -i 's|^ExecStart=.*|ExecStart=/opt/other/av-scan --now|' "$u" ;;
+            other_arg) sed -i 's|^ExecStart=.*|ExecStart=/usr/local/bin/av-scan --rootkit|' "$u" ;;
+            two_lines) printf 'ExecStart=/usr/local/bin/av-scan --now\n' >> "$u"; msg='does not hold exactly one ExecStart= line' ;;
+            reset_line) sed -i 's|^ExecStart=.*|ExecStart=\nExecStart=/usr/local/bin/av-scan --now|' "$u"; msg='does not hold exactly one ExecStart= line' ;;
+        esac
+        before="$(guard_snapshot)"; guard_install_run
+        guard_install_refused "$before" "$msg" "unit with $v"
+    done
+}
+row_guard_install_second_run() {
+    guard_root_only || return 0
+    local u first second x
+    guard_install_setup; u="$R/etc/systemd/system"
+    cp -p "$u/linux-av-scan.service" "$D/orig-scan"; cp -p "$u/linux-av-rootkit.service" "$D/orig-rootkit"
+    guard_install_run; assert_eq "$RC" 0 'first run exit status'
+    first="$(guard_snapshot)"; : > "$CALLS"
+    guard_install_run
+    second="$(guard_snapshot)"
+    assert_eq "$RC" 0 'second run exit status'
+    assert_eq "$second" "$first" 'the second run changes nothing under the scratch root'
+    assert_eq "$(printf '%s\n' "$OUT" | grep -c '^unchanged: ')" 5 'it says so for each of the five files'
+    assert_lacks "$OUT" 'written: ' 'and writes none'
+    assert_lacks "$OUT" 'kept: ' 'and keeps no new backup'
+    for x in scan rootkit; do assert_same "$u/linux-av-$x.service.before-OC-T-0037" "$D/orig-$x" "$x: the first backup is still the first"; done
+}
+# A backup is made once: when a unit changes again, the file kept the first time stays the first one.
+row_guard_install_backup_first_only() {
+    guard_root_only || return 0
+    local u
+    guard_install_setup; u="$R/etc/systemd/system"
+    cp -p "$u/linux-av-scan.service" "$D/orig-scan"
+    guard_install_run; assert_eq "$RC" 0 'first run exit status'
+    guard_unit_text scan old > "$u/linux-av-scan.service"; printf '# edited by hand\n' >> "$u/linux-av-scan.service"
+    guard_install_run; assert_eq "$RC" 0 'second run exit status'
+    assert_same "$u/linux-av-scan.service.before-OC-T-0037" "$D/orig-scan" 'the backup is still the file from before the first run'
+    assert_has "$(cat "$u/linux-av-scan.service")" 'ExecStart=/usr/local/lib/linux-av/bin/av-scan --now' 'the edited unit was rewritten'
+}
+# He ordered nothing started, stopped, enabled, disabled or restarted: the only systemctl calls are the reload and the two read-backs.
+row_guard_install_no_unit_actions() {
+    guard_root_only || return 0
+    guard_install_setup; guard_install_run
+    assert_eq "$RC" 0 'installer exit status'
+    assert_eq "$(grep '^systemctl' "$CALLS")" "$(printf '%s\n' 'systemctl daemon-reload' \
+        'systemctl show linux-av-scan.service -p ExecStartPre -p ExecStart' \
+        'systemctl show linux-av-rootkit.service -p ExecStartPre -p ExecStart')" 'systemctl: a reload and two read-backs, in that order'
+}
+# What systemd holds after the reload must be what was meant: the guard (errors not ignored) and av-scan with its argument, once each.
+row_guard_install_readback() {
+    guard_root_only || return 0
+    local v want
+    for v in old_exec no_pre ignore_errors two_pres other_arg show_fails; do
+        guard_install_setup
+        want='the wrong ExecStartPre for linux-av-scan.service'
+        case $v in
+            old_exec) sed -i 's|/usr/local/lib/linux-av/bin/av-scan|/usr/local/bin/av-scan|g' "$D/show.linux-av-scan.service"; want='the wrong ExecStart for linux-av-scan.service' ;;
+            no_pre) sed -i '/^ExecStartPre=/d' "$D/show.linux-av-rootkit.service"; want='the wrong ExecStartPre for linux-av-rootkit.service' ;;
+            ignore_errors) sed -i '/^ExecStartPre=/s/ignore_errors=no/ignore_errors=yes/' "$D/show.linux-av-scan.service" ;;
+            two_pres) grep '^ExecStartPre=' "$D/show.linux-av-scan.service" > "$D/pre"; cat "$D/pre" >> "$D/show.linux-av-scan.service" ;;
+            other_arg) sed -i '/^ExecStart=/s/ --now ;/ --rootkit ;/' "$D/show.linux-av-scan.service"; want='the wrong ExecStart for linux-av-scan.service' ;;
+            show_fails) : > "$D/show-fails"; want='systemctl show linux-av-scan.service failed' ;;
+        esac
+        guard_install_run
+        [ "$RC" != 0 ] || fail "$v: the installer went on although systemd holds something else"
+        assert_has "$OUT" "$want" "$v: the read-back refusal"
+        assert_lacks "$OUT" 'root-install-guard: done' "$v: it stopped"
+    done
+}
+# The last step runs the installed guard: here a config file the installer does not look at is group-writable.
+row_guard_install_final_guard_run() {
+    guard_root_only || return 0
+    guard_install_setup; chmod 0664 "$R/etc/linux-av/av.env"; guard_install_run
+    [ "$RC" != 0 ] || fail 'the installer went on although the guard refuses this host'
+    assert_has "$OUT" "av-guard: $R/etc/linux-av/av.env: is writable by group or others (-rw-rw-r--)" 'the guard line is in the card'
+    assert_has "$OUT" 'the next scan would not start' 'and the installer says what it means'
+    assert_lacks "$OUT" 'root-install-guard: done' 'it stopped'
+}
+# The pin line is the only one the runner will take for a pin, and it matches the file.
+row_guard_install_hashes() {
+    local hash sum hex rel n=0 f="$REPO/root-install-guard.sh"
+    while read -r hash sum hex rel; do
+        [ "$hash $sum" = '# sha256' ] || continue
+        n=$((n+1))
+        assert_eq "$rel" bin/av-guard 'the pin names bin/av-guard'
+        assert_eq "$(sha256sum < "$REPO/$rel" | cut -c1-64)" "$hex" "root-install-guard.sh lists the SHA-256 of $rel"
+    done < "$f"
+    assert_eq "$n" 1 'one pin line'
+    assert_eq "$(grep -c -E '^[[:space:]]*#[[:space:]]*sha256' "$f")" 1 'no other line the runner would take for a pin'
+    assert_eq "$(grep -c -E -x '# sha256 [0-9a-f]{64} [A-Za-z0-9._+/-]+' "$f")" 1 'and it is one the runner accepts'
+}
+row_guard_install_copy_differs() {
+    local copy="$WORK/guard-installer-copy"
+    sed -e "s|^base=\$|base='/scratch'|" -e "s|^PATH=.*|PATH='/scratch/bin'|" -e "s|^# sha256 [0-9a-f]\{64\} bin/av-guard\$|# sha256 $(printf '%064d' 0) bin/av-guard|" \
+        "$REPO/root-install-guard.sh" > "$copy"
+    assert_eq "$(diff "$REPO/root-install-guard.sh" "$copy" | grep -c '^<')" 3 'the test copy of the installer differs in three lines'
+    assert_eq "$(diff "$REPO/root-install-guard.sh" "$copy" | sed -n 's/^< \(base=\|PATH=\|# sha256\).*/\1/p' | tr '\n' ' ')" '# sha256 PATH= base= ' \
+        'and they are the pin line, PATH= and base= (in file order)'
+}
+row_guard_documented() {
+    local f
+    for f in README.md MASTER.md; do
+        assert_has "$(cat "$REPO/$f")" 'bin/av-guard' "$f names the guard"
+        assert_has "$(cat "$REPO/$f")" 'root-install-guard.sh' "$f names the installer"
+        assert_has "$(cat "$REPO/$f")" '05-guard.conf' "$f names the drop-in"
+    done
+}
+
 
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then
@@ -3382,13 +4012,18 @@ for fn in $ROWS; do
     if [ -n "$SELECT" ]; then
         case " $SELECT " in *" $ROW "*) : ;; *) continue ;; esac
     fi
-    ROW_FAILED=0
+    ROW_FAILED=0; ROW_SKIPPED=0
     "$fn"
-    if [ "$ROW_FAILED" -eq 0 ]; then
+    if [ "$ROW_SKIPPED" -eq 1 ]; then
+        SKIP=$((SKIP + 1)); printf 'skip %s (needs root)\n' "$ROW"
+    elif [ "$ROW_FAILED" -eq 0 ]; then
         PASS=$((PASS + 1)); printf 'ok   %s\n' "$ROW"
     else
         FAIL=$((FAIL + 1))
     fi
 done
-printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+# A row that needs root and ran as someone else is counted apart, so a run without root cannot look like a full one.
+printf '%d passed, %d failed' "$PASS" "$FAIL"
+if [ "$SKIP" -gt 0 ]; then printf ', %d skipped (need root)' "$SKIP"; fi
+printf '\n'
 [ "$FAIL" -eq 0 ]

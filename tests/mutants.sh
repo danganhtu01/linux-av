@@ -3,8 +3,11 @@
 # checkout and shows the named tests/run.sh row(s) go red. A mutant that leaves its
 # rows green SURVIVED, and the script exits 1.
 #
-#   tests/mutants.sh           run every mutant
+#   tests/mutants.sh           run every mutant that runs as this user
 #   tests/mutants.sh NAME ...  run the named mutants only
+#
+# Mutants named guard_* (OC-T-0037) have rows that make real owners with chown, so they run only as root; every other mutant's
+# rows run av-scan, which refuses AV_ROOT as root, so they run only as another user. Run this script once as each.
 #
 # The checkout itself is never changed: each mutant is applied to a copy under
 # $TMPDIR. The copies are left in place (AV_TEST_KEEP=1 is passed to the rows);
@@ -271,10 +274,98 @@ MUTANTS=(
 'keep_usage_range~bin/av-setup~s/sed -n .2,\/^$\/{\/^#\/p}. "$0"/sed -n "2,30p" "$0"/~keep_aide_baseline_documented'
 'keep_readme~README.md~/--keep-aide-baseline/d~keep_aide_baseline_documented'
 'keep_master~MASTER.md~/--keep-aide-baseline/d~keep_aide_baseline_documented'
+# OC-T-0037: bin/av-guard and root-install-guard.sh. A name that starts guard_ marks mutants whose rows need root (real owners made
+# with chown): they run only as root, and the gate runs this script a second time as root for them (see runs_here below). The first
+# group removes one check of the guard; each target of the guard is dropped in turn; the rest keep the guard's reading of its own
+# surroundings (PATH, base=) and its quoting. The installer's mutants follow, one for each check it makes before it writes, each part
+# of what it writes, and each of the read-backs. A pattern for an apostrophe is \x27.
+'guard_link_unchecked~bin/av-guard~/^    if \[ -L "\$1" \]; then fail "\$1" "is a link"; fi$/d~guard_link_leaf guard_link_parent'
+'guard_missing_unchecked~bin/av-guard~/^        fail "\$1" "is missing"$/d~guard_missing_required'
+'guard_optional_required~bin/av-guard~s/if \[ "\$2" = opt \]; then return 1; fi/:/~guard_config_missing_optional'
+'guard_owner_unchecked~bin/av-guard~/^    if \[ "\${n_st%% \*}" != 0 \]; then fail/d~guard_foreign_owner_leaf guard_foreign_owner_parent guard_config_unsafe'
+'guard_group_write_ok~bin/av-guard~s/^        ?????\[!w\]??\[!w\]?) ;;$/        ????????[!w]?) ;;/~guard_group_writable_leaf guard_group_writable_parent'
+'guard_other_write_ok~bin/av-guard~s/^        ?????\[!w\]??\[!w\]?) ;;$/        ?????[!w]????) ;;/~guard_world_writable_leaf guard_world_writable_parent'
+'guard_exit_zero~bin/av-guard~s/>&2; exit 1; }/>\&2; exit 0; }/~guard_link_leaf guard_foreign_owner_leaf'
+'guard_ok_line~bin/av-guard~/^echo "av-guard: ok"$/d~guard_clean_passes'
+'guard_top_skipped~bin/av-guard~/^    node "\${base:-\/}" req$/d~guard_base_unsafe'
+'guard_walk_leaf_only~bin/av-guard~s/^        node "\$w_cur" "\$w_mode" || return 0$/        [ -n "$w_rel" ] || node "$w_cur" "$w_mode" || return 0/~guard_foreign_owner_parent guard_link_parent guard_group_writable_parent guard_world_writable_parent'
+'guard_target_guard~bin/av-guard~/^walk req usr\/local\/lib\/linux-av\/bin\/av-guard$/d~guard_foreign_owner_leaf guard_group_writable_leaf'
+'guard_target_scan~bin/av-guard~/^walk req usr\/local\/lib\/linux-av\/bin\/av-scan$/d~guard_foreign_owner_leaf guard_missing_required'
+'guard_target_common~bin/av-guard~/^walk req usr\/local\/lib\/linux-av\/lib\/common.sh$/d~guard_foreign_owner_leaf guard_missing_required'
+'guard_target_cfg_etc~bin/av-guard~/^walk opt etc\/linux-av\/av.env$/d~guard_config_unsafe'
+'guard_target_cfg_root~bin/av-guard~/^walk opt root\/.config\/linux-av\/av.env$/d~guard_config_unsafe'
+'guard_target_cfg_lib~bin/av-guard~/^walk opt usr\/local\/lib\/linux-av\/config\/av.env$/d~guard_config_unsafe'
+'guard_target_unit_scan~bin/av-guard~/^walk req etc\/systemd\/system\/linux-av-scan.service$/d~guard_unit_file_unsafe guard_missing_required'
+'guard_target_unit_rootkit~bin/av-guard~/^walk req etc\/systemd\/system\/linux-av-rootkit.service$/d~guard_unit_file_unsafe guard_missing_required'
+'guard_target_dropins_scan~bin/av-guard~/^dropins etc\/systemd\/system\/linux-av-scan.service.d$/d~guard_dropin_folder_unsafe guard_dropin_file_unsafe guard_missing_required'
+'guard_target_dropins_rootkit~bin/av-guard~/^dropins etc\/systemd\/system\/linux-av-rootkit.service.d$/d~guard_dropin_folder_unsafe guard_dropin_file_unsafe guard_missing_required'
+'guard_target_typo~bin/av-guard~s/^walk opt etc\/linux-av\/av.env$/walk opt etc\/linux\/av.env/~guard_targets_fixed guard_config_unsafe'
+'guard_cfg_etc_required~bin/av-guard~s/^walk opt etc\/linux-av\/av.env$/walk req etc\/linux-av\/av.env/~guard_config_missing_optional'
+'guard_cfg_root_required~bin/av-guard~s/^walk opt root\/.config\/linux-av\/av.env$/walk req root\/.config\/linux-av\/av.env/~guard_config_missing_optional'
+'guard_cfg_lib_required~bin/av-guard~s/^walk opt usr\/local\/lib\/linux-av\/config\/av.env$/walk req usr\/local\/lib\/linux-av\/config\/av.env/~guard_config_missing_optional'
+'guard_dropins_walk_dropped~bin/av-guard~/^    walk req "\$1"$/d~guard_dropin_folder_unsafe'
+'guard_entries_unchecked~bin/av-guard~s/then node "\$d_f" req; fi/then :; fi/~guard_dropin_file_unsafe guard_odd_names'
+'guard_dotfiles_skipped~bin/av-guard~s/ "\$d_dir"\/\.\[!\.\]\*//~guard_odd_names'
+'guard_dotdot_skipped~bin/av-guard~s/ "\$d_dir"\/\.\.?\*//~guard_odd_names'
+'guard_dangling_skipped~bin/av-guard~s/ || \[ -L "\$d_f" \]; then/; then/~guard_odd_names'
+'guard_oneline_dropped~bin/av-guard~s/"\$(oneline "\$1")"/"$1"/~guard_odd_names'
+'guard_path_unset~bin/av-guard~/^PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin$/d~guard_path_fixed'
+'guard_base_from_env~bin/av-guard~s/^base=$/base=${base-}/~guard_base_fixed'
+'guard_stat_unquoted~bin/av-guard~s/n_st=\$(stat -c .%u %A. "\$1")/n_st=$(stat -c "%u %A" $1)/~guard_space_in_base'
+'guard_link_test_unquoted~bin/av-guard~s/if \[ -L "\$1" \]; then fail/if [ -L $1 ]; then fail/~guard_space_in_base'
+'guard_dropin_dir_unquoted~bin/av-guard~s/for d_f in "\$d_dir"\/\*/for d_f in $d_dir\/*/~guard_space_in_base'
+'guard_entry_unquoted~bin/av-guard~s/then node "\$d_f" req; fi/then node $d_f req; fi/~guard_odd_names'
+# The installer. guard_inst_pin_* are the chief's own request: it checks the pin in its header itself and refuses, writing nothing.
+'guard_inst_root_unchecked~root-install-guard.sh~/^\[ "\$(id -u)" = 0 \] || die "not root"$/d~guard_install_not_root'
+'guard_inst_host_unchecked~root-install-guard.sh~/^\[ "\$(hostname)" = OVH \]/d~guard_install_not_ovh'
+'guard_inst_pin_hash_unchecked~root-install-guard.sh~/^\[ "\$(sha256sum < "\$here\/bin\/av-guard" | cut -c1-64)" = "\$pin" \]/d~guard_install_pin_mismatch'
+'guard_inst_pin_count_unchecked~root-install-guard.sh~/^\[ "\$(printf .%s\\n. "\$pins" | grep -c ..)" = 1 \]/d~guard_install_pin_mismatch'
+'guard_inst_pin_line_unchecked~root-install-guard.sh~/^printf .%s\\n. "\$pins" | grep -Eqx/d~guard_install_pin_mismatch'
+'guard_inst_pin_path_unchecked~root-install-guard.sh~s/\(grep -Eqx .# sha256 \[0-9a-f\]{64}\) bin\/av-guard\(.\) || die/\1 [A-Za-z0-9._+\/-]+\2 || die/~guard_install_pin_mismatch'
+'guard_inst_pin_file_unchecked~root-install-guard.sh~/^\[ -f "\$here\/bin\/av-guard" \] \&\& \[ ! -L "\$here\/bin\/av-guard" \]/d~guard_install_pin_mismatch'
+'guard_inst_pin_comment~root-install-guard.sh~/^set -eu$/i\# sha256 stray comment~guard_install_hashes'
+'guard_inst_link_unchecked~root-install-guard.sh~/^    \[ ! -L "\$2" \] || die "\$2 is a link; nothing was installed"$/d~guard_install_refuses_dropin_folders guard_install_refuses_unsafe'
+'guard_inst_kind_unchecked~root-install-guard.sh~s/case \$1 in folder) \[ -d "\$2" \] ;; \*) \[ -f "\$2" \] ;; esac || die/: || die/~guard_install_refuses_dropin_folders guard_install_refuses_unsafe'
+'guard_inst_owner_unchecked~root-install-guard.sh~/^    \[ "\${s%% \*}" = 0 \] || die/d~guard_install_refuses_dropin_folders guard_install_refuses_unsafe'
+'guard_inst_group_write_ok~root-install-guard.sh~s/in ?????\[!w\]??\[!w\]?) ;;/in ????????[!w]?) ;;/~guard_install_refuses_dropin_folders guard_install_refuses_unsafe'
+'guard_inst_other_write_ok~root-install-guard.sh~s/in ?????\[!w\]??\[!w\]?) ;;/in ?????[!w]????) ;;/~guard_install_refuses_dropin_folders guard_install_refuses_unsafe'
+'guard_inst_dropin_folder_skipped~root-install-guard.sh~s/ "\$units\/linux-av-scan.service.d" "\$units\/linux-av-rootkit.service.d"; do/; do/~guard_install_refuses_dropin_folders'
+'guard_inst_unit_skipped~root-install-guard.sh~s/^    sound file "\$units\/\$u"$/    :/~guard_install_refuses_unsafe'
+'guard_inst_self_unreadable~root-install-guard.sh~/^\[ -f "\$0" \] \&\& \[ ! -L "\$0" \] || die/d~guard_install_pin_mismatch'
+'guard_inst_backup_failure_ignored~root-install-guard.sh~s/ || die "could not keep \$1.before-OC-T-0037"/ || :/~guard_install_backup_failure'
+'guard_inst_stale_new_kept~root-install-guard.sh~/^    rm -f -- "\$3.new"$/d~guard_install_stale_new'
+'guard_inst_dropin_content~root-install-guard.sh~s/"ExecStartPre=\$lib\/bin\/av-guard"/"ExecStartPre=-$lib\/bin\/av-guard"/~guard_install_writes'
+'guard_inst_dest_link_unchecked~root-install-guard.sh~/^    \[ ! -L "\$f" \] || die/d~guard_install_refuses_dest'
+'guard_inst_dest_type_unchecked~root-install-guard.sh~/^    \[ ! -e "\$f" \] || \[ -f "\$f" \] || die/d~guard_install_refuses_dest'
+'guard_inst_exec_count_unchecked~root-install-guard.sh~/^    \[ "\$(grep -c .\^ExecStart=. /d~guard_install_exec_unknown'
+'guard_inst_exec_form_unchecked~root-install-guard.sh~/^    grep -qxF -e "\$old" -e "\$new"/d~guard_install_exec_unknown'
+'guard_inst_rewrite_unanchored~root-install-guard.sh~s/s|\^\$old\\\$|\$new|/s|\/usr\/local\/bin\/av-scan|$lib\/bin\/av-scan|/~guard_install_writes guard_install_exec_line_only'
+'guard_inst_keep_overwrites~root-install-guard.sh~/^    \[ -e "\$1.before-OC-T-0037" \] \&\& return 0$/d~guard_install_backup_first_only'
+'guard_inst_keep_skipped~root-install-guard.sh~s/^    cmp -s "\$t\/\$u" "\$units\/\$u" || keep "\$units\/\$u"$/    :/~guard_install_writes guard_install_backup_first_only'
+'guard_inst_unchanged_shortcut~root-install-guard.sh~s/echo "unchanged: \$3"; return 0; fi/:; fi/~guard_install_second_run'
+'guard_inst_guard_mode~root-install-guard.sh~s/0755 "\$dst\/bin\/av-guard"/0775 "$dst\/bin\/av-guard"/~guard_install_writes'
+'guard_inst_dropin_not_written~root-install-guard.sh~/^put "\$t\/05-guard.conf" 0644 "\$units\/linux-av-rootkit.service.d\/05-guard.conf"$/d~guard_install_writes'
+'guard_inst_unit_not_written~root-install-guard.sh~s/^    put "\$t\/\$u" 0644 "\$units\/\$u"$/    :/~guard_install_writes'
+'guard_inst_scratch_left~root-install-guard.sh~/^trap /d~guard_install_writes'
+'guard_inst_reload_replaced~root-install-guard.sh~s/^systemctl daemon-reload$/systemctl restart linux-av-scan.service/~guard_install_no_unit_actions'
+'guard_inst_readback_pre_unchecked~root-install-guard.sh~/^    \[ "\$got_pre" = /d~guard_install_readback'
+'guard_inst_readback_run_unchecked~root-install-guard.sh~/^    \[ "\$got_run" = /d~guard_install_readback'
+'guard_inst_readback_errors_ignored~root-install-guard.sh~/^exec_fields() /s/ | \\3\/p"/ | no\/p"/~guard_install_readback'
+'guard_inst_readback_failure_ignored~root-install-guard.sh~s/ || die "systemctl show \$u failed"/ || :/~guard_install_readback'
+'guard_inst_final_run_removed~root-install-guard.sh~/^"\$dst\/bin\/av-guard" || die/d~guard_install_final_guard_run'
+'guard_readme~README.md~/05-guard.conf/d~guard_documented'
+'guard_master~MASTER.md~/root-install-guard.sh/d~guard_documented'
 )
 
 SELECT=" $* "
-KILLED=0; SURVIVED=0
+KILLED=0; SURVIVED=0; SKIPPED=0
+ROOT=0; [ "$(id -u)" = 0 ] && ROOT=1
+# A mutant named guard_* has rows that build real owners, so it runs only as root; every other mutant's rows run av-scan, which
+# refuses AV_ROOT as root, so it runs only as another user. The gate runs this script twice, once as each; a run counts the mutants
+# that are not for its user as skipped and says so.
+runs_here() { # mutant name
+    case "$1" in guard_*) [ "$ROOT" = 1 ] ;; *) [ "$ROOT" = 0 ] ;; esac
+}
 
 # The unmutated copy must be green for each selected row first, or red means nothing.
 copy_to() { # dir
@@ -283,7 +374,7 @@ copy_to() { # dir
     cp -r "$REPO/systemd" "$1/"
     [ -d "$REPO/config" ] && cp -r "$REPO/config" "$1/"
     cp "$REPO/README.md" "$REPO/MASTER.md" "$1/"
-    cp "$REPO/root-install.sh" "$1/"
+    cp "$REPO/root-install.sh" "$REPO/root-install-guard.sh" "$1/"
 }
 run_rows() { # dir rows...
     local dir="$1"; shift
@@ -292,10 +383,11 @@ run_rows() { # dir rows...
 
 # A selected run proves only its own rows, keeping scoped checks scoped.
 BASELINE_ROWS=()
-if [ "$#" -gt 0 ]; then
+if [ "$#" -gt 0 ] || [ "$ROOT" = 1 ]; then
     for m in "${MUTANTS[@]}"; do
         IFS='~' read -r name file expr rows <<< "$m"
-        case "$SELECT" in *" $name "*) : ;; *) continue ;; esac
+        runs_here "$name" || continue
+        case "$SELECT" in "  ") : ;; *" $name "*) : ;; *) continue ;; esac
         read -r -a selected_rows <<< "$rows"
         BASELINE_ROWS+=("${selected_rows[@]}")
     done
@@ -314,6 +406,7 @@ for m in "${MUTANTS[@]}"; do
 $m
 EOF
     case "$SELECT" in "  ") : ;; *" $name "*) : ;; *) continue ;; esac
+    runs_here "$name" || { SKIPPED=$((SKIPPED + 1)); continue; }
     dir="$WORK/m-$name"
     copy_to "$dir"
     sed -i "$expr" "$dir/$file"
@@ -339,5 +432,9 @@ EOF
         SURVIVED=$((SURVIVED + 1))
     fi
 done
-printf '%d killed, %d survived\n' "$KILLED" "$SURVIVED"
+printf '%d killed, %d survived' "$KILLED" "$SURVIVED"
+if [ "$SKIPPED" -gt 0 ]; then
+    if [ "$ROOT" = 1 ]; then printf ', %d skipped (they run as another user)' "$SKIPPED"; else printf ', %d skipped (guard_* mutants need root)' "$SKIPPED"; fi
+fi
+printf '\n'
 [ "$SURVIVED" -eq 0 ]

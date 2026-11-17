@@ -1,0 +1,85 @@
+#!/bin/sh
+# exempt: GNU-ONLY OVH (Ubuntu): stat -c '%u %A' (GNU coreutils and uutils print the same); run as root by systemd
+# av-guard: ExecStartPre= of linux-av-scan.service and linux-av-rootkit.service on OVH (OC-T-0037). Both units run as root, so
+# a file they run or source, or a folder above it, that anyone but root can change is a way to root. This lets the unit start
+# only if every path listed at the end of this file is, at each component from / down to it, not a link, owned by uid 0 and not
+# writable by group or others. Otherwise it prints ONE line on stderr, "av-guard: <path>: <reason>", and exits 1 (the unit fails).
+# A config file av-scan would source (the chain in lib/common.sh with HOME=/root, no AV_CONFIG) may be missing: then nothing is
+# sourced from it, and the components that do exist above it are still checked, so nobody else can create it. Every other path
+# must exist. Each drop-in folder is checked, and so is every entry in it, dot files and links included; an entry that is a
+# folder is checked, not entered, because systemd reads only the files directly in a drop-in folder.
+# Nothing it checks can be changed from outside this file: it reads no argument, no file and no environment variable (it sets PATH
+# itself) and base= below is empty (a row checks both). tests/run.sh runs a copy whose base= line names a scratch root, and a row
+# proves that copy differs from this file by that line alone.
+# Not checked: ACLs and extended attributes (stat does not show them), the shell and stat themselves, and units in /run or
+# /usr/lib (only root writes there).
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+base=
+
+# oneline TEXT: TEXT with each newline shown as \n, so a refusal is one line whatever the name holds.
+oneline() {
+    o_rest=$1 o_out=
+    while :; do
+        case $o_rest in
+            *'
+'*) o_out=$o_out${o_rest%%'
+'*}'\n'; o_rest=${o_rest#*'
+'} ;;
+            *) o_out=$o_out$o_rest; break ;;
+        esac
+    done
+    printf '%s' "$o_out"
+}
+fail() { printf 'av-guard: %s: %s\n' "$(oneline "$1")" "$2" >&2; exit 1; }
+
+# node PATH MODE: PATH is not a link, exists, is owned by root and is not writable by group or others, or this refuses. A PATH that
+# is missing is a refusal for MODE req, and a return of 1 for MODE opt. A path that stat cannot read gives no owner, and no owner
+# is not root, so it refuses too.
+node() {
+    if [ -L "$1" ]; then fail "$1" "is a link"; fi
+    if [ ! -e "$1" ]; then
+        if [ "$2" = opt ]; then return 1; fi
+        fail "$1" "is missing"
+    fi
+    n_st=$(stat -c '%u %A' "$1")
+    if [ "${n_st%% *}" != 0 ]; then fail "$1" "is owned by uid ${n_st%% *}, not root"; fi
+    case ${n_st#* } in
+        ?????[!w]??[!w]?) ;;
+        *) fail "$1" "is writable by group or others (${n_st#* })" ;;
+    esac
+    return 0
+}
+
+# walk MODE REL: node base itself, then each component of REL (a path below base, no leading slash) down to the last.
+walk() {
+    w_mode=$1 w_rel=$2 w_cur=$base
+    node "${base:-/}" req
+    while [ -n "$w_rel" ]; do
+        w_cur=$w_cur/${w_rel%%/*}
+        case $w_rel in */*) w_rel=${w_rel#*/} ;; *) w_rel= ;; esac
+        node "$w_cur" "$w_mode" || return 0
+    done
+}
+
+# dropins REL: REL is walked like any target, then every entry directly in it is a node.
+dropins() {
+    d_dir=$base/$1
+    walk req "$1"
+    for d_f in "$d_dir"/* "$d_dir"/.[!.]* "$d_dir"/..?*; do
+        if [ -e "$d_f" ] || [ -L "$d_f" ]; then node "$d_f" req; fi
+    done
+}
+
+walk req usr/local/lib/linux-av/bin/av-guard
+walk req usr/local/lib/linux-av/bin/av-scan
+walk req usr/local/lib/linux-av/lib/common.sh
+walk opt etc/linux-av/av.env
+walk opt root/.config/linux-av/av.env
+walk opt usr/local/lib/linux-av/config/av.env
+walk req etc/systemd/system/linux-av-scan.service
+walk req etc/systemd/system/linux-av-rootkit.service
+dropins etc/systemd/system/linux-av-scan.service.d
+dropins etc/systemd/system/linux-av-rootkit.service.d
+echo "av-guard: ok"

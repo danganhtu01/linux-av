@@ -189,6 +189,14 @@ tools plus stubs for `systemctl`, `systemd-run`, `rkhunter`, `aideinit`, `aide` 
 one sed per guard, checks the copy still parses, and reports `killed` or `SURVIVED`; it exits 1 on a
 survivor. Set `TMPDIR` to a scratch directory; `AV_TEST_KEEP=1` keeps the rows' scratch trees.
 
+The rows named `guard_*` (OC-T-0037) make real root-owned and uid-1000-owned fixtures with `chown`, so they
+run only as root, in a throwaway container: as any other user they print `skip` and the summary counts them
+as skipped. The gate runs them as root by name, and runs `tests/mutants.sh` a second time as root for the
+`guard_*` mutants (it skips the others there, and skips these as any other user). The guard and the installer
+read nothing from their environment, so neither has a test hook: the rows run a copy of `bin/av-guard`
+whose `base=` line names the scratch root, and a copy of `root-install-guard.sh` whose `base=`, `PATH=` and pin
+lines differ; a row proves each copy differs from the file under test by those lines alone.
+
 ### Scanning — `av-scan`
 
 ```bash
@@ -331,11 +339,13 @@ Every tracked file in this repository.
 | `bootstrap.sh` | One-shot per-box rollout: locate or clone the checkout, run `install.sh`, run `av-setup all`, then optionally AIDE, whole-box config, on-access and both timers. Run as a normal user; escalates itself. |
 | `install.sh` | Symlinks the three `bin/` commands onto `PATH`. Copies nothing. |
 | `root-install.sh` | OVH's root-owned copy, run as root by `/usr/local/sbin/ovh-root-run` from a run card (C-10; OC-T-0046, R-3377): installs `bin/av-scan` and `lib/common.sh` into `/usr/local/lib/linux-av`, the scan unit's memory-only `limits.conf` and 12h30min `TimeoutStartSec` drop-ins and needrestart's `override_rc` for `linux-av-*`; first refuses, installing nothing, unless OVH's `R-3377-cpu-cap.conf` is a root-owned regular file, not group- or other-writable, with `CPUQuota=` and `CPUWeight=` values (OC-T-0083); reads back the CPU and memory limits after the reload; starts nothing. Its three `# sha256` lines bind `bin/av-scan`, `lib/common.sh` and `systemd/av-scan.service`. |
+| `root-install-guard.sh` | OVH's second root step (C-10; OC-T-0037), run as root by `/usr/local/sbin/ovh-root-run`: installs `bin/av-guard` and a drop-in `05-guard.conf` (`ExecStartPre=` the guard) for `linux-av-scan.service` and `linux-av-rootkit.service`, and rewrites both base unit files so `ExecStart` names `/usr/local/lib/linux-av/bin/av-scan` (every other byte as it was; the old file kept once as `<unit>.before-OC-T-0037`). First refuses, writing nothing, unless its one `# sha256` line matches `bin/av-guard` and the folders and unit files it touches are root-owned, not links and not group- or other-writable; reads `ExecStartPre` and `ExecStart` back for both units after the reload and runs the installed guard once; starts, stops, enables, disables and restarts nothing. |
+| `bin/av-guard` | `ExecStartPre=` of OVH's two root units (OC-T-0037): refuses to start the unit, with one line naming the path and the reason, unless every component down to each file the unit runs or sources (`av-scan`, `lib/common.sh`, the config files, the guard), both unit files and both drop-in folders with every entry in them is root-owned, not group- or other-writable and not a link. Reads no argument, file or variable from its environment. Installed only by `root-install-guard.sh`. |
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
-| `tests/run.sh` | The suite: bash only, no root; includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
-| `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. |
+| `tests/run.sh` | The suite: bash only, no root except the `guard_*` rows (below); includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
+| `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. The `guard_*` mutants run only as root, the rest only as another user. |
 | `FAULTS.toml` | Faults a review found and left open when a build landed (R-3443, R-3446), one entry each with its severity, place, base and head; written only by the records tool (`records add fault`, `records set`). OC-T-0047 filed FAULT-0001 to FAULT-0004 there on 2026-11-07. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |

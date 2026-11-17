@@ -150,7 +150,7 @@ report_scan_threat() {
 
 # clamscan 1.5.4 reads file-list lines with fgets into a 1024-byte buffer.
 # Keep long names and LF/CR names byte-for-byte in argv instead. Scope the byte
-# locale here so the existing argument batching policy stays unchanged.
+# locale here, as scan_argv_bytes does, so the rest of the run keeps its locale.
 scan_file_list_safe() {
     local LC_ALL=C
     [[ $1 != *$'\n'* && $1 != *$'\r'* && ${#1} -lt 1022 ]]
@@ -168,11 +168,22 @@ scan_path_scannable() {
     return 1
 }
 
+# What one name adds to a scanner's argv, in REPLY: its bytes, the NUL that ends
+# it and the 8-byte pointer to it. The kernel counts the strings and their
+# pointers against an exec limit of a quarter of the stack limit (2 MiB at the
+# default 8 MiB). The byte locale is scoped here, so the scanner keeps its own.
+scan_argv_bytes() {
+    local LC_ALL=C length
+    length=${#1}
+    REPLY=$((length + 9))
+}
+
 # Called inside one timeout by run_clamscan_checked. The ordinary list costs
-# one DB load; long and LF/CR names are quoted argv entries in bounded batches.
+# one DB load; long and LF/CR names are quoted argv entries, about 1 MiB of argv
+# a batch, so a long name no longer multiplies the database loads (FAULT-0017).
 # No pathname passes through shell source text.
 run_clamscan_batches() {
-    local engine="$1" list="$2" odd_list="$3" file chars rc=0 batch_rc failed=0
+    local engine="$1" list="$2" odd_list="$3" file bytes rc=0 batch_rc failed=0
     shift 3
     local -a targets=()
     if [ -s "$list" ]; then
@@ -184,13 +195,15 @@ run_clamscan_batches() {
         fi
     fi
     while :; do
-        targets=(); chars=0
+        targets=(); bytes=0
         while IFS= read -r -d '' file; do
             targets+=("$file")
-            chars=$((chars + ${#file} + 1))
-            # At most 8192 characters plus one pathname, or 128 names, leaves
-            # room for multibyte names, environment, options and argv pointers.
-            [ "$chars" -lt 8192 ] && [ "${#targets[@]}" -lt 128 ] || break
+            scan_argv_bytes "$file"; bytes=$((bytes + REPLY))
+            # Up to 1 MiB of argv plus the one pathname (under 4096 bytes) that
+            # reaches it leaves the other half of the 2 MiB exec limit for the
+            # options and the environment. A stack limit under 4 MiB lowers that
+            # limit, and the exec then fails with E2BIG (126), which holds the stamps.
+            [ "$bytes" -lt 1048576 ] || break
         done
         [ "${#targets[@]}" -gt 0 ] || break
         "$engine" "$@" "${targets[@]}"; batch_rc=$?
@@ -241,7 +254,7 @@ run_clamscan_checked() (
         # Serialize only this trusted function, never any pathname, into code.
         # A single timeout bounds every scanner invocation in the worker.
         : > "$odd_list.pending" || { log_err "cannot create batch pending marker"; return 2; }
-        command=("$BASH" -c "$(declare -f run_clamscan_batches)"$'\nrun_clamscan_batches "$@"' \
+        command=("$BASH" -c "$(declare -f run_clamscan_batches scan_argv_bytes)"$'\nrun_clamscan_batches "$@"' \
             av-scan "$engine" "$list" "$odd_list" "${args[@]}")
     fi
     "${runner[@]}" "${command[@]}" 2>&1 | tee "$copy"

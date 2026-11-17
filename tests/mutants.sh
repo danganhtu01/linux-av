@@ -18,6 +18,14 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0080 (FAULT-0017): odd names batch by bytes. odd_batch_d158e91_limits restores that commit's limits (a name count of 128
+# and 8192, now in bytes); odd_batch_count_limit restores the name count alone; each of the others moves a batch by a name or more.
+'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/:/~scan_changed_odd_batches'
+'odd_batch_d158e91_limits~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 8192 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_count_limit~bin/av-scan~s/\[ "$bytes" -lt 1048576 \] || break/[ "$bytes" -lt 1048576 ] \&\& [ "${#targets[@]}" -lt 128 ] || break/~scan_changed_odd_batches'
+'odd_batch_overhead_dropped~bin/av-scan~s/REPLY=$((length + 9))/REPLY=$length/~scan_changed_odd_batches'
+'odd_batch_character_count~bin/av-scan~s/local LC_ALL=C length/local length/~scan_changed_odd_batches'
+'odd_batch_helper_unserialized~bin/av-scan~s/declare -f run_clamscan_batches scan_argv_bytes/declare -f run_clamscan_batches/~scan_changed_odd_batches'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.
 'batch_failure_stamp_hold_removed~bin/av-scan~/^        log_err "clamscan batch failed; stamps unchanged/{n;s/return "$rc"/:/;}~scan_changed_found_error'
 'path_length_removed~bin/av-scan~s/\[ "${#1}" -lt 4096 \] \&\& return 0/return 0/~scan_changed_unscannable'
@@ -36,7 +44,6 @@ MUTANTS=(
 'walk_race_flag~bin/av-scan~s/ -ignore_readdir_race//~scan_changed_vanishing_folder'
 'walk_abort_partial~bin/av-scan~s/^                walk_failed=1$/                return 2/~scan_changed_vanishing_folder'
 'walk_partial_stamp~bin/av-scan~s/^                walk_failed=1$/                walk_failed=0/~scan_changed_vanishing_folder'
-'odd_batch_unbounded~bin/av-scan~s/"$chars" -lt 8192/"$chars" -lt 999999/;s/"${#targets\[@\]}" -lt 128/"${#targets[@]}" -lt 999999/~scan_changed_odd_batches'
 'odd_batch_error_lost~bin/av-scan~s/elif \[ "$rc" = 0 \] \&\& \[ "$batch_rc" -gt 1 \]; then rc=$batch_rc; fi/else rc=$batch_rc; fi/~scan_changed_odd_error'
 'scratch_component~bin/av-scan~s/(\^|\/)${REPLY}(\/|\$)/${REPLY}/~scan_scratch_components'
 'scan_stamp_exit~bin/av-scan~s/\[ "$rc" -le 1 \]/true/g~scan_changed_stamps'

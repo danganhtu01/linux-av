@@ -435,8 +435,13 @@ total count. Other files still scan, including ordinary batch-mates; the run
 returns 2 (or the scanner's stop status, 124, 137 or 143) and holds both stamps
 even if a threat is found. Threat reporting and `AV_ON_FOUND` still run. This also keeps
 individual argv strings well below MAX_ARG_STRLEN (FAULT-0018).
-Argument batches hold at most 128 names, with an additional size bound;
-all scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
+Argument batches hold about 1 MiB of argv each, so long names no longer multiply
+database loads (FAULT-0017): a name counts its bytes under `LC_ALL=C`, its NUL and
+its 8-byte pointer, and a batch ends once it reaches 1048576, the name that reaches
+it included. That is half of the 2 MiB exec limit at the default 8 MiB stack. A
+stack limit under 4 MiB lowers the limit, and the exec then fails with E2BIG
+(status 126), an error that holds both stamps.
+All scanner invocations share one `AV_SCAN_TIMEOUT` and the existing kill grace.
 An earlier batch error cannot be erased by a later clean batch. The batch merge
 reports status 1 if any batch finds a threat, so the run reports `THREATS FOUND`
 and invokes `AV_ON_FOUND`, while any batch error holds both
@@ -525,6 +530,13 @@ remove the stamp hold, remove or raise the path bound, count characters instead
 of bytes, and remove the forced error status. FAULT-0017, FAULT-0019 and
 FAULT-0021 remain unchanged, including the existing memory limits and OVH CPU
 drop-in dependency.
+OC-T-0080 batches the odd names by bytes (FAULT-0017) and re-checks FAULT-0018:
+`scan_path_scannable` refuses every path of 4096 bytes or more before either
+route, so no argv string comes near MAX_ARG_STRLEN (131072), and a batch holds
+about 1 MiB. The unscannable-path regression, with its 131072-byte name, and its
+mutants still pin that bound. The new batch regression fails at `d158e91`, where
+names of 4000 bytes ran 3 to a batch; mutants restore that commit's limits, drop
+the NUL and pointer, count characters and leave the helper out of the worker.
 Round 2 leaves FAULT-0008 through FAULT-0015 open and otherwise preserves round 1.
 The LF, CR/plain-twin, partial-walk and installer regressions fail at `22f338a`;
 `tests/run.sh` also checks bounded batches, a shared timeout and retained errors.

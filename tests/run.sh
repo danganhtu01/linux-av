@@ -2262,21 +2262,48 @@ STUB
     assert_has "$(tail -n 1 "$L/av-scan.log")" 'ERROR' 'failed walk closes with error'
 
 }
+# OC-T-0080 (FAULT-0017): odd names batch by bytes. A name costs its bytes (counted under LC_ALL=C), its NUL and an
+# 8-byte pointer, and a run takes names until 1 MiB (1048576) is reached, the name that reaches it included.
+#   4000-byte names cost 4009: 262 fill a run (261 reach 1046349). d158e91's limit of 8192 characters made it 3 names.
+#   3955-byte names of 1980 characters cost 3964: 265 fill a run (264 reach 1046496). Counted as characters, 528 would.
+#   260 short names fit one run, where d158e91's limit of 128 names made three.
+# The names come through a find stub, so no file system holds them; the scanner stub counts the names of each run.
 row_scan_changed_odd_batches() {
-    changed_fixture; changed_seed
-    local i=0 name
-    while [ "$i" -lt 260 ]; do
-        touch "$D/tree/odd-$i"$'\n'
-        i=$((i + 1))
+    changed_fixture
+    local LC_ALL=C pad name first second shape count want edge i
+    stub find <<'STUB'
+cat "${SCAN_ARGS%/*}/walk"
+STUB
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+n=0
+for arg in "$@"; do case "$arg" in /*) n=$((n + 1)) ;; esac; done
+echo "$n" >> "${SCAN_ARGS%/*}/sizes"
+STUB
+    SCAN_ENV=(LC_ALL=C.utf8)
+    for shape in ascii utf8 short; do
+        changed_seed
+        : > "$D/walk"; : > "$D/sizes"
+        count=540; edge=0
+        case $shape in
+            ascii) printf -v pad '%3995s' ''; pad=${pad// /x}; want='262 262 16'; edge=262 ;;
+            utf8) printf -v pad '%1975s' ''; pad=${pad// /$'\xc3\xa9'}; want='265 265 10'; edge=265 ;;
+            short) pad=''; want=260; count=260; edge=130 ;;
+        esac
+        # The first name, the first of the second run, and the last: each reaches a scanner once.
+        for ((i=0; i<count; i++)); do
+            if [ "$shape" = short ]; then name="$D/tree/odd-$i"$'\n'; else printf -v name '/%04d%s' "$i" "$pad"; fi
+            [ "$i" != 0 ] || first=$name
+            [ "$i" != "$edge" ] || second=$name
+            printf '%s\0' "$name" >> "$D/walk"
+        done
+        scan --changed --path "$D/tree"
+        assert_eq "$RC" 0 "$shape: every batch completes"
+        assert_eq "$(tr '\n' ' ' < "$D/sizes")" "$want " "$shape: names in each run"
+        assert_scan_arg "$first"
+        assert_scan_arg "$second"
+        assert_scan_arg "$name"
     done
-    scan --path "$D/tree"
-    assert_eq "$RC" 0 'bounded batches complete'
-    i=0
-    while [ "$i" -lt 260 ]; do
-        assert_scan_arg "$D/tree/odd-$i"$'\n'
-        i=$((i + 1))
-    done
-    assert_eq "$(grep -c '^clamscan ' "$CALLS")" 3 '128 names maximum per batch'
 }
 row_scan_changed_odd_timeout() {
     changed_fixture; changed_seed

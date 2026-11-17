@@ -37,7 +37,9 @@ MUTANTS=(
 'batch_statuses_unchecked~bin/av-scan~/\[\[ ${run_rcs\[\*\]:-} =. $runs_re \]\] || bad=1/d~scan_changed_batch_errors'
 'batch_status_routing~bin/av-scan~s/if \[ "${run_rcs\[n\]}" = 2 \]; then/if [ "$total_seen" = 1 ]; then/~scan_changed_batch_errors'
 'batch_tee_failure_forgiven~bin/av-scan~s/\[ "${st\[1\]}" = 0 \] || code=x/:/~scan_changed_batch_errors'
-'batch_stderr_dropped~bin/av-scan~s/"$@" 2>\&1 | tee/"$@" | tee/~scan_changed_batch_errors'
+'batch_stderr_dropped~bin/av-scan~s/"$@" 2>\&1 | (/"$@" | (/~scan_changed_batch_errors'
+# The seat's L4: the per-run tee sits in the process group the time limit stops, and without the ignore a FOUND line still in its pipe dies with it.
+'batch_tee_signals_unguarded~bin/av-scan~s/( trap .. TERM HUP INT; exec tee/( exec tee/~scan_changed_stop_keeps_found'
 'batch_clean_run_judged~bin/av-scan~s/\[ "$total_seen" = 0 \] \&\& \[ "$run_count" = 0 \] || bad=1/:/~scan_changed_batch_errors'
 'batch_failure_log_dropped~bin/av-scan~/^    if \[ -n "${odd_list:-}" \] \&\& \[ -e "$odd_list.pending" \]; then$/,/^    fi$/d~scan_pending_remove_failure scan_changed_batch_errors'
 # OC-T-0067 round 4: mixed errors hold stamps; PATH_MAX bounds both routes.

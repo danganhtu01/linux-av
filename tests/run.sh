@@ -2420,6 +2420,32 @@ STUB
         assert_eq "$(stat -c %y "$L/last-full-scan.stamp")" "$(stat -c %y "$D/full-before")" "$scenario: full stamp kept"
     done
 }
+# The seat's L4 on OC-T-0081: the time limit signals the worker's whole process group, and each run's tee is in it. The stub
+# tee waits 1.2 s before it reads, so the FOUND line that the scanner prints at once is still in the pipe when the limit
+# (0.5 s) stops the group. A tee that dies of that signal loses the line, and the run raises no alert. The stub's sleep
+# inherits the ignored signals from the stub, as the real tee does from its parent shell.
+row_scan_changed_stop_keeps_found() {
+    changed_fixture; changed_seed
+    touch "$D/tree/plain" "$D/tree/odd"$'\n'
+    ln -s "$(command -v sleep)" "$B/sleep"
+    stub clamscan <<'STUB'
+printf '%s\0' "$@" >> "$SCAN_ARGS"
+for arg in "$@"; do case "$arg" in --file-list=*) echo 'plain: Test.Signature FOUND'; sleep 5 ;; esac; done
+STUB
+    stub tee <<'STUB'
+printf '%s\n' "$1" >> "${SCAN_ARGS%/*}/copies"
+stat -c '%a' "${1%/*}" >> "${SCAN_ARGS%/*}/copy-modes"
+case "$1" in */run.*) sleep 1.2 ;; esac
+exec "${BASH_SOURCE[0]%/*}/plain/tee" "$@"
+STUB
+    SCAN_ENV=(AV_SCAN_TIMEOUT=0.5s "AV_ON_FOUND=touch '$D/found'")
+    scan --changed --path "$D/tree"
+    assert_eq "$RC" 124 'the scan is stopped at its time limit'
+    assert_has "$OUT" 'time limit' 'the stop is reported'
+    assert_has "$OUT" 'THREATS FOUND' 'the line still in the pipe at the stop alerts'
+    assert_file "$D/found" 'the line still in the pipe at the stop runs AV_ON_FOUND'
+    assert_has "$(cat "$L/av-scan.log")" 'THREATS FOUND' 'the line still in the pipe at the stop is logged'
+}
 row_scan_changed_odd_timeout() {
     changed_fixture; changed_seed
     touch "$D/tree/normal" "$D/tree/odd"$'\r'

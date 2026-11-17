@@ -183,10 +183,16 @@ scan_argv_bytes() {
 # tee, into a copy of its own under runs_dir: the caller judges each run by its
 # own copy, so the worker's lines below never reach what it parses. The run's
 # status joins the runs list; a tee that failed leaves x, which nothing forgives.
+# The time limit stops the worker's whole process group, and that group holds this
+# tee. It ignores TERM, HUP and INT (the ignore outlives the exec), so a FOUND line
+# still in the pipe when the signal comes is handed on once clamscan has gone and
+# closed it. Only a KILL can take the tee: timeout sends one to the group only if
+# the worker outlives the kill grace, and then the bytes clamscan wrote and the tee
+# had not read, at most one pipe buffer, are lost.
 run_clamscan_one() {
     local -a st
     local code
-    "$@" 2>&1 | tee "$runs_dir/run.$((${#runs[@]} + 1))"
+    "$@" 2>&1 | ( trap '' TERM HUP INT; exec tee "$runs_dir/run.$((${#runs[@]} + 1))" )
     st=("${PIPESTATUS[@]}")
     batch_rc=${st[0]}
     code=$batch_rc

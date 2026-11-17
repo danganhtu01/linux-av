@@ -463,6 +463,12 @@ prints no other line). The worker's own `ERROR: clamscan batch failed` line goes
 to the output and the log but not into a copy, so it is never read as a scanner
 error; a forgiven batch of status 2 still leaves that line behind. Forgiven or not,
 the run holds both stamps.
+`AV_SCAN_TIMEOUT` stops the worker's whole process group, and each run's tee is in
+it. The tee ignores TERM, HUP and INT, so a `FOUND` line still in the pipe at that
+moment reaches the combined stream, and the stopped run still alerts. A KILL can
+still take the tee: `timeout` sends one to the group only if the worker outlives
+its 5-minute kill grace, and then what the scanner wrote and the tee had not yet
+read, at most one 64 KiB pipe buffer, is lost.
 The reporting priority matches
 [ClamAV 1.5.4's `scanmanager` rule](https://github.com/Cisco-Talos/clamav/blob/clamav-1.5.4/clamscan/manager.c#L1883-L1892),
 which selects infection before errors. Temporary lists and captured output are

@@ -84,7 +84,7 @@ done
 : "${AV_TIMER_BOOT_DELAY:=1min}"                              # OnBootSec for scan/rootkit timers
 : "${AV_AIDE_BOOT_DELAY:=15min}"                              # OnBootSec drop-in for the AIDE check
 : "${AV_COLOR:=auto}"                                         # auto | always | never
-: "${AV_ROOT:=}"                                               # path prefix for /etc and /var (tests only; empty = the real system)
+: "${AV_ROOT=}"                                                # tests only; preserve the root launcher's readonly empty value
 : "${AV_QUIET_REPORTS:=1}"                                     # 0 = leave chkrootkit/AIDE/rkhunter mail settings alone
 : "${AV_RKHUNTER_DAILY:=1}"                                    # 0 = leave rkhunter's daily run and weekly update off/as is
 : "${AV_AIDE_INIT_UNIT:=linux-av-aide-init}"                   # systemd unit that builds the AIDE baseline

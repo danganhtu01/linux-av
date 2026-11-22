@@ -21,6 +21,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0139 repair: initialized readonly roots and complete executable audits.
+'common_root_readonly_reassigned~lib/common.sh~s/AV_ROOT=}/AV_ROOT:=}/~common_root_default'
+'power_policy_exec_audit_removed~lib/root-policy.sh~/arg =/c\                continue~power_policy_exec_refused'
+'power_policy_unterminated_exec_skipped~lib/root-policy.sh~s/ || \[ -n "\$arg" \]//~power_policy_exec_refused'
 # OC-T-0139: independently prove power gating, foreground cancellation and
 # cancellation of delegated work outside the client process tree.
 'power_gate_removed~lib/common.sh~s/^av_on_mains() {$/av_on_mains() { return 0;/~power_runtime'

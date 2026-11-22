@@ -623,6 +623,30 @@ row_mail_absent_file_not_created() {
     assert_has "$OUT" "/etc/default/aide is not present" "says why"
 }
 
+row_common_root_default() {
+    new_fixture "$ROW"
+    local state expected
+    for state in unset empty prefix; do
+        expected=
+        [ "$state" != prefix ] || expected=$R
+        OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_HOME="$REPO" AV_CONFIG="$H/av.env" AV_COLOR=never \
+            "$BASH_BIN" -euc '
+                case $2 in
+                    unset) unset AV_ROOT ;;
+                    empty) AV_ROOT=; readonly AV_ROOT ;;
+                    prefix) AV_ROOT=$3; readonly AV_ROOT ;;
+                esac
+                . "$1/lib/common.sh"
+                printf "root=<%s>\n" "$AV_ROOT"
+                if [ "$2" != unset ]; then
+                    if ( AV_ROOT=changed ) 2>/dev/null; then exit 3; fi
+                fi
+            ' sh "$REPO" "$state" "$R" 2>&1)"; RC=$?
+        assert_eq "$RC" 0 "$state root prefix loads without assignment errors and stays readonly when initialized"
+        assert_eq "$OUT" "root=<$expected>" "$state root prefix preserved/defaulted"
+    done
+}
+
 row_av_root_refused_as_root() {
     new_fixture "$ROW"
     OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_ROOT="$R" AV_CONFIG="$H/av.env" AV_COLOR=never \
@@ -4001,13 +4025,24 @@ row_power_policy_install() {
     new_fixture "$ROW"
     mkdir -p "$R/etc/cron.daily"
     printf '#!/bin/sh\necho original\n' > "$R/etc/cron.daily/rkhunter"
+    local dir="$R/etc/systemd/system" unit
+    mkdir -p "$dir/linux-av-scan.service.d"
+    printf '[Service]\nExecStart=/usr/local/bin/av-scan --now\nNice=10\n' > "$dir/linux-av-scan.service"
+    printf '[Service]\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$dir/linux-av-rootkit.service"
+    printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$dir/linux-av-scan.service.d/root-owned.conf"
+    printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\nCPUQuota=37%%\nMemoryMax=3G\n' > "$dir/linux-av-scan.service.d/05-guard.conf"
+    cp "$dir/linux-av-scan.service.d/05-guard.conf" "$D/guard"
     setup power-policy
     assert_eq "$RC" 0 'policy-only upgrade succeeds'
     assert_lacks "$(calls)" 'systemctl enable --now linux-av-power.service' 'activation remains separate'
     assert_lacks "$(calls)" 'apt-get ' 'no package transaction'
     assert_lacks "$(calls)" 'freshclam ' 'no signature update'
     assert_lacks "$(calls)" 'systemd-run ' 'no baseline rebuild'
-    local dir="$R/etc/systemd/system" unit
+    assert_has "$(cat "$dir/linux-av-scan.service")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' 'scan migrated'
+    assert_has "$(cat "$dir/linux-av-rootkit.service")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' 'rootkit migrated'
+    assert_has "$(cat "$dir/linux-av-scan.service.d/root-owned.conf")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' 'override migrated'
+    assert_same "$D/guard" "$dir/linux-av-scan.service.d/05-guard.conf" 'guard and resource limits unchanged'
+    assert_has "$(cat "$dir/linux-av-scan.service.before-OC-T-0139")" 'ExecStart=/usr/local/bin/av-scan --now' 'original command backed up'
     for unit in clamav-daemon clamav-clamonacc chkrootkit rkhunter aidecheck dailyaidecheck linux-av-scan linux-av-rootkit; do
         assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'ExecCondition=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power ' 'shared start gate'
         assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'KillSignal=SIGKILL' 'no daemon drain'
@@ -4025,6 +4060,24 @@ row_power_policy_install() {
     printf '#!/bin/sh\necho upgraded-package\n' > "$R/etc/cron.daily/rkhunter"
     setup power-policy
     assert_has "$(cat "$R/etc/cron.daily/rkhunter.linux-av-power-original")" 'upgraded-package' 'new package script preserved on upgrade'
+}
+
+row_power_policy_exec_refused() {
+    local directive
+    for directive in 'ExecStart=/usr/bin/false' 'ExecStartPre=/usr/bin/false' \
+        'ExecStartPost=/usr/bin/false' 'ExecReload=/usr/bin/false' 'ExecStop=/usr/bin/false' \
+        'ExecCondition=/usr/bin/false' 'ExecStopPost=/usr/bin/false' 'ExecUnknown=/usr/bin/false'; do
+        new_fixture "$ROW-${directive%%=*}"
+        # The final directive must be checked even without a trailing newline.
+        printf '[Service]\n%s' "$directive" > "$R/etc/systemd/system/linux-av-scan.service"
+        cp "$R/etc/systemd/system/linux-av-scan.service" "$D/original"
+        setup power-policy
+        assert_eq "$RC" 1 "$directive refused"
+        assert_has "$OUT" 'unsupported executable' 'exec whitelist still enforced'
+        assert_same "$D/original" "$R/etc/systemd/system/linux-av-scan.service" 'refused unit untouched'
+        assert_nofile "$R/etc/systemd/system/linux-av-power.service" 'no policy write before successful audit'
+        assert_nofile "$R/etc/systemd/system/linux-av-scan.service.before-OC-T-0139" 'no backup before successful audit'
+    done
 }
 
 row_power_runtime() {

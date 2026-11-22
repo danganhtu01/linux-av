@@ -118,16 +118,18 @@ av_install_power_policy() (
                 die "unsupported root input in $file; review before upgrading"
             fi
             [ "${file##*/}" != 40-linux-av-power.conf ] || continue
-            while IFS= read -r arg; do
+            # Read directly: process substitution requires /dev/fd in a chroot.
+            while IFS= read -r arg || [ -n "$arg" ]; do
+                [[ $arg =~ ^Exec[A-Za-z]+= ]] || continue
                 case $arg in
                     ExecStart=|ExecStartPre=/usr/local/lib/linux-av/bin/av-guard) ;;
                     'ExecStart=/usr/local/bin/av-scan '*|'ExecStart=/usr/local/lib/linux-av/bin/av-scan '*|'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan '*) ;;
                     'ExecCondition=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power '*|'ExecStopPost=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power '*) ;;
                     *) die "unsupported executable in $file: $arg" ;;
                 esac
-            done < <(grep -E '^Exec[A-Za-z]+=' "$file" || true)
+            done < "$file"
             rel="upgrade.${#sources[@]}"
-            sed -E 's|^ExecStart=/usr/local/(bin/av-scan|lib/linux-av/bin/av-scan) |ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan |' "$file" > "$t/$rel"
+            sed -E 's#^ExecStart=/usr/local/(bin/av-scan|lib/linux-av/bin/av-scan) #ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan #' "$file" > "$t/$rel"
             cmp -s "$file" "$t/$rel" || plan "$t/$rel" 0644 "$file"
         done
     done

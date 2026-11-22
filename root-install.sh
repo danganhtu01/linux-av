@@ -5,7 +5,7 @@
 # Resume it after the fix is live, which could be later." This is the fix; a separate card starts the timer.
 # The runner checks this file's SHA-256 and each listed file's before it runs anything:
 # sha256 63d881cc652f56f0f8a2cbde92f526d613b8ddd9a6bb7937dff1311563f27fbd bin/av-scan
-# sha256 f1591638d4096e18fb6e43ab8bb3bd2ea1e8c888f2576ff6f94195228ba0cee5 lib/common.sh
+# sha256 8d730e8f4405b4e80b7a97c9c38ecfe0440bec818e23557754244fdeb747aa1d lib/common.sh
 # sha256 f63f123c07e3fb672e6fef8317a6a398681d7f8c091916bb72355806cc9fd626 systemd/av-scan.service
 # What it writes, all root:root:
 #   /usr/local/lib/linux-av/bin/av-scan     0755  (the old one kept once as av-scan.before-R-3377)

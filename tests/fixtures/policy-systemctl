@@ -1,0 +1,51 @@
+#!/bin/bash
+set -eu
+r=${POLICY_FIXTURE_ROOT:-}
+printf '%s\n' "$*" >> "$r/calls"
+# Synthetic readback mutations are data, never executable shell.
+if [ -f "$r/show-failure" ]; then exit 97; fi
+[ "$1" != daemon-reload ] || exit 0
+[ "$1" = show ] || exit 98
+unit=$2; shift 2
+[ ! -f "$r/force-not-found.$unit" ] || { echo not-found; exit 0; }
+value_only=0
+for arg in "$@"; do [ "$arg" != --value ] || value_only=1; done
+for prop in "$@"; do
+    case $prop in -p|--value) continue ;; esac
+    if [ -f "$r/override.$unit.$prop" ]; then cat "$r/override.$unit.$prop"; continue; fi
+    if [ "$prop" = ActiveState ]; then
+        case $unit in cron.service|crond.service) echo active ;; *) echo inactive ;; esac
+        continue
+    fi
+    if [ "$prop" = LoadState ]; then
+        if [ -f "$r/etc/systemd/system/$unit" ]; then echo loaded; else echo not-found; fi
+        continue
+    fi
+    case $prop in
+        NeedDaemonReload) echo no; continue ;;
+        RestartUSec) echo 1s; continue ;;
+        TimeoutStopUSec) echo 2s; continue ;;
+        Conditions) continue ;;
+        FragmentPath) [ ! -f "$r/etc/systemd/system/$unit" ] || echo "$r/etc/systemd/system/$unit"; continue ;;
+        DropInPaths)
+            for path in "$r"/etc/systemd/system/"$unit".d/*.conf; do [ ! -f "$path" ] || echo "$path"; done
+            continue ;;
+        EnvironmentFiles)
+            for path in "$r/etc/systemd/system/$unit" "$r"/etc/systemd/system/"$unit".d/*.conf; do
+                [ ! -f "$path" ] || sed -n 's/^EnvironmentFile=//p' "$path"
+            done
+            continue ;;
+    esac
+    value=
+    for file in "$r/etc/systemd/system/$unit" "$r"/etc/systemd/system/"$unit".d/*.conf; do
+        [ -f "$file" ] || continue
+        while IFS= read -r line; do
+            case $line in "$prop="*) value=${line#*=} ;; esac
+        done < "$file"
+    done
+    value=${value//%n/$unit}
+    [ "$prop" != KillSignal ] || value=9
+    [ -n "$value" ] || continue
+    if [ "$value_only" = 1 ]; then echo "$value"; continue; fi
+    printf '%s={ path=%s ; argv[]=%s ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n' "$prop" "${value%% *}" "$value"
+done

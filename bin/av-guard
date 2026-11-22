@@ -18,6 +18,7 @@ set -u
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 base=
+proc=/proc
 
 # oneline TEXT: TEXT with each newline shown as \n, so a refusal is one line whatever the name holds.
 oneline() {
@@ -73,6 +74,205 @@ dropins() {
     done
 }
 
+# These modes run from the pinned snapshot before installing any code, or from
+# the verified permanent copy for a policy refresh. No configurable host paths.
+cron_names='rkhunter chkrootkit aide aide-common'
+placeholder() { printf '#!/bin/sh\n# linux-av cron migration disabled\nexit 0\n'; }
+wrapper() { printf '#!/bin/sh\n# linux-av mains-only cron wrapper\nexec /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --cron /etc/cron.daily/%s.linux-av-power-original\n' "$1"; }
+regular() {
+    walk opt "${1#"$base/"}"
+    [ ! -e "$1" ] || [ -f "$1" ] || fail "$1" 'not a regular file'
+}
+# A same-directory rename is published only after its complete file is synced;
+# sync the parent too. All directories are root-controlled; no concurrent root
+# or package mutation is supported. A failed sync is a hard failure, not success.
+keep() {
+    k_src=$1 k_dst=$2
+    regular "$k_dst"
+    k_tmp=$(mktemp "${k_dst%/*}/.linux-av.XXXXXXXX") || exit 1
+    cp -p -- "$k_src" "$k_tmp" && same "$k_src" "$k_tmp" && sync -f "$k_tmp" && mv -fT -- "$k_tmp" "$k_dst" && sync -f "${k_dst%/*}" || exit 1
+}
+same() { cmp -s "$1" "$2" && [ "$(stat -c '%F %u %g %a' "$1")" = "$(stat -c '%F %u %g %a' "$2")" ]; }
+archive() {
+    a_src=$1
+    a_key=$(sha256sum < "$a_src" | cut -c1-64).$(stat -c '%u.%g.%a' "$a_src")
+    a_dst=$state/saved.$a_key
+    regular "$a_dst"
+    if [ -e "$a_dst" ]; then same "$a_src" "$a_dst" || fail "$a_dst" 'saved original differs'; else keep "$a_src" "$a_dst"; fi
+    [ "$(sha256sum < "$a_dst" | cut -c1-64).$(stat -c '%u.%g.%a' "$a_dst")" = "$a_key" ] || fail "$a_dst" 'saved original digest/metadata differs'
+}
+if [ "${1:-}" = --cron-disable ]; then
+    set -e
+    umask 022
+    walk opt etc/linux-av
+    walk opt etc/cron.daily
+    [ ! -e "$base/etc/cron.daily" ] || [ -d "$base/etc/cron.daily" ] || fail cron.daily 'not a directory'
+    # The caller holds the exclusive policy lock across disable/drain/install.
+    [ /proc/self/fd/9 -ef "$base/run/linux-av-policy.lock" ] || fail lock 'exclusive caller lock descriptor required'
+    flock -n -x 9 || fail lock 'policy/cron work in progress'
+    install -d -o root -g root -m 0755 "$base/etc/linux-av"
+    regular "$base/etc/linux-av/power.incomplete"
+    : > "$base/etc/linux-av/power.incomplete"
+    sync -f "$base/etc/linux-av/power.incomplete"; sync -f "$base/etc/linux-av"
+    walk opt etc/linux-av/cron-migration
+    install -d -o root -g root -m 0755 "$base/etc/linux-av/cron-migration"
+    for name in $cron_names; do
+        cron=$base/etc/cron.daily/$name
+        original=$cron.linux-av-power-original
+        state=$base/etc/linux-av/cron-migration/$name
+        regular "$cron"; regular "$original"
+        walk opt "etc/linux-av/cron-migration/$name"
+        [ ! -e "$state" ] || [ -d "$state" ] || fail "$state" 'not a directory'
+        regular "$state/pending"
+        if [ ! -f "$cron" ]; then
+            [ ! -e "$state/pending" ] || fail "$cron" 'missing pending dispatch'
+            continue
+        fi
+        install -d -o root -g root -m 0755 "$state"
+        if [ -f "$state/pending" ]; then
+            a_key=$(sha256sum < "$state/pending" | cut -c1-64).$(stat -c '%u.%g.%a' "$state/pending")
+            regular "$state/saved.$a_key"
+            [ -f "$state/saved.$a_key" ] && same "$state/pending" "$state/saved.$a_key" || fail "$state" 'pending original lacks matching durable archive'
+            # A crash can leave raw dispatch, disabled dispatch, or the finished
+            # wrapper. Never take any of these as a new package original.
+            if ! placeholder | cmp -s "$cron" - && ! wrapper "$name" | cmp -s "$cron" -; then
+                same "$cron" "$state/pending" || fail "$cron" 'dispatch changed during pending migration'
+            fi
+        elif wrapper "$name" | cmp -s "$cron" -; then
+            [ -f "$original" ] || fail "$original" 'missing original'
+            if grep -Eq '^# linux-av (cron migration disabled|mains-only cron wrapper)$' "$original"; then
+                fail "$original" 'migration route is not a package original'
+            fi
+            archive "$original"
+            # The same wrapper text can point to an older launcher without the
+            # shared lock. Disable it too; its package original stays distinct.
+            keep "$original" "$state/pending"
+        else
+            if grep -Eq '^# linux-av (cron migration disabled|mains-only cron wrapper)$' "$cron"; then
+                fail "$cron" 'unrecognized migration route or missing saved original'
+            fi
+            # Keep BOTH the displaced package and any legitimate earlier
+            # original, including exact regular type, owner, mode and bytes.
+            [ ! -f "$original" ] || archive "$original"
+            archive "$cron"
+            keep "$cron" "$state/pending"
+        fi
+        if ! placeholder | cmp -s "$cron" -; then
+            # Retain the old inode as well as the independent durable copy:
+            # /proc fd/exe inspection can detect an already-open renamed script.
+            opened=$state/open.$(stat -c '%d.%i' "$cron")
+            if wrapper "$name" | cmp -s "$cron" -; then opened=$state/open.wrapper.$(stat -c '%d.%i' "$cron"); fi
+            regular "$opened"
+            if [ ! -e "$opened" ]; then ln -- "$cron" "$opened"; sync -f "$state"; fi
+            [ "$opened" -ef "$cron" ] || fail "$opened" 'wrong retained inode'
+        fi
+        regular "$cron.before-OC-T-0139"
+        [ -e "$cron.before-OC-T-0139" ] || keep "$state/pending" "$cron.before-OC-T-0139"
+        # Disable before waiting, even on a first install with no launcher.
+        p_tmp=$(mktemp "${cron%/*}/.linux-av.XXXXXXXX")
+        placeholder > "$p_tmp"; chmod 0755 "$p_tmp"
+        sync -f "$p_tmp"; mv -fT -- "$p_tmp" "$cron"; sync -f "${cron%/*}"
+        # Publish the runnable copy only behind the disabled dispatch. Preserve
+        # an existing legitimate original in the durable archive first.
+        [ ! -f "$original" ] || archive "$original"
+        o_tmp=$(mktemp "${original%/*}/.linux-av.XXXXXXXX")
+        install -o root -g root -m 0644 "$state/pending" "$o_tmp"
+        sync -f "$o_tmp"; mv -fT -- "$o_tmp" "$original"; sync -f "${original%/*}"
+    done
+    exit 0
+fi
+if [ "${1:-}" = --cron-wait ]; then
+    # Deadline signals apply only to our census worker/process group, never to
+    # the pre-existing jobs being observed. Caller retains the exclusive lock.
+    if timeout --kill-after=2s 60s /bin/sh "$0" --cron-drain; then exit 0; else status=$?; fi
+    case $status in
+        124|137) fail cron 'timed out draining legacy jobs; dispatch remains disabled, originals preserved; retry installation after jobs finish' ;;
+        *) exit "$status" ;;
+    esac
+fi
+if [ "${1:-}" = --cron-drain ]; then
+    set -e
+    [ /proc/self/fd/9 -ef "$base/run/linux-av-policy.lock" ] || fail lock 'exclusive caller lock descriptor required'
+    flock -n -x 9 || fail lock 'policy/cron work in progress'
+    # Bounded polling: at most 60 censuses / 59 one-second sleeps. A clean
+    # second census lets visible pre-rename dispatchers/children drain too.
+    clean=0
+    for attempt in $(seq 1 60); do
+        if /bin/sh "$0" --cron-idle; then
+            clean=$((clean+1)); [ "$clean" -lt 2 ] || exit 0
+        else
+            status=$?
+            [ "$status" = 75 ] || exit "$status"
+            clean=0
+        fi
+        [ "$attempt" = 60 ] || sleep 1
+    done
+    fail cron 'timed out draining legacy jobs; dispatch remains disabled, originals preserved; retry installation after jobs finish'
+fi
+
+# Census is observational, never a scheduler lock. Require complete host proc.
+# Visible dispatchers are conservative blockers, not evidence of unsafe work.
+busy() { printf 'av-guard: %s: %s\n' "$1" "$2" >&2; exit 75; }
+if [ "${1:-}" = --cron-idle ]; then
+    [ -d "$proc/1" ] && [ -r "$proc/1/cmdline" ] || fail "$proc" 'complete readable process inventory required'
+    for p in "$proc"/[0-9]*; do
+        [ -d "$p" ] || continue
+        if ! args=$(tr '\000' '\n' < "$p/cmdline"); then
+            [ ! -d "$p" ] && continue
+            fail "$p" 'cannot inspect running process'
+        fi
+        # A new launcher blocked on our exclusive lock is safe to leave queued.
+        # Its open descriptor must name this exact lock, not a caller pathname.
+        case $args in
+            *'/usr/local/lib/linux-av/bin/av-root
+av-power
+--cron
+'*)
+                if [ "$p/fd/9" -ef "$base/run/linux-av-policy.lock" ]; then continue; fi ;;
+        esac
+        # Inspect retained pre-rename inodes, including a shell reading an
+        # already-open script via stdin with no script pathname in its argv.
+        [ -r "$p/fd" ] && [ -x "$p/fd" ] || { [ ! -d "$p" ] && continue; fail "$p" 'cannot inspect open legacy scripts'; }
+        for saved in "$base"/etc/linux-av/cron-migration/*/open.*; do
+            [ -f "$saved" ] || continue
+            for fd in "$p"/fd/* "$p/exe"; do
+                [ ! "$fd" -ef "$saved" ] || busy "$p" 'already-open legacy cron script'
+            done
+        done
+        old_ifs=$IFS; IFS='
+'
+        set -f
+        for arg in $args; do
+            case $arg in
+                /etc/cron.daily/rkhunter|/etc/cron.daily/chkrootkit|/etc/cron.daily/aide|/etc/cron.daily/aide-common|/etc/cron.daily/rkhunter.linux-av-power-original|/etc/cron.daily/chkrootkit.linux-av-power-original|/etc/cron.daily/aide.linux-av-power-original|/etc/cron.daily/aide-common.linux-av-power-original)
+                    busy "$p" 'affected cron job already running' ;;
+            esac
+            # Shell command strings are conservatively blocked. Exact argv
+            # tokens above avoid treating rkhunter-unrelated as the daily job.
+            case $arg in
+                *' '*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'"'*|*"'"*|*'('*|*')'*)
+                    case $arg in
+                        *'/etc/cron.daily/rkhunter'*|*'/etc/cron.daily/chkrootkit'*|*'/etc/cron.daily/aide'*)
+                            busy "$p" 'possible legacy cron shell dispatch already running' ;;
+                    esac ;;
+            esac
+            case ${arg##*/} in
+                run-parts|anacron|rkhunter|chkrootkit|aide|aide.wrapper|clamscan|clamdscan|clamd|clamonacc|av-scan|av-power)
+                    busy "$p" 'affected job or daily dispatcher already running' ;;
+            esac
+        done
+        set +f; IFS=$old_ifs
+    done
+    exit 0
+fi
+# Lock path check before the launcher opens it. /run is root-controlled; no
+# environment/root override exists. A concurrent root mutation is out of scope.
+if [ "${1:-}" = --cron-lock ]; then
+    walk opt run/linux-av-policy.lock
+    [ ! -e "$base/run/linux-av-policy.lock" ] || [ -f "$base/run/linux-av-policy.lock" ] || fail lock 'is not regular'
+    exit 0
+fi
+
 # --power is also used before policy installation, so policy files may be absent.
 # All existing policy/runtime paths are checked, including their ancestors.
 if [ "${1:-}" = --power ]; then
@@ -85,7 +285,7 @@ if [ "${1:-}" = --power ]; then
     walk opt etc/linux-av/av.env
     [ ! -e "$base/etc/linux-av/av.env" ] || [ -f "$base/etc/linux-av/av.env" ] || fail /etc/linux-av/av.env 'is not a regular file'
     # The launcher selects only /etc/linux-av/av.env. No HOME/XDG/repo fallback.
-    for rel in etc/linux-av/power.units run/linux-av-power; do walk opt "$rel"; done
+    for rel in etc/linux-av/power.units etc/linux-av/power.cron.sha256 etc/linux-av/power.release.sha256 run/linux-av-policy.lock etc/linux-av/power.incomplete run/linux-av-power; do walk opt "$rel"; done
     for rel in etc/systemd/system etc/cron.daily run/linux-av-power; do
         walk opt "$rel"
         [ -d "$base/$rel" ] || continue

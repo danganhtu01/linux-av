@@ -4080,6 +4080,20 @@ row_power_policy_exec_refused() {
     done
 }
 
+row_power_cron_migration() {
+    [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/cron-migration.sh" 2>&1)"
+    assert_eq "$?" 0 "inert cron migration checks: $output"
+}
+
+row_power_policy_verify() {
+    [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/policy.sh" 2>&1)"
+    assert_eq "$?" 0 "synthetic installed policy checks: $output"
+}
+
 row_power_runtime() {
     local output
     output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/power.sh" 2>&1)"

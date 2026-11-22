@@ -21,6 +21,14 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0139 legacy migration ordering and final activation boundary.
+'power_cron_disable_removed~root-install-power.sh~/--cron-disable || fail/d~power_cron_migration'
+'power_cron_wait_removed~root-install-power.sh~/--cron-wait || fail/d~power_cron_migration'
+'power_cron_publish_before_readback~lib/root-policy.sh~s@case \$dst in "\$base/etc/cron.daily/"\*)@case $dst in /never/*)@~power_cron_migration'
+# OC-T-0139 rerun contract and actual cron/install lock protocol.
+'power_verify_bytes_skipped~lib/root-policy.sh~/expected "$kind" "$input" | cmp -s "$dest" - /c\            :~power_policy_verify'
+'power_verify_reload_ignored~lib/root-policy.sh~/stale loaded policy for/c\        :~power_policy_verify'
+'power_cron_lock_removed~bin/av-root~/flock -s 9 /d~power_policy_verify'
 # OC-T-0139 repair: initialized readonly roots and complete executable audits.
 'common_root_readonly_reassigned~lib/common.sh~s/AV_ROOT=}/AV_ROOT:=}/~common_root_default'
 'power_policy_exec_audit_removed~lib/root-policy.sh~/arg =/c\                continue~power_policy_exec_refused'
@@ -383,7 +391,7 @@ copy_to() { # dir
     cp -r "$REPO/systemd" "$1/"
     [ -d "$REPO/config" ] && cp -r "$REPO/config" "$1/"
     cp "$REPO/README.md" "$REPO/MASTER.md" "$1/"
-    cp "$REPO/root-install.sh" "$REPO/root-install-guard.sh" "$1/"
+    cp "$REPO/root-install.sh" "$REPO/root-install-guard.sh" "$REPO/root-install-power.sh" "$1/"
 }
 run_rows() { # dir rows...
     local dir="$1"; shift

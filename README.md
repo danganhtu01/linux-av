@@ -345,7 +345,8 @@ Review that config as executable shell, including anything it sources or calls.
 
 `root-install-power.sh` reuses the pinned root-install model: an independently
 verified root-private installer copies all 13 pinned inputs into private staging,
-checks those copies, backs up changed installed files once, and installs regular
+checks those copies, disables and drains legacy package dispatch as described below,
+backs up changed installed files once, and installs regular
 root:root files under `/usr/local/lib/linux-av` (0755 commands, 0644 libraries and
 templates). Nothing from the caller-owned tree is executed or sourced. The
 installed setup then renders the guardian, inventory, service/timer drop-ins and
@@ -365,10 +366,84 @@ quiescing. Other layouts require review; do not bypass a refusal.
 
 Before an operator performs this upgrade, arrange a separately authorized
 maintenance window: guardian, scanner services and their timers must be inactive,
-including custom units, the cron/crond scheduler and any daily cron scan already in progress. The installer
-refuses active managed services/timers and does not stop them. Record enabled
-and active states to restore explicitly afterward. Do not run package upgrades
-or allow daily cron dispatch during this window.
+including custom units. Already-running legacy daily jobs are drained by the installer.
+The cron/crond scheduler may remain active on both fresh and existing hosts;
+its active state is no longer a refusal. All guardian/scanner/socket/timer and
+existing custom-inventory quiescence checks remain in force. The installer
+stops nothing. Record enabled and active states to restore explicitly afterward.
+Do not run concurrent package transactions or administrative policy/code edits.
+
+Before its first installed code write, the pinned installer takes an exclusive,
+nonblocking `/run/linux-av-policy.lock`. A current guarded job holds the shared
+lock for its whole lifetime, so installation refuses while it runs. New guarded
+invocations wait on the shared lock before loading libraries/config. The lock
+stays exclusive across disabling legacy dispatch, draining, code installation,
+policy installation/readback and guarded-route publication. Policy-only refresh
+uses the same protocol from the verified permanent copy.
+
+For each present `/etc/cron.daily/{rkhunter,chkrootkit,aide,aide-common}` raw
+package entry, the pinned `av-guard --cron-disable` first rejects links, foreign
+owners, writable paths and nonregular types. It durably copies the exact regular
+file bytes, uid/gid and mode into
+`/etc/linux-av/cron-migration/<name>/saved.<sha256>.<uid>.<gid>.<mode>`.
+Any legitimate existing `.linux-av-power-original` is archived separately,
+including its original mode. A durable `pending` copy records the package being
+migrated. The first `.before-OC-T-0139` backup is retained. Files are synced before
+same-directory atomic rename, and their parent filesystem is synced afterward;
+a sync error fails installation. The old dispatch inode is also retained as an
+`open.<device>.<inode>` hard link, allowing the census to recognize a shell with
+an already-open, renamed script even when its argv has no script pathname.
+Canonical wrappers are disabled too: their text alone does not prove that the
+previous launcher implements the shared lock. Their package originals remain
+distinct; wrapper inode records are retired after successful drain/publication.
+Then dispatch is atomically replaced with a root-owned 0755 inert shell script
+that exits 0. Only behind that disabled route is the 0644 working package
+original published. No unguarded route is introduced by installation.
+
+All raw routes are disabled **before waiting**. The pinned `--cron-wait` runs a
+read-only process census, with at most 60 attempts / 59 one-second sleeps and a
+60-second worker deadline (two-second forced worker cleanup allowance). It
+never signals legacy jobs or stops cron. Exact affected daily-script/original
+argv paths, retained open inodes, known scanner names, `run-parts`, `anacron`,
+and shell command strings containing affected paths block progress. Dispatcher
+and scanner-name detection is deliberately conservative. Two clean censuses
+separated by a poll are required. An inspection error fails immediately; a busy
+process drains naturally or causes a plain timeout. On timeout no new code is
+installed, raw dispatch stays disabled, and durable originals plus
+`/etc/linux-av/power.incomplete` remain. Retry the installer after the jobs
+finish; never delete the marker to bypass the gate.
+
+Retries recognize exact inert placeholders and pending raw/wrapped states.
+They validate the pending bytes/type/mode against the durable archive and never
+save the placeholder as a package original. An orphan or malformed placeholder
+refuses. A crash during preparation/publication can leave the original raw route
+or a complete inert route, with a durable pending copy for retry; successful
+parent-filesystem sync makes disabling persistent before drain/code installation.
+A crash during final
+publication can leave some guarded routes and some placeholders, all protected
+by the persistent incomplete gate. After drain, code and policy are installed;
+only successful effective-policy readback permits atomic guarded-route
+publication. The incomplete gate is cleared durably last. Guarded invocations
+refuse with exit 75 while it remains. Policy-only refresh checks retained release
+pins, so it cannot bless a partially copied code release. Recovery is a retry,
+not transactional rollback.
+
+**Dispatcher limits:** rename cannot recall an already-open script, freeze a
+process that has read its old code into memory, or lock an uncooperative legacy
+scheduler. The drain inspects visible argv and retained open inodes, and waits
+out visible dispatchers; even two clean censuses are not a kernel fork/exec
+barrier. A hidden/renamed dispatcher, delayed fork/exec from an unrecognized
+parent, copied/interpreted code with no recognizable argv or fd, alternate path
+aliases, or a process appearing after its census slot can escape observation.
+Complete readable host `/proc` (including fd/exe access), the same filesystem for
+the daily entries and migration state (required for retained inode hard links),
+ordinary distro `run-parts` naming rules excluding dotted/hidden backup files, and no concurrent
+package/admin changes are required. Restricted/container process views, custom
+`run-parts --regex` rules, direct invocations of preserved originals and custom
+cron.d/crontab routes are unsupported. Such dispatchers need a separately
+controlled maintenance window. The installer closes new opens through the four
+supported entries before waiting; it does not claim OS-wide exclusion of
+arbitrary legacy launchers or in-memory code.
 
 After the imported release has passed the release checks below, obtain the
 **installer SHA-256 from the trusted release/run-card channel**, independently of
@@ -398,12 +473,69 @@ later read-back failure can leave part of the new release installed; keep the
 maintenance window in place, retain the first backups and correct the refusal
 before any activation. This is not a transactional rollback mechanism.
 
+The installer also saves `/etc/linux-av/power.release.sha256` from the same
+13-input pinned snapshot; the policy renderer saves `power.cron.sha256` beside
+it for the retained original package bytes. Both are root:root 0644, backed up
+once when changed and atomically replaced. This does not change the independent
+installer-hash trust channel or bless a caller checkout. A policy-only refresh
+does not regenerate release pins.
+
 After successful installation, future policy-only refreshes (for example after a
 package replaces a daily cron script) use:
 
 ```bash
 sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup power-policy
 ```
+
+Before linux-config changes anything on a rerun, use this exact fixed invocation
+(from root automation, omit only the `sudo` prefix):
+
+```bash
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+  /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup power-policy-verify
+```
+
+Success is **exit 0 and exactly these two stdout lines**, each newline-terminated:
+
+```text
+av-guard: ok
+linux-av: installed power policy verified
+```
+
+Every refusal is nonzero and has no success marker. Missing/older installations
+or manifests, an unknown argument, unsafe paths, unknown systemd output and
+inspection errors all fail closed. linux-config must gate its rerun decision on
+both the status and exact output; file presence, a guard-only success, or a skip
+is not verification. On success it can skip code/policy installation when the
+separately trusted release/version is already the desired one. Verification
+does not choose or authenticate a new release. On refusal, report the reason and
+use the independently pinned installation procedure only within its existing
+maintenance preconditions; do not silently reload/repair/start anything.
+
+The verifier reuses `av-guard --power`, policy rendering and the installer's
+effective-command readback. It checks all 13 installed code/template hashes and
+exact modes/uid/gid against the retained release manifest; exact rendered
+guardian/inventory/service/timer/cron bytes and modes/uid/gid; supported legacy
+scan-unit migration and executable restrictions; cron routing, original presence,
+non-executable 0644 originals and their retained hashes; and the inventory
+computed from the current root config, including custom unit basenames. For
+loaded units it audits fragment/drop-in/environment-file paths, `LoadState`,
+recognized `ActiveState`, `NeedDaemonReload=no`, guardian commands/runtime
+settings, service gate/finish commands, guardian dependencies, cgroup kill
+settings, absence of the AC conditions that bypass the queue, and effective
+linux-av scan commands/extra executable inputs. Optional package units may be
+`not-found`; the guardian and any locally installed configured base unit must be
+loaded. Active units are permitted by this read-only command; success does not
+assert that the guardian is activated or that a scan has run.
+
+There is no staging or installed write, log append (including on failure), lock
+creation, daemon-reload, service change, scan, package call or sudo escalation
+inside the verifier. The explicit `sudo` above may of course audit externally.
+It trusts root-authored config as executable shell, the installed entrypoint and
+root-held manifests; it does not sandbox config, attest arbitrary package
+configuration/transitive commands, or prove a running process's in-memory code.
+The result is a point-in-time inspection, not a transaction against concurrent
+root/package/systemd edits. Normal filesystem reads may update access times.
 
 Activation is a separate, explicitly authorized operator step. On Surface, once
 root configuration and the effective units have been reviewed, the guardian is
@@ -425,12 +557,26 @@ real root in a disposable GNU/Linux container (a skip is not a pass), run the
 existing root `guard_*` checks, and verify actual Surface/OVH systemd read-back
 formats and host unit layouts. The new test creates a private chroot with copied
 OS tools and inert service/cron fixtures; no host services or scanners are used.
-The nonroot suite is `bash tests/run.sh`. This worker cannot run the root checks:
-there is no root/sudo and user namespaces are denied. Audit distro scanner
+The nonroot suite is `bash tests/run.sh`; `bash tests/policy.sh` separately runs
+inert active-cron, actual shared/exclusive-lock and verified/mismatched-policy
+checks with synthetic systemctl/proc data and simulated root metadata.
+`bash tests/cron-migration.sh` runs the actual installer and policy renderer in
+relocated, unprivileged copies with inert real processes, simulated root metadata,
+synthetic active-cron readback and shortened polling. It proves all four raw
+routes become inert before draining, timeout/retry preservation, installation
+after drain, failed readback before route publication, already-open inode
+detection and natural completion, interrupted migration, and invalid-type/orphan
+refusals. It does not exercise the host cron daemon or attest real root ownership.
+[Candidate proof and exact checks](OC-T-0139-PROOF.md) record this build's evidence and limits. The root
+fixture now includes active cron, legacy drain timeouts/scanner refusals and read-only
+success/mismatch snapshots; its proc/descriptor identity is synthetic, not a
+mounted host proc. Root-fixture and real host readback checks require a later
+approved run; neither chroot nor host actions were run for this change. Audit distro scanner
 configuration and any transitive includes/commands in root-authored config;
 toolkit ownership checks do not attest arbitrary package configuration or code.
-An already-running old guardian or cron process keeps its old in-memory code
-until the operator quiesces it. No host installation or activation has been
+An already-running old guardian must still be quiesced by the operator. Legacy
+cron scripts keep their old in-memory code until they finish; drain and dispatcher
+limits above apply. No host installation or activation has been
 performed by this repair.
 
 Unhandled paths: arbitrary direct scanner binary invocations, custom units or

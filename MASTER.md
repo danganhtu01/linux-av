@@ -217,6 +217,26 @@ Surface first installs/upgrades the verified permanent copy with
 verification procedure. Subsequent policy-only refreshes use
 `sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup power-policy`.
 There is no package transaction, baseline rebuild or activation in that command.
+Active cron/crond is supported without stopping it; managed scanners/timers keep
+their quiescence protections. A shared/exclusive policy lock serializes current
+guarded cron with installation. Before waiting, the pinned disabler durably
+archives legacy scripts and earlier legitimate originals (bytes/type/uid/gid/mode),
+retains old inodes, and atomically replaces raw daily entries with inert routes.
+A bounded process census drains recognizable legacy work without signaling it;
+timeout leaves dispatch disabled and originals intact for retry. Installation
+follows drain; guarded routing follows successful policy readback. Persistent
+pending/incomplete state supports retries without treating placeholders as
+originals. Rename/census cannot exclude hidden or delayed unrecognized dispatch,
+so complete host proc, standard run-parts naming and no concurrent root/package
+changes remain preconditions. See README for exact dispatcher/race limits.
+Before linux-config changes anything on a rerun, invoke the fixed permanent
+`av-root av-setup power-policy-verify` command with the clean environment shown
+in README. Exit 0 plus the exact guard and verifier stdout lines means installed
+bytes/metadata, configured inventory/cron originals and effective loaded policy
+match. It creates no staging/log/lock, writes no installed files, reloads nothing
+and changes no service. Release and cron digest manifests retain the independently
+pinned snapshot and package-original bytes, respectively; a policy-only refresh
+never re-pins installed code.
 `install.sh` supports user PATH links only, with no `--upgrade` flag; OVH's existing
 run cards retain their safeguards. No rollout is implied by a repository change.
 
@@ -371,7 +391,8 @@ Every tracked file in this repository.
 | `tests/run.sh` | The suite: bash only, no root except the `guard_*` rows (below); includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. The `guard_*` mutants run only as root, the rest only as another user. |
 | `FAULTS.toml` | Faults a review found and left open when a build landed (R-3443, R-3446), one entry each with its severity, place, base and head; written only by the records tool (`records add fault`, `records set`). OC-T-0047 filed FAULT-0001 to FAULT-0004 there on 2026-11-07. |
-| `root-install-power.sh`, `bin/av-root`, `lib/root-policy.sh`, `tests/root-power.sh` | Verified permanent root installation, clean guarded launcher, conservative policy integration and root-only disposable-chroot checks. |
+| `root-install-power.sh`, `bin/av-root`, `lib/root-policy.sh`, `tests/policy.sh`, `tests/cron-migration.sh`, `tests/root-power.sh` | Verified permanent root installation, guarded cron/install serialization, read-only installed/effective-policy verifier, unprivileged synthetic checks and root-only disposable-chroot checks. |
+| `OC-T-0139-PROOF.md` | Candidate migration proof, exact safe checks/fingerprints and separate-gate limitations; no deployment or worker commit. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |
 | `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@`, `@PATHS@`, `@MEMORY_HIGH@` and `@MEMORY_MAX@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |

@@ -7,8 +7,21 @@ unset ENV BASH_ENV CDPATH
 [ "$(id -u)" = 0 ] || { echo 'av-root: root required' >&2; exit 1; }
 lib=/usr/local/lib/linux-av
 case ${1:-} in av-power|av-scan|av-setup) tool=$1; shift ;; *) exit 2 ;; esac
+# New guarded cron waits out an installation; the shared lock remains open
+# across exec and covers the entire supervisor/job. Installation takes it
+# exclusively, nonblocking, before replacing code. No lock write for verifier.
+if [ "$tool" = av-power ] && [ "${1:-}" = --cron ]; then
+    /bin/sh "$lib/bin/av-guard" --cron-lock || exit 1
+    umask 022
+    exec 9>>/run/linux-av-policy.lock
+    flock -s 9 || exit 1
+fi
 # Check before bash or any toolkit library/config is loaded.
 /bin/sh "$lib/bin/av-guard" --power || exit 1
+if [ "$tool" = av-power ] && [ "${1:-}" = --cron ] && [ -e /etc/linux-av/power.incomplete ]; then
+    echo 'av-root: power policy installation incomplete; cron deferred' >&2
+    exit 75
+fi
 # Scan scope is inert data (quoted argv/array parsing, never shell source).
 # Preserve existing unit scopes; all executable/config/state selectors are reset.
 scan_paths=${AV_SCAN_PATHS:-/root}

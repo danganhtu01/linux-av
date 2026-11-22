@@ -11,6 +11,7 @@
 #                        AV_AIDE_INIT=0 still wins (it skips AIDE altogether).
 #   av-setup onaccess     enable ClamAV real-time (on-access) scanning
 #   av-setup power-policy  install/upgrade mains-only policy without packages or baselines
+#   av-setup power-policy-verify  read-only installed/effective policy check
 #   av-setup status       show what is installed / running, and where reports go
 #   av-setup chkrootkit-baseline   adopt the last clean chkrootkit run as log.expected
 #   av-setup all [--keep-aide-baseline]   install + enable (the usual first-run)
@@ -46,7 +47,13 @@ fi
 . "$AV_HOME/lib/common.sh"
 # shellcheck source=../lib/reports.sh
 . "$AV_HOME/lib/reports.sh"
-av_detect_distro
+if [ "${1:-}" = power-policy-verify ]; then
+    # die normally logs to disk. This command reports only to stderr, including
+    # failures, and requires neither distro detection nor sudo re-execution.
+    die() { printf 'linux-av: %s\n' "$*" >&2; exit 1; }
+else
+    av_detect_distro
+fi
 
 # Policy-only upgrades use the same renderer as install/enable/onaccess. Install
 # gates even before packages exist: Debian maintainer scripts can start clamd.
@@ -490,6 +497,10 @@ case "${1:-}" in
     enable)   check_kept_aide_baseline; do_enable ;;
     onaccess) do_onaccess ;;
     power-policy) [ "$#" = 1 ] || die "power-policy takes no options"; do_power_policy ;;
+    power-policy-verify)
+        [ "$#" = 1 ] || die 'power-policy-verify takes no options'
+        . "$AV_HOME/lib/root-policy.sh"
+        av_verify_power_policy ;;
     status)   do_status ;;
     chkrootkit-baseline) av_chkrootkit_baseline ;;
     all)      check_kept_aide_baseline; do_install; do_enable ;;

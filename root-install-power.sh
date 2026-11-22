@@ -6,14 +6,14 @@
 # their hostname/CPU-cap safeguards remain separate and unchanged.
 # The release runner pins this script externally. These pins cover ALL inputs
 # copied/loaded by it; a private snapshot is checked before any input executes.
-# sha256 44835afa77069f9bb88ecf18715c57f87ed9e8c020e2b5eafee1acea0c82ddbb bin/av-guard
-# sha256 5b2ebf4ec09cfd53b7e7fe19ec77d7f5cea5f1d68155163c6e283360ef7847d8 bin/av-root
+# sha256 20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9 bin/av-guard
+# sha256 febff35d3765fd8c4b29d6f09d2f88e7c8013cdaa6765c341e626b33a21f3b14 bin/av-root
 # sha256 41b6ec0e3f6382bf37136e9b9b2f9408cb04251c39cb8e341aeee7be6e2adff4 bin/av-power
 # sha256 63d881cc652f56f0f8a2cbde92f526d613b8ddd9a6bb7937dff1311563f27fbd bin/av-scan
-# sha256 102290fb3004dbd3ec4c888d9a4cc89bc07f3ce76362ff49f8c5c763109db3ef bin/av-setup
+# sha256 13bc3d95921adfed9c6aacf24dfe086a475395457a2c0c66bba3b24e818e3d3b bin/av-setup
 # sha256 8d730e8f4405b4e80b7a97c9c38ecfe0440bec818e23557754244fdeb747aa1d lib/common.sh
 # sha256 a35b9f810543a712f838525deefa997515a140dcf4b97fae4923dfa1b1f0bf60 lib/reports.sh
-# sha256 b891854065d7eec518962d0051f94f49b659cdac229a3b5b48a21ee1341bc929 lib/root-policy.sh
+# sha256 b21ed871bb0b0aca302b98d55cac0372207e84831c00b4886658318a5b29b44f lib/root-policy.sh
 # sha256 0c48256a3148b363c0f4e4e69d8e4af65d97cf2edb2ff3eaa7bf80ce26efa7bc systemd/av-power.service
 # sha256 41455f962a29df522a72a14c92bc9aad8655f0cf59a5f3ed337fbc58ab539aa9 systemd/av-power.conf
 # sha256 f63f123c07e3fb672e6fef8317a6a398681d7f8c091916bb72355806cc9fd626 systemd/av-scan.service
@@ -66,6 +66,9 @@ if [ "$(hostname)" = OVH ]; then
 fi
 # Do not race a running guardian, scan or timer while replacing the permanent
 # files. The operator arranges a maintenance window; this installer stops none.
+sound /etc/linux-av/power.release.sha256
+sound /etc/linux-av/power.release.sha256.before-OC-T-0139
+[ ! -d /etc/linux-av/power.release.sha256 ] && [ ! -d /etc/linux-av/power.release.sha256.before-OC-T-0139 ] || fail 'release manifest destination is a directory'
 sound /etc/linux-av/power.units
 quiescent() {
     state=$(systemctl show "$1" -p ActiveState --value) || [ "$state" = inactive ] || fail "cannot inspect $1"
@@ -74,7 +77,7 @@ quiescent() {
 for unit in linux-av-power.service linux-av-scan.service linux-av-rootkit.service \
     linux-av-scan.timer linux-av-rootkit.timer clamav-daemon.service clamav-daemon.socket \
     clamav-clamonacc.service chkrootkit.service rkhunter.service aidecheck.service dailyaidecheck.service \
-    linux-av-aide-init.service cron.service crond.service chkrootkit.timer rkhunter.timer aidecheck.timer dailyaidecheck.timer; do
+    linux-av-aide-init.service chkrootkit.timer rkhunter.timer aidecheck.timer dailyaidecheck.timer; do
     quiescent "$unit"
 done
 if [ -f /etc/linux-av/power.units ]; then
@@ -110,11 +113,27 @@ for rel in bin/av-root bin/av-guard; do /bin/sh -n "$t/$rel"; done
 for rel in bin/av-power bin/av-scan bin/av-setup lib/common.sh lib/reports.sh lib/root-policy.sh; do
     /usr/bin/env -i PATH="$PATH" /bin/bash --noprofile --norc -p -n "$t/$rel"
 done
+# cron/crond may remain active. Disable raw package routes before draining old
+# jobs, with the pinned snapshot and exclusive lock, before installing code.
+sound /etc/linux-av/power.incomplete
+[ ! -e /etc/linux-av/power.incomplete ] || [ -f /etc/linux-av/power.incomplete ] || fail 'policy incomplete marker is not regular'
+sound /run/linux-av-policy.lock
+[ ! -e /run/linux-av-policy.lock ] || [ -f /run/linux-av-policy.lock ] || fail 'policy lock is not regular'
+exec 9>>/run/linux-av-policy.lock
+flock -n -x 9 || fail 'policy/cron work in progress'
+/bin/sh "$t/bin/av-guard" --cron-disable || fail 'could not disable legacy cron dispatch'
+/bin/sh "$t/bin/av-guard" --cron-wait || fail 'legacy cron drain failed; dispatch disabled; retry after jobs finish'
 while read -r hash rel; do
     if [ -f "$dst/$rel" ] && ! cmp -s "$t/$rel" "$dst/$rel" && [ ! -e "$dst/$rel.before-OC-T-0139" ]; then
         cp -p -- "$dst/$rel" "$dst/$rel.before-OC-T-0139" || fail "backup failed: $rel"
     fi
 done < "$t/pins"
+if [ -f /etc/linux-av/power.release.sha256 ] && ! cmp -s "$t/pins" /etc/linux-av/power.release.sha256 && [ ! -e /etc/linux-av/power.release.sha256.before-OC-T-0139 ]; then
+    cp -p /etc/linux-av/power.release.sha256 /etc/linux-av/power.release.sha256.before-OC-T-0139 || fail 'release manifest backup failed'
+fi
+install -d -o root -g root -m 0755 /etc/linux-av
+# Persistent across failure/reboot: queued cron must not run partial new policy.
+: > /etc/linux-av/power.incomplete
 install -d -o root -g root -m 0755 "$dst" "$dst/bin" "$dst/lib" "$dst/systemd"
 while read -r hash rel; do
     case $rel in bin/*) mode=0755 ;; *) mode=0644 ;; esac
@@ -123,5 +142,10 @@ while read -r hash rel; do
     install -o root -g root -m "$mode" "$t/$rel" "$dst/$rel.new"
     mv -f -- "$dst/$rel.new" "$dst/$rel"
 done < "$t/pins"
+if ! cmp -s "$t/pins" /etc/linux-av/power.release.sha256 || [ "$(stat -c '%u %g %a' /etc/linux-av/power.release.sha256)" != '0 0 644' ]; then
+    rm -f /etc/linux-av/power.release.sha256.new
+    install -o root -g root -m 0644 "$t/pins" /etc/linux-av/power.release.sha256.new
+    mv -f /etc/linux-av/power.release.sha256.new /etc/linux-av/power.release.sha256
+fi
 /bin/sh "$dst/bin/av-root" av-setup power-policy
 printf '%s\n' 'root-install-power: done; activation remains a separate operator step'

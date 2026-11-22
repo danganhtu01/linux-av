@@ -358,11 +358,24 @@ systemd fragments, drop-ins and environment-file paths are checked too. OS
 aliases are accepted there only if root owns the alias and its resolved path is
 safe. Effective toolkit commands are checked after daemon-reload.
 
-Supported scan command prefixes for migration are `/usr/local/bin/av-scan`,
+Supported scan commands use exactly `--now` for scan and `--rootkit` for rootkit.
+Prefixes for migration are `/usr/local/bin/av-scan`,
 `/usr/local/lib/linux-av/bin/av-scan`, and the new `/bin/sh
 /usr/local/lib/linux-av/bin/av-root av-scan`. Custom unit basenames must already
 be set in `/etc/linux-av/av.env` and listed in an existing inventory when
-quiescing. Other layouts require review; do not bypass a refusal.
+quiescing. The exact historical Surface base command
+`/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan`
+is accepted only as unit-file data for the default scan/rootkit units: one base
+ExecStart, matching intended argument, and a loaded `root-owned.conf` with an
+empty ExecStart reset followed by the matching permanent av-scan command.
+The effective command must select that permanent command with the exact
+`av-guard` pre-command, root identity and fresh loaded state. All unit fragments,
+drop-ins and ancestors must pass the ownership/mode audit. The writable checkout
+target is never inspected, resolved, sourced or executed. Only the accepted
+ExecStart lines change; original backups and other settings remain intact.
+A prior `power.incomplete` gate may remain during retry and is removed only after
+successful effective-policy verification. Other layouts require review; do not
+bypass a refusal.
 
 Before an operator performs this upgrade, arrange a separately authorized
 maintenance window: guardian, scanner services and their timers must be inactive,

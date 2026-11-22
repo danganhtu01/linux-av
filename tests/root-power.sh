@@ -45,11 +45,13 @@ chmod 0600 "$R/installer"
 # Simulate a caller-owned checkout; only pinned private snapshots may execute.
 chown -R 1000:1000 "$R/release"
 mkdir -p "$R/etc/systemd/system/linux-av-scan.service.d" "$R/etc/systemd/system/linux-av-rootkit.service.d"
-printf '[Service]\nExecStart=/usr/local/bin/av-scan --now\nNice=10\n' > "$R/etc/systemd/system/linux-av-scan.service"
-printf '[Service]\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service"
+printf '[Service]\nExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --now\nNice=10\n' > "$R/etc/systemd/system/linux-av-scan.service"
+printf '[Service]\nExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service"
 printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$R/etc/systemd/system/linux-av-scan.service.d/root-owned.conf"
+printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service.d/root-owned.conf"
 printf '[Service]\nCPUQuota=37%%\nCPUWeight=20\nMemoryMax=3G\n' > "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf"
 printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$R/etc/systemd/system/linux-av-scan.service.d/05-guard.conf"
+printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$R/etc/systemd/system/linux-av-rootkit.service.d/05-guard.conf"
 printf '#!/bin/sh\n# inert packaged daily fixture\nexit 0\n' > "$R/etc/cron.daily/rkhunter"
 chmod 0755 "$R/etc/cron.daily/rkhunter"
 mkdir -p "$R/etc/default"
@@ -91,7 +93,9 @@ for rel in bin/av-root bin/av-guard bin/av-power bin/av-scan bin/av-setup lib/co
     [ "$(stat -c '%u %g %a' "$L/$rel")" = "0 0 $mode" ] || fail "wrong ownership/mode: $rel"
 done
 grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' "$R/etc/systemd/system/linux-av-scan.service" || fail 'scan base not migrated'
+grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' "$R/etc/systemd/system/linux-av-rootkit.service" || fail 'rootkit base not migrated'
 grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' "$R/etc/systemd/system/linux-av-scan.service.d/root-owned.conf" || fail 'override not migrated'
+grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' "$R/etc/systemd/system/linux-av-rootkit.service.d/root-owned.conf" || fail 'rootkit override not migrated'
 grep -qx 'ExecStartPre=/usr/local/lib/linux-av/bin/av-guard' "$R/etc/systemd/system/linux-av-scan.service.d/05-guard.conf" || fail 'guard lost'
 grep -qx 'CPUQuota=37%' "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf" || fail 'CPU cap lost'
 grep -qx 'MemoryMax=3G' "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf" || fail 'memory limit lost'

@@ -191,6 +191,13 @@ for prop in NeedDaemonReload ExecStart ExecCondition ExecStopPost KillMode Requi
 done
 : > "$R/force-not-found.linux-av-power.service"; refused 'installed unit not loaded'; rm "$R/force-not-found.linux-av-power.service"
 : > "$R/show-failure"; refused 'cannot inspect'; rm "$R/show-failure"
+for name in scan rootkit; do
+    unit=linux-av-$name.service
+    wrong=--rootkit; [ "$name" != rootkit ] || wrong=--now
+    printf 'ExecStart={ path=/bin/sh ; argv[]=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$wrong" > "$R/override.$unit.ExecStart"
+    refused 'unexpected effective ExecStart'
+    rm "$R/override.$unit.ExecStart"
+done
 cp -p "$L/bin/av-power" "$T/saved-code"
 printf '\n' >> "$L/bin/av-power"; refused 'installed release bytes differ'
 cp -p "$T/saved-code" "$L/bin/av-power"

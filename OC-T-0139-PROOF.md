@@ -1,33 +1,107 @@
-OC-T-0139 follow-up over `977fc1b` (`tasks/av-legacy-verified`). No worker commit, push, host installation, chroot, elevation, host service action or new card was performed.
+OC-T-0139 Surface follow-up over linux-av main `20f109b`.
 
-The supplied isolated root-power result was 1/6 checkpoints passed, with the active-cron repeat failing its installed-byte/backups comparison at line 52 and four checkpoints unreached. That root proof was not rerun here.
+No worker commit, push, approval request, chroot, elevation, host installation,
+live service action or scanner execution was performed.
 
-Reproduction and exact change:
-
-- The unprivileged migration fixture now uses the root launcher's log destination, relocated to its private `/var/log/linux-av`, instead of hiding the log outside the installed-tree snapshot. It also seeds the supported existing service commands, override, guard and resource limits used by root-power.
-- Before the production fix, the same `find usr/local/lib/linux-av etc var -type f -print0 | sort -z | xargs -0 sha256sum` assertion failed after the second successful installation. The diff named exactly **`var/log/linux-av/av-scan.log`** (line 59 in the initial four-cron fixture). Its digest changed from `d1fd1a9a287b5f2982a70fe4cf4faad2f33ccaa8c1e93631333785ebd8880dfc` to `964be7fa5a7a8112911176a39022cc84269505eba01c255b034f3f7a1485f099`.
-- The final `log_info` in `av_power_policy` appended timestamped installation status to the scan log on every success. It now prints the same status meaning to stderr with `printf`. Error logging, installation ordering, locks, drain, durable archives, effective-policy readback and guarded activation are unchanged.
-- Generated `power.release.sha256` and `power.cron.sha256`, original backups and migration archives were byte-stable in that reproduction. No paths are excluded from either snapshot. The regression independently compares the release manifest with the private installer's pins and cron manifest with the four preserved originals. It includes pre-existing scan history and checks all pending markers and transient `open.wrapper.*` links are absent after success; raw retained inodes and archives remain included.
-- Root-power's byte and metadata comparison failures now print unified diffs naming changed, added or removed paths. A function-only unprivileged check confirmed identical snapshots pass and a changed scan-log digest fails with its pathname in the diagnostic. The root fixture itself was not executed.
-- `power_policy_install_logs` restores the old logging call to ensure the regression rejects it. Existing disable/drain/readback-order mutations remain selected for validation.
-
-Execution environment: uid `10002`, hostname `6598f8521884`, supplied build sandbox, 2026-11-22 UTC. `getent hosts corsair` failed and no SSH configuration/connection was supplied. These results are local unprivileged proofs, **not a corsair-host test run**. The requested corsair run remains unavailable without a connection. The fixtures simulate root identity/ownership only in private copies, retain real bytes/types/modes, use inert systemctl and only fixture processes in their proc inventory, and shorten polling only in test copies. Production has no fixture or security bypass switch.
-
-Validation:
-
-- `timeout 300 bash tests/run.sh`: 234 passed, 0 failed, 37 skipped (need root). Full log: `/lane/tmp/oc-t-0139-tests.log`.
-
-- `timeout 150 bash tests/cron-migration.sh`: passed the complete final fixture, including byte/backups stability with cron active, independent manifests, timeout/recovery, open-inode and older-launcher drain, policy-only refresh, unsafe entry refusals and no service actions.
-- `timeout 240 bash tests/mutants.sh power_policy_install_logs power_cron_disable_removed power_cron_wait_removed power_cron_publish_before_readback`: clean baseline **1 passed, 0 failed**; **4 killed, 0 survived**.
-- Individual `bash -n` checks passed for `lib/root-policy.sh`, `tests/cron-migration.sh`, `tests/root-power.sh`, `tests/mutants.sh`, and `tests/run.sh`; `/bin/sh -n root-install-power.sh` passed.
-- Independently recomputed installer pins: power **13/13**, guard **1/1**, OVH **3/3** match. Only the power installer's `lib/root-policy.sh` pin changed. `git diff --check` passed.
-
-Final source SHA-256 fingerprints (independent installer provenance remains the release gate's responsibility):
+The exact Surface base commands are now accepted as historical unit-file data:
 
 ```text
-765e9f00e87c2dcadc7971c1139e59d1198008a7858b5d22a34528d119d6bd14  root-install-power.sh
-4d8d04254d7c4ca2cca804521e217d22e41194ae76b6f3b69acd3f7d2a7525ca  lib/root-policy.sh
-20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9  bin/av-guard (unchanged)
+ExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --now
+ExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --rootkit
 ```
 
-Real root ownership, complete host proc access, actual systemd readback, storage/power-cut durability and the remaining isolated root checkpoints are not established by these unprivileged tests. Existing dispatcher census limitations and supported-layout requirements in README still apply.
+Acceptance requires the default scan/rootkit unit, exactly one base ExecStart in
+the Service section, and a safe, loaded `root-owned.conf` containing exactly an
+empty ExecStart reset followed by `/usr/local/lib/linux-av/bin/av-scan` with the
+matching intended argument. The loaded fragment must be the expected base;
+effective ExecStart and ExecStartPre must select that permanent command and the
+exact permanent av-guard, without ignored errors. Loaded state must be fresh and
+the effective identity must be root. Existing ownership/type/mode/ancestor and
+effective systemd-input audits remain required. The writable checkout target is
+never inspected, resolved, sourced or executed. Its spelling is compared as
+data, not used to discover or authenticate executable bytes.
+
+Only accepted ExecStart lines become `/bin/sh
+/usr/local/lib/linux-av/bin/av-root av-scan --now` or `--rootkit`. Resets,
+comments, environment, identity, install settings, Nice, timeouts, guards and
+CPU/memory limits remain unchanged. Original backups remain intact. Unknown
+commands, different checkouts, shell wrappers/modifiers, extra/wrong arguments,
+malformed executable syntax and unsafe unit paths refuse. Final effective
+readback also requires the exact intended argument for each migrated service.
+
+The new `tests/surface-migration.sh` uses both exact Surface bases, both reset
+overrides, both guards and retained settings. Its first installer attempt fails
+effective guard readback after permanent code and `power.incomplete` have been
+written. Correcting that readback and retrying succeeds without manually
+clearing the marker. The marker disappears only after policy verification.
+The fixture compares each migrated file against an independently rendered
+expected file, compares all four original backups, checks unchanged guards and
+limits, and compares the entire installed code/etc/var file snapshot on repeat.
+It runs installed av-guard and installed/effective policy verification too.
+
+There are 30 negative cases per service (60 total): missing/reset/duplicate or
+misplaced directives, indentation and continuation, another checkout, shell or
+command prefixes, mismatched/extra arguments, unknown executables and environment
+inputs, absent/overridden guards or commands, ignored errors, stale readback,
+wrong fragment/unloaded override, foreign/writable units and overrides, writable
+parents, links and nonroot identity. Each must refuse before daemon-reload or
+unit/backups changes, preserving the incomplete gate. Byte, type, mode,
+ownership and link snapshots check refusal state. Test-only stat/readlink
+tripwires also reject any attempt to inspect the historical checkout target.
+
+The existing cron fixture shares its private installer harness with this test.
+The harness relocates fixed installation/proc paths, simulates root ownership
+and identity, supplies inert systemctl, and shortens drain polling only in test
+copies. Production has no fixture/security bypass option. Installer pins for
+these explicitly modified test copies are recomputed in private staging; the
+production pins are checked independently below. `tests/policy.sh` additionally
+proves read-only refusal for swapped effective scan/rootkit arguments. The
+isolated root fixture now has both Surface bases, reset overrides and guards;
+it was syntax checked and **not executed**.
+
+Red/green evidence, run unprivileged on 2026-11-22 UTC:
+
+- Archived production sources from `20f109b`, with only the current tests copied
+  into that archive, fail the final exact Surface fixture on the retry:
+  `unsupported executable ... ExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --now`.
+  Log: `/lane/tmp/oc-t-0139-surface-red.log`.
+- `timeout 240 bash tests/surface-migration.sh`: exit 0; migration, actual
+  failed-install retry, byte-stable repeat, installed guard/policy and all 60
+  negatives pass. Log: `/lane/tmp/oc-t-0139-surface-green.log`.
+- `timeout 180 bash tests/policy.sh`: exit 0; read-only byte/metadata, effective
+  policy, guard, command/argument and incomplete-marker checks pass.
+  Log: `/lane/tmp/oc-t-0139-policy.log`.
+- `timeout 180 bash tests/cron-migration.sh`: exit 0; existing disable/drain,
+  timeout/recovery, old/open-inode jobs, repeat and policy-only checks pass.
+  Log: `/lane/tmp/oc-t-0139-cron.log`.
+- `timeout 600 bash tests/run.sh`: **235 passed, 0 failed, 37 skipped (need root)**.
+  Log: `/lane/tmp/oc-t-0139-tests.log`.
+- `timeout 900 bash tests/mutants.sh power_surface_base_shape_removed power_surface_reset_removed power_surface_guard_removed power_scan_intended_readback_removed`:
+  clean baseline **2 passed, 0 failed**; **4 killed, 0 survived**.
+  Log: `/lane/tmp/oc-t-0139-surface-mutants.log`.
+- Individual `bash -n` checks passed for lib/root-policy.sh, the Surface/shared
+  fixture scripts, policy, cron-migration, root-power, run and mutants scripts.
+  `/bin/sh -n root-install-power.sh` and `git diff --check` passed.
+- Independent production input digests match every installer pin: power
+  **13/13**, guard **1/1**, OVH **3/3**. Only the power installer's root-policy pin
+  changed. Independent installer provenance remains the release gate's job.
+
+Final SHA-256 source digests:
+
+```text
+bf7e5c7ee534dc104ed9e35e332f522f8a04ecbcfa10392465038a580d87b509  root-install-power.sh
+693c2fa22fb4b60621114b69be5ea69ce07f561981ae92999feabbbcaa84b6ee  lib/root-policy.sh
+20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9  bin/av-guard (unchanged)
+febff35d3765fd8c4b29d6f09d2f88e7c8013cdaa6765c341e626b33a21f3b14  bin/av-root (unchanged)
+6b86353416bd4f827d0c5e6345805d90060824dc4a13f50a77ad737316c4675e  tests/surface-migration.sh
+e19c707b8206de86758ebd54fce5e33e3b540320c318e0e190743a7d728103da  tests/fixtures/power-install-env.sh
+f9762f800c732dcebbdad9ed3d59b6380169ed1a1b2ae46e5b513875e9fdc912  tests/root-power.sh
+```
+
+Execution identity was uid **10002**, hostname **d3c6dfc6192c**, supplied build
+sandbox. Neither `getent passwd corsair` nor `getent hosts corsair` returned an
+entry, and no SSH connection/configuration was supplied. These are local
+unprivileged results; a corsair run remains unperformed. Real root ownership,
+host proc visibility, actual systemd readback and crash/power-cut durability are
+not established by the synthetic fixtures. The existing dispatcher census and
+supported-layout limitations still apply.

@@ -104,13 +104,23 @@ open(T+'/installer','w').write(s)
 PY
 cat > "$T/policy-driver" <<'DRIVER'
 set -euo pipefail
-export AV_HOME="$L" AV_ROOT= AV_CONFIG="$T/empty-config" AV_LOG_FILE="$T/policy.log" AV_COLOR=never
+# Match av-root's log destination inside the fixture; include it in snapshots.
+export AV_HOME="$L" AV_ROOT= AV_CONFIG="$T/empty-config" AV_LOG_DIR="$R/var/log/linux-av" AV_COLOR=never
+unset AV_LOG_FILE
 . "$L/lib/common.sh"
 . "$L/lib/root-policy.sh"
 av_install_power_policy
 DRIVER
 : > "$T/empty-config"
 export PATH="$B:/usr/bin:/bin" POLICY_FIXTURE_ROOT="$R"
+# Match root-power's supported existing unit migration and preserved limits.
+units=$R/etc/systemd/system
+mkdir -p "$units/linux-av-scan.service.d"
+printf '[Service]\nExecStart=/usr/local/bin/av-scan --now\nNice=10\n' > "$units/linux-av-scan.service"
+printf '[Service]\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$units/linux-av-rootkit.service"
+printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$units/linux-av-scan.service.d/root-owned.conf"
+printf '[Service]\nCPUQuota=37%%\nCPUWeight=20\nMemoryMax=3G\n' > "$units/linux-av-scan.service.d/R-3377-cpu-cap.conf"
+printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/linux-av-scan.service.d/05-guard.conf"
 fail() { echo "FAIL cron migration: $*" >&2; [ ! -f "$T/out" ] || cat "$T/out" >&2; exit 1; }
 run() { (cd "$T/release" && /bin/sh "$T/installer") > "$T/out" 2>&1; }
 route=$R/etc/cron.daily/rkhunter
@@ -172,14 +182,52 @@ run && fail 'bad effective readback accepted'
 placeholder || fail 'readback failure activated routing'
 [ -f "$state/pending" ] || fail 'readback failure lost pending recovery'
 rm "$R/override.linux-av-power.service.NeedDaemonReload"
+# Both successful installs must preserve pre-existing scan history, including
+# its presence. Deliberate earlier failure diagnostics may have logged errors.
+mkdir -p "$R/var/log/linux-av"
+printf 'inert existing scan history\n' > "$T/scan-history"
+cp "$T/scan-history" "$R/var/log/linux-av/av-scan.log"
 run || fail 'timeout/readback recovery failed'
+cmp "$T/scan-history" "$R/var/log/linux-av/av-scan.log" || fail 'install changed scan history'
 grep -qx '# linux-av mains-only cron wrapper' "$route" || fail 'guarded route not activated'
 [ ! -e "$state/pending" ] && [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'success retained incomplete state'
 cmp "$T/package" "$route.linux-av-power-original" || fail 'recovered package original differs'
 # Existing active scheduler behavior: executing the inert placeholder during
 # draining produces no payload; policy becomes guarded only after readback.
 [ "$("$B/systemctl" show cron.service -p ActiveState --value)" = active ] || fail 'scheduler fixture inactive'
+# Same installed-byte/backups assertion as root-power, including runtime logs,
+# generated manifests, migration archives and transient status markers.
+mkdir -p "$R/var"
+snapshot() { (cd "$R" && find usr/local/lib/linux-av etc var -type f -print0 | sort -z | xargs -0 sha256sum); }
+# Independently check generated manifest bytes and completed migration state.
+sed -n 's/^# sha256 //p' "$T/installer" > "$T/expected-release"
+cmp "$T/expected-release" "$R/etc/linux-av/power.release.sha256" || fail 'release manifest differs from pins'
+: > "$T/expected-cron"
+for name in rkhunter chkrootkit aide aide-common; do
+    printf '%s  /etc/cron.daily/%s.linux-av-power-original\n' \
+        "$(sha256sum < "$R/etc/cron.daily/$name.linux-av-power-original" | cut -c1-64)" "$name" >> "$T/expected-cron"
+done
+cmp "$T/expected-cron" "$R/etc/linux-av/power.cron.sha256" || fail 'cron manifest differs from originals'
+completed() {
+    [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'success retained incomplete marker'
+    local name file
+    for name in rkhunter chkrootkit aide aide-common; do
+        [ ! -e "$R/etc/linux-av/cron-migration/$name/pending" ] || fail "success retained pending: $name"
+        for file in "$R/etc/linux-av/cron-migration/$name"/open.wrapper.*; do
+            [ ! -e "$file" ] || fail "success retained transient inode: $file"
+        done
+    done
+}
+completed
+snapshot > "$T/first"
 run || fail 'guarded repeat failed with active cron'
+snapshot > "$T/second"
+if ! cmp "$T/first" "$T/second"; then
+    diff -u "$T/first" "$T/second" >&2 || true
+    fail 'repeat changed installed bytes/backups'
+fi
+completed
+echo 'ok active-cron repeat preserves every installed file/backup and scan log; deterministic manifests; no pending markers'
 # Canonical wrapper text can still target an old launcher with no lock. Its
 # exact original argv makes it legacy work; new dispatch must be inert first.
 mkfifo "$T/release-older"

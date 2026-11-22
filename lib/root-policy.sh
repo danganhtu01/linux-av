@@ -376,6 +376,7 @@ av_power_policy() (
         fi
         rm -f /etc/linux-av/power.incomplete
         [ "$EUID" != 0 ] || sync -f /etc/linux-av
-        log_info 'power policy installed; no unit started, stopped, enabled or restarted'
+        # Installation status must not append to the scan log on every repeat.
+        printf '%s\n' 'linux-av: power policy installed; no unit started, stopped, enabled or restarted' >&2
     fi
 )

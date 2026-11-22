@@ -25,6 +25,7 @@ MUTANTS=(
 'power_cron_disable_removed~root-install-power.sh~/--cron-disable || fail/d~power_cron_migration'
 'power_cron_wait_removed~root-install-power.sh~/--cron-wait || fail/d~power_cron_migration'
 'power_cron_publish_before_readback~lib/root-policy.sh~s@case \$dst in "\$base/etc/cron.daily/"\*)@case $dst in /never/*)@~power_cron_migration'
+'power_policy_install_logs~lib/root-policy.sh~/printf .*power policy installed;/c\        log_info "power policy installed; no unit started, stopped, enabled or restarted"~power_cron_migration'
 # OC-T-0139 rerun contract and actual cron/install lock protocol.
 'power_verify_bytes_skipped~lib/root-policy.sh~/expected "$kind" "$input" | cmp -s "$dest" - /c\            :~power_policy_verify'
 'power_verify_reload_ignored~lib/root-policy.sh~/stale loaded policy for/c\        :~power_policy_verify'

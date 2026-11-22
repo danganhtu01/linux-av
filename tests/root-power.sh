@@ -101,10 +101,16 @@ if grep -E '^(start|stop|restart|enable|disable|kill) ' "$R/calls"; then fail 'a
 echo 'ok root permanent copy, supported unit migration, limits, guard, cron and no activation'
 # Idempotence includes first backups; fixture checks actual metadata and bytes.
 snapshot() { (cd "$R" && find usr/local/lib/linux-av etc var -type f -print0 | sort -z | xargs -0 sha256sum); }
+same_snapshot() {
+    if ! cmp -s "$1" "$2"; then
+        diff -u "$1" "$2" >&2 || true
+        fail "$3"
+    fi
+}
 snapshot > "$T/first"
 run || { cat "$T/out"; fail 'second install failed'; }
 snapshot > "$T/second"
-cmp "$T/first" "$T/second" || fail 'repeat changed installed bytes/backups'
+same_snapshot "$T/first" "$T/second" 'repeat changed installed bytes/backups'
 echo 'ok root upgrade idempotence with cron active'
 # Read-only rerun contract: verified bytes and metadata stay unchanged, and only
 # systemctl show calls occur. No staging, logs, reload or service changes.
@@ -117,8 +123,8 @@ readonly_check() {
     snapshot > "$T/verify-before"; policy_metadata > "$T/meta-before"; : > "$R/calls"
     if verify_policy; then status=0; else status=$?; fi
     snapshot > "$T/verify-after"; policy_metadata > "$T/meta-after"
-    cmp "$T/verify-before" "$T/verify-after" || fail 'verifier wrote installed bytes'
-    cmp "$T/meta-before" "$T/meta-after" || fail 'verifier wrote metadata/directories'
+    same_snapshot "$T/verify-before" "$T/verify-after" 'verifier wrote installed bytes'
+    same_snapshot "$T/meta-before" "$T/meta-after" 'verifier wrote metadata/directories'
     if grep -v '^show ' "$R/calls"; then fail 'verifier changed service manager'; fi
 }
 : > "$R/etc/linux-av/power.incomplete"

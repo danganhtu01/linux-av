@@ -1,43 +1,33 @@
-Candidate over partial `944727248b6247b11543a9b5a7d3c5338aebe937`, for a separate gate. HEAD is unchanged; no worker commit, amend, push, host installation, chroot, elevation, or host service action was performed.
+OC-T-0139 follow-up over `977fc1b` (`tasks/av-legacy-verified`). No worker commit, push, host installation, chroot, elevation, host service action or new card was performed.
 
-Execution was in the supplied build sandbox, uid `10002`, hostname `d81d823dc7e8`, on 2026-11-22 UTC. A literal `corsair` host identity/connection was not available (`getent hosts corsair` failed; no SSH configuration was supplied). These are unprivileged sandbox proofs, not evidence of a separate run on the corsair host or its real cron daemon.
+The supplied isolated root-power result was 1/6 checkpoints passed, with the active-cron repeat failing its installed-byte/backups comparison at line 52 and four checkpoints unreached. That root proof was not rerun here.
 
-The candidate changes only migration/policy ordering, associated pins, fixtures and documentation. The installer and policy-only refresh hold the exclusive policy lock while they durably preserve originals, atomically disable all supported dispatch entries, drain recognizable legacy work, install policy, read it back, publish guarded routes, and durably clear the incomplete gate. Even canonical wrappers are disabled: their old launcher may lack the lock. Existing legitimate originals are retained independently of incoming package scripts. Raw archives preserve regular type, bytes, uid/gid and mode; working originals remain 0644.
+Reproduction and exact change:
 
-The new executable fixture is `bash tests/cron-migration.sh`, also selected by `bash tests/run.sh power_cron_migration`. It executes private copies of the actual installer, disabler/drain and root policy renderer. It explicitly relocates fixed paths, simulates root metadata/identity, replaces service calls with the existing inert fixture, and shortens one-second polling sleeps to 0.02 seconds. It re-pins only those test copies. Production has no test-root, polling or identity switches. Its proc inventory intentionally contains only fixture processes plus synthetic PID 1.
+- The unprivileged migration fixture now uses the root launcher's log destination, relocated to its private `/var/log/linux-av`, instead of hiding the log outside the installed-tree snapshot. It also seeds the supported existing service commands, override, guard and resource limits used by root-power.
+- Before the production fix, the same `find usr/local/lib/linux-av etc var -type f -print0 | sort -z | xargs -0 sha256sum` assertion failed after the second successful installation. The diff named exactly **`var/log/linux-av/av-scan.log`** (line 59 in the initial four-cron fixture). Its digest changed from `d1fd1a9a287b5f2982a70fe4cf4faad2f33ccaa8c1e93631333785ebd8880dfc` to `964be7fa5a7a8112911176a39022cc84269505eba01c255b034f3f7a1485f099`.
+- The final `log_info` in `av_power_policy` appended timestamped installation status to the scan log on every success. It now prints the same status meaning to stderr with `printf`. Error logging, installation ordering, locks, drain, durable archives, effective-policy readback and guarded activation are unchanged.
+- Generated `power.release.sha256` and `power.cron.sha256`, original backups and migration archives were byte-stable in that reproduction. No paths are excluded from either snapshot. The regression independently compares the release manifest with the private installer's pins and cron manifest with the four preserved originals. It includes pre-existing scan history and checks all pending markers and transient `open.wrapper.*` links are absent after success; raw retained inodes and archives remain included.
+- Root-power's byte and metadata comparison failures now print unified diffs naming changed, added or removed paths. A function-only unprivileged check confirmed identical snapshots pass and a changed scan-log digest fails with its pathname in the diagnostic. The root fixture itself was not executed.
+- `power_policy_install_logs` restores the old logging call to ensure the regression rejects it. Existing disable/drain/readback-order mutations remain selected for validation.
 
-The migration row asserts:
+Execution environment: uid `10002`, hostname `6598f8521884`, supplied build sandbox, 2026-11-22 UTC. `getent hosts corsair` failed and no SSH configuration/connection was supplied. These results are local unprivileged proofs, **not a corsair-host test run**. The requested corsair run remains unavailable without a connection. The fixtures simulate root identity/ownership only in private copies, retain real bytes/types/modes, use inert systemctl and only fixture processes in their proc inventory, and shorten polling only in test copies. Production has no fixture or security bypass switch.
 
-- An injected archive sync failure leaves the original dispatch and earlier original untouched and installs no code.
-- All four daily entries are inert before a legacy FIFO reader can drain. While it remains alive, no installed tree appears; two bounded attempts time out plainly, without signaling it.
-- Timeout preserves exact raw bytes, regular type and mode 0750, plus an earlier legitimate original of different bytes/mode 0600. Retrying a placeholder cannot reclassify it as an original. A missing working copy is restored from pending state.
-- Failed effective-policy readback leaves dispatch inert and pending state intact. A later retry completes installation and guarded publication.
-- A canonical route pointing to a simulated older launcher without a shared lock is disabled before waiting. Repeated inert dispatch opens succeed while the older process waits, then it is released naturally.
-- A shell reading a legacy script through already-open fd 0, without an affected path in argv, is detected by the retained inode. Displaced code stays unchanged while it waits and is replaced after natural completion.
-- Pending raw dispatch, placeholder without a working copy, and already-published wrapper with pending state recover. Orphan placeholders, symlink entries and directory entries refuse.
-- Policy-only refresh disables/drains before replacing a policy sentinel, and publishes guarded routing afterward. No fixture service start/stop/restart/enable/disable/kill is permitted.
+Validation:
 
-Checks executed:
+- `timeout 300 bash tests/run.sh`: 234 passed, 0 failed, 37 skipped (need root). Full log: `/lane/tmp/oc-t-0139-tests.log`.
 
-- `bash tests/run.sh`: **234 passed, 0 failed, 37 root-only skips**. The skips are not passes. The earlier run before adding the migration row was 233/0/37.
-- `bash tests/run.sh power_cron_migration power_policy_verify power_policy_install power_policy_exec_refused guard_install_hashes common_root_default`: **6 passed, 0 failed**.
-- `bash tests/power.sh`: passed all supply/gating, unplug cancellation, scheduled/foreground reconnect, delegated daemon, packaged-cron and batteryless checks. All cancellation targets were inert fixture processes.
-- `bash tests/policy.sh`: passed active-cron/quiescence/census, actual shared/exclusive lock, read-only installed-policy and mismatch checks.
-- `bash tests/mutants.sh power_cron_disable_removed power_cron_wait_removed power_cron_publish_before_readback`: clean baseline; **3 killed, 0 survived**.
-- `bash tests/mutants.sh power_cron_disable_removed power_cron_wait_removed power_cron_publish_before_readback power_verify_bytes_skipped power_verify_reload_ignored power_cron_lock_removed common_root_readonly_reassigned power_policy_exec_audit_removed power_policy_unterminated_exec_skipped`: final-source unmutated baseline **4 passed, 0 failed**; **9 killed, 0 survived**. This baseline also exercises the final archive verification changes after the full-suite/focused runs above.
-- Individual `bash -n` checks: `lib/root-policy.sh`, `tests/cron-migration.sh`, `tests/policy.sh`, `tests/root-power.sh`, `tests/run.sh`, `tests/mutants.sh`. Individual `/bin/sh -n` checks: `bin/av-guard`, `root-install-power.sh`, `root-install-guard.sh`. All passed.
-- Independently recomputed every header pin: power installer **13/13**, guard installer **1/1**, existing OVH installer **3/3** match. Only affected power/guard pins changed. `git diff --check` passed.
+- `timeout 150 bash tests/cron-migration.sh`: passed the complete final fixture, including byte/backups stability with cron active, independent manifests, timeout/recovery, open-inode and older-launcher drain, policy-only refresh, unsafe entry refusals and no service actions.
+- `timeout 240 bash tests/mutants.sh power_policy_install_logs power_cron_disable_removed power_cron_wait_removed power_cron_publish_before_readback`: clean baseline **1 passed, 0 failed**; **4 killed, 0 survived**.
+- Individual `bash -n` checks passed for `lib/root-policy.sh`, `tests/cron-migration.sh`, `tests/root-power.sh`, `tests/mutants.sh`, and `tests/run.sh`; `/bin/sh -n root-install-power.sh` passed.
+- Independently recomputed installer pins: power **13/13**, guard **1/1**, OVH **3/3** match. Only the power installer's `lib/root-policy.sh` pin changed. `git diff --check` passed.
 
-Candidate SHA-256 fingerprints (for gate comparison; independent installer provenance remains the gate's responsibility):
+Final source SHA-256 fingerprints (independent installer provenance remains the release gate's responsibility):
 
 ```text
-578dcf232b96223781ab436dd53ed30e047f6f910b39c96f39f201a8eee423e9  root-install-power.sh
-20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9  bin/av-guard
-b21ed871bb0b0aca302b98d55cac0372207e84831c00b4886658318a5b29b44f  lib/root-policy.sh
+765e9f00e87c2dcadc7971c1139e59d1198008a7858b5d22a34528d119d6bd14  root-install-power.sh
+4d8d04254d7c4ca2cca804521e217d22e41194ae76b6f3b69acd3f7d2a7525ca  lib/root-policy.sh
+20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9  bin/av-guard (unchanged)
 ```
 
-The wait has at most 60 censuses / 59 one-second sleeps and a 60-second worker deadline with two-second forced worker cleanup. Deadline signals target only the census worker group, never legacy jobs. The caller retains the exclusive lock. Timeout leaves dispatch disabled, durable originals and pending state retained, and the incomplete marker set; recovery is a retry after the jobs finish.
-
-Limits remain explicit in README's dispatcher section. Rename cannot recall in-memory code. A census, even two clean passes, is not a kernel fork/exec barrier: hidden/renamed dispatchers, delayed unrecognized parents, aliases, copied code without recognizable argv/fds, or processes appearing after inspection can escape. Complete readable host proc/fd/exe access, a common filesystem for inode retention, standard run-parts naming that excludes dotted/hidden backup files, and no concurrent package/admin writes are preconditions. Arbitrary crontabs/cron.d routes, custom run-parts regexes, direct preserved-original execution and other listed external routes remain outside coverage. Such launchers require a separately controlled maintenance window. Visible run-parts/anacron/scanner names are conservative blockers.
-
-The fixture tests state recovery and sync failure, not a real power cut. Durability follows checked copy/metadata/digest, file sync, atomic rename and parent-filesystem sync ordering; storage failure and real reboot behavior were not exercised. Real root ownership, a complete host proc census, supported host mount/unit layouts and actual systemd readback formats remain separate gate checks. The disposable root fixture was updated for drain timeout/new tool dependencies but deliberately not run.
+Real root ownership, complete host proc access, actual systemd readback, storage/power-cut durability and the remaining isolated root checkpoints are not established by these unprivileged tests. Existing dispatcher census limitations and supported-layout requirements in README still apply.

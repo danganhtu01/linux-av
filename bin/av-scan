@@ -6,6 +6,7 @@
 #   av-scan --changed --now       force a changed-files scan
 #   av-scan --full-scan --now     force a full scan of the selected paths
 #   av-scan --scheduled 10000     scan every 10000 ms (=10 s) in the foreground
+#   av-scan --wait-for-mains --now  wait/retry after battery deferral or cancellation
 #   av-scan --full                scan the whole filesystem ( / )
 #   av-scan --quick               scan $HOME /tmp /var/tmp
 #   av-scan --path /srv --now     scan a specific path
@@ -121,6 +122,7 @@ scan_now() (
     run_scan "$@"; rc=$?
     # The report has been written by run_scan. A forgiven raw scanner error
     # (vanished files) still cannot advance a stamp.
+    av_on_mains || return 75
     if [ "$rc" -le 1 ] && [ -f "$scan_state/completed" ]; then
         if [ "${AV_REPORT_WRITTEN:-0}" != 1 ]; then
             log_err "scan report could not be written; stamps unchanged"
@@ -229,6 +231,7 @@ run_clamscan_batches() {
     arg_max=$(getconf ARG_MAX 2>/dev/null)
     if [[ $arg_max =~ ^[1-9][0-9]*$ ]] && [ $((arg_max / 2)) -lt "$limit" ]; then limit=$((arg_max / 2)); fi
     if [ -s "$list" ]; then
+        av_on_mains || return 75
         run_clamscan_one "$engine" "$@" "--file-list=$list"; rc=$batch_rc
     fi
     while :; do
@@ -239,6 +242,7 @@ run_clamscan_batches() {
             [ "$bytes" -lt "$limit" ] || break
         done
         [ "${#targets[@]}" -gt 0 ] || break
+        av_on_mains || return 75
         run_clamscan_one "$engine" "$@" "${targets[@]}"
         # Infection takes reporting priority; the private failure marker keeps
         # completion independent of that merged status, in either batch order.
@@ -286,7 +290,7 @@ run_clamscan_checked() (
         # Serialize only this trusted function, never any pathname, into code.
         # A single timeout bounds every scanner invocation in the worker.
         : > "$odd_list.pending" || { log_err "cannot create batch pending marker"; return 2; }
-        command=("$BASH" -c "$(declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes)"$'\nrun_clamscan_batches "$@"' \
+        command=("$BASH" -c "$(declare -f run_clamscan_batches run_clamscan_one scan_argv_bytes av_on_mains)"$'\nrun_clamscan_batches "$@"' \
             av-scan "$engine" "$list" "$odd_list" "$copy_dir" "${args[@]}")
         batched=1
     fi
@@ -703,6 +707,7 @@ run_scan() {
         runner=(timeout --kill-after=5m "$AV_SCAN_TIMEOUT")
     fi
     # clamdscan output differs; its exit handling remains unchanged.
+    av_on_mains || return 75
     if [ "$engine" = clamscan ]; then
         if [ -n "$list" ] && [ ! -s "$odd_list" ]; then args+=("--file-list=$list"); fi
         run_clamscan_checked; rc=$?
@@ -710,7 +715,21 @@ run_scan() {
             rm -f -- "$scan_state/completed" || { log_err "cannot remove completed marker; stamps unchanged"; [ "$rc" != 1 ] || threat_known=1; [ "$rc" -gt 1 ] || rc=2; }
         fi
     else
-        "${runner[@]}" "$engine" "${args[@]}" "${scan_targets[@]}"; rc=$?
+        # Pin the client to a local packaged socket, never a TCP/remote daemon
+        # whose work this host cannot cancel. The policy kills the daemon cgroup,
+        # including queued/multiscan work, rather than just disconnecting clients.
+        if ! systemctl is-active --quiet linux-av-power.service \
+            || ! systemctl is-active --quiet clamav-daemon.service; then
+            log_err "clamdscan requires the managed linux-av-power and clamav-daemon services; run av-setup power-policy or use clamscan"
+            return 2
+        fi
+        local socket
+        socket="$(av_clamd_socket)"; socket="${socket:-/run/clamav/clamd.ctl}"
+        case "$socket" in
+            /run/clamav/clamd.ctl|/run/clamav/clamd.sock|/var/run/clamav/clamd.ctl|/run/clamav/clamd.socket) ;;
+            *) log_err "unsupported delegated socket $socket: use the packaged local daemon or clamscan"; return 2 ;;
+        esac
+        "${runner[@]}" "$engine" --config-file=<(printf 'LocalSocket %s\n' "$socket") "${args[@]}" "${scan_targets[@]}"; rc=$?
         if [ "$rc" -le 1 ] && [ -n "${scan_state:-}" ]; then
             touch "$scan_state/completed" || { log_err "cannot write completed marker; stamps unchanged"; [ "$rc" != 1 ] || threat_known=1; rc=2; }
         fi
@@ -755,6 +774,7 @@ update_sigs() {
 rootkit_scan() {
     local ran=0
     if have rkhunter; then ran=1; log_info "rkhunter ..."; rkhunter --check --sk --nocolors || true; fi
+    av_on_mains || return 75
     if have chkrootkit; then ran=1; log_info "chkrootkit ..."; chkrootkit || true; fi
     [ $ran -eq 1 ] || die "neither rkhunter nor chkrootkit installed"
 }
@@ -880,10 +900,11 @@ scheduled_loop() {
 # Argument parsing.
 # ---------------------------------------------------------------------------
 [ $# -eq 0 ] && usage 1
-MODE=""; INTERVAL_MS=""; FORCE_SCAN=""; declare -a PATHS=()
+MODE=""; INTERVAL_MS=""; FORCE_SCAN=""; WAIT_FOR_MAINS=0; declare -a PATHS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --now)            MODE=now ;;
+        --wait-for-mains)  WAIT_FOR_MAINS=1 ;;
         --changed)        FORCE_SCAN=changed ;;
         --full-scan)      FORCE_SCAN=full ;;
         --scheduled)      MODE=scheduled; INTERVAL_MS="${2:?--scheduled needs an interval in ms}"; shift ;;
@@ -910,17 +931,26 @@ done
 # Default scan target = configured AV_SCAN_PATHS (space-separated -> array).
 if [ "${#PATHS[@]}" -eq 0 ]; then read -r -a PATHS <<<"$AV_SCAN_PATHS"; fi
 
+power_scan() {
+    local rc
+    while :; do
+        [ "$WAIT_FOR_MAINS" = 0 ] || av_power_wait
+        av_power_run "$@"; rc=$?
+        [ "$WAIT_FOR_MAINS" = 1 ] && [ "$rc" = 75 ] || return "$rc"
+    done
+}
+
 case "$MODE" in
-    now)            scan_now "${PATHS[@]}" ;;
-    scheduled)      scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
+    now)            power_scan scan_now "${PATHS[@]}" ;;
+    scheduled)      WAIT_FOR_MAINS=1; power_scan scheduled_loop "$INTERVAL_MS" "${PATHS[@]}" ;;
     install-timer)          install_timer "$AV_TIMER_NAME" av-scan.service "$INTERVAL_MS" ;;
     render-scan-limits)     render_scan_limits ;;
     remove-timer)           remove_timer "$AV_TIMER_NAME" ;;
     install-rootkit-timer)  install_timer "$AV_ROOTKIT_TIMER_NAME" av-rootkit.service "$INTERVAL_MS" ;;
     remove-rootkit-timer)   remove_timer "$AV_ROOTKIT_TIMER_NAME" ;;
     update)         update_sigs ;;
-    rootkit)        rootkit_scan ;;
-    integrity)      integrity_scan ;;
+    rootkit)        power_scan rootkit_scan ;;
+    integrity)      power_scan integrity_scan ;;
     status)         show_status ;;
     "")             die "no action given (try --now, --scheduled <ms>, --status, --help)" ;;
 esac

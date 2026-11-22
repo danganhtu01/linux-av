@@ -231,7 +231,7 @@ row_baseline_detached_debian() {
     new_fixture "$ROW"
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "systemd-run command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect $BASH_BIN $REPO/bin/av-power --wait --run aideinit -y -f" "systemd-run command line"
     assert_lacks "$(calls)" "
 aideinit" "aideinit not run directly"
     assert_has "$OUT" "systemctl status linux-av-aide-init" "how to watch (status)"
@@ -243,7 +243,7 @@ row_baseline_detached_arch() {
     new_fixture "$ROW" arch
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect $BASH_BIN $REPO/bin/av-power --wait --run sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
     assert_lacks "$(calls)" "aideinit" "no aideinit on arch"
     assert_has "$(cat "$(conf default/rkhunter)")" 'CRON_DAILY_RUN=""' "arch: rkhunter cron setting not touched"
 }
@@ -258,7 +258,7 @@ row_baseline_running_not_twice() {
 row_baseline_timeout_env() {
     new_fixture "$ROW"
     SETUP_ENV=(AV_AIDE_INIT_TIMEOUT=90min AV_AIDE_INIT_UNIT=my-aide); setup enable; SETUP_ENV=()
-    assert_has "$(calls)" "systemd-run --unit=my-aide --property=RuntimeMaxSec=90min --collect aideinit -y -f" "unit and limit from env"
+    assert_has "$(calls)" "systemd-run --unit=my-aide --property=RuntimeMaxSec=90min --collect $BASH_BIN $REPO/bin/av-power --wait --run aideinit -y -f" "unit and limit from env"
 }
 
 row_baseline_skip_aide_init_0() {
@@ -267,7 +267,7 @@ row_baseline_skip_aide_init_0() {
     assert_lacks "$(calls)" "systemd-run" "no baseline with AV_AIDE_INIT=0"
     assert_lacks "$(calls)" "aideinit" "no aideinit with AV_AIDE_INIT=0"
     assert_has "$OUT" "AV_AIDE_INIT=0" "skip is announced"
-    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d" "no timer drop-in with AV_AIDE_INIT=0"
+    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf" "no boot scheduling override with AV_AIDE_INIT=0"
 }
 
 row_baseline_foreground_without_systemd_run() {
@@ -344,7 +344,7 @@ row_keep_aide_baseline_aide_init_0() {
     assert_has "$OUT" "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement" "the AV_AIDE_INIT=0 skip is announced"
     assert_eq "$(printf '%s\n' "$OUT" | grep -c "WARN .*--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins")" 1 "one warning says AV_AIDE_INIT=0 wins"
     assert_lacks "$OUT" "keeping the existing" "the database is not reported kept"
-    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d" "no timer drop-in with AV_AIDE_INIT=0"
+    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf" "no boot scheduling override with AV_AIDE_INIT=0"
 }
 
 row_keep_aide_baseline_aide_init_0_no_db() {
@@ -360,7 +360,7 @@ row_keep_aide_baseline_option_off() {
     new_fixture "$ROW"; printf 'db\n' > "$R/var/lib/aide/aide.db"
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "rebuilt without the option"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect $BASH_BIN $REPO/bin/av-power --wait --run aideinit -y -f" "rebuilt without the option"
     assert_lacks "$OUT" "--keep-aide-baseline" "no mention of the option"
 }
 
@@ -3997,6 +3997,42 @@ row_guard_documented() {
     done
 }
 
+
+row_power_policy_install() {
+    new_fixture "$ROW"
+    mkdir -p "$R/etc/cron.daily"
+    printf '#!/bin/sh\necho original\n' > "$R/etc/cron.daily/rkhunter"
+    setup power-policy
+    assert_eq "$RC" 0 'policy-only upgrade succeeds'
+    assert_has "$(calls)" 'systemctl enable --now linux-av-power.service' 'guardian enabled'
+    assert_lacks "$(calls)" 'apt-get ' 'no package transaction'
+    assert_lacks "$(calls)" 'freshclam ' 'no signature update'
+    assert_lacks "$(calls)" 'systemd-run ' 'no baseline rebuild'
+    local dir="$R/etc/systemd/system" unit
+    for unit in clamav-daemon clamav-clamonacc chkrootkit rkhunter aidecheck dailyaidecheck linux-av-scan linux-av-rootkit; do
+        assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'ExecCondition=/bin/bash ' 'shared start gate'
+        assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'KillSignal=SIGKILL' 'no daemon drain'
+    done
+    assert_has "$(cat "$dir/linux-av-scan.service.d/40-linux-av-power.conf")" 'ExecStopPost=/bin/bash ' 'self-cancelled scheduled work is queued'
+    assert_lacks "$(cat "$dir/linux-av-scan.service.d/40-linux-av-power.conf")" 'ExecStart=' 'existing paths, arguments and root-owned guards preserved'
+    assert_has "$(cat "$dir/aidecheck.timer.d/40-linux-av-power.conf")" 'ConditionACPower=' 'due events reach the service gate even on battery'
+    assert_has "$(cat "$R/etc/cron.daily/rkhunter")" '--cron ' 'packaged cron wrapped'
+    cp "$R/etc/cron.daily/rkhunter.linux-av-power-original" "$D/original"
+    cp "$R/etc/cron.daily/rkhunter" "$D/wrapper"
+    setup power-policy
+    assert_eq "$RC" 0 'second policy upgrade succeeds'
+    assert_same "$D/original" "$R/etc/cron.daily/rkhunter.linux-av-power-original" 'original retained'
+    assert_same "$D/wrapper" "$R/etc/cron.daily/rkhunter" 'wrapper stable'
+    printf '#!/bin/sh\necho upgraded-package\n' > "$R/etc/cron.daily/rkhunter"
+    setup power-policy
+    assert_has "$(cat "$R/etc/cron.daily/rkhunter.linux-av-power-original")" 'upgraded-package' 'new package script preserved on upgrade'
+}
+
+row_power_runtime() {
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/power.sh" 2>&1)"
+    assert_eq "$?" 0 "synthetic power and process tests: $output"
+}
 
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then

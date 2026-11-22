@@ -1,0 +1,16 @@
+[Unit]
+Description=linux-av mains power scan guardian
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=AV_COLOR=never
+ExecStart=/bin/bash "@POWER@" --watch
+Restart=always
+RestartSec=1s
+RuntimeDirectory=linux-av-power
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

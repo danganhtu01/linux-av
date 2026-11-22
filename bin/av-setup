@@ -10,6 +10,7 @@
 #                        it; refused, before anything changes, when there is none.
 #                        AV_AIDE_INIT=0 still wins (it skips AIDE altogether).
 #   av-setup onaccess     enable ClamAV real-time (on-access) scanning
+#   av-setup power-policy  install/upgrade mains-only policy without packages or baselines
 #   av-setup status       show what is installed / running, and where reports go
 #   av-setup chkrootkit-baseline   adopt the last clean chkrootkit run as log.expected
 #   av-setup all [--keep-aide-baseline]   install + enable (the usual first-run)
@@ -30,6 +31,58 @@ AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
 # shellcheck source=../lib/reports.sh
 . "$AV_HOME/lib/reports.sh"
 av_detect_distro
+
+# Policy-only upgrades use the same renderer as install/enable/onaccess. Install
+# gates even before packages exist: Debian maintainer scripts can start clamd.
+do_power_policy() {
+    local dir unit cron original power="$AV_HOME/bin/av-power"
+    dir="$(av_path /etc/systemd/system)"
+    mkdir -p "$dir" "$(av_path /etc/linux-av)" || die "cannot create policy directories"
+    sed "s|@POWER@|$power|g" "$AV_HOME/systemd/av-power.service" > "$dir/linux-av-power.service" || die "cannot render power service"
+    local -a units=(clamav-daemon.service clamav-clamonacc.service
+        chkrootkit.service rkhunter.service aidecheck.service dailyaidecheck.service
+        "$AV_AIDE_INIT_UNIT.service" "$AV_TIMER_NAME.service" "$AV_ROOTKIT_TIMER_NAME.service")
+    local -a timers=(chkrootkit.timer rkhunter.timer aidecheck.timer dailyaidecheck.timer
+        "$AV_TIMER_NAME.timer" "$AV_ROOTKIT_TIMER_NAME.timer")
+    printf '%s\n' "${units[@]}" clamav-daemon.socket > "$(av_path /etc/linux-av/power.units)" || die "cannot write power unit inventory"
+    for unit in "${units[@]}"; do
+        mkdir -p "$dir/$unit.d" || die "cannot create $unit policy directory"
+        sed "s|@POWER@|$power|g" "$AV_HOME/systemd/av-power.conf" > "$dir/$unit.d/40-linux-av-power.conf" || die "cannot render $unit power policy"
+    done
+    # A condition on the timer itself loses the due event before the service
+    # gate can queue it. Keep timers running; gate their scanner services.
+    for unit in "${timers[@]}"; do
+        mkdir -p "$dir/$unit.d" || die "cannot create $unit policy directory"
+        printf '[Unit]\nConditionACPower=\n' > "$dir/$unit.d/40-linux-av-power.conf" || die "cannot render $unit power policy"
+    done
+    # Preserve distro report/config behavior by guarding the original script.
+    # The dotted backup name is ignored by run-parts. Weekly signature updates
+    # are deliberately excluded. A package replacing a wrapper is captured on
+    # the next policy upgrade, without overwriting a still-current original.
+    for cron in rkhunter chkrootkit aide aide-common; do
+        cron="$(av_path /etc/cron.daily)/$cron"
+        [ -f "$cron" ] || continue
+        [ ! -L "$cron" ] || die "refusing symlinked cron job $cron"
+        original="$cron.linux-av-power-original"
+        if ! grep -q '^# linux-av mains-only cron wrapper$' "$cron"; then
+            [ ! -L "$original" ] || die "refusing symlinked cron backup $original"
+            cp -p -- "$cron" "$original" || die "cannot preserve $cron"
+        fi
+        [ -f "$original" ] || die "missing original cron job $original"
+        # Shell-quote paths (including a checkout containing apostrophes).
+        printf '#!/bin/sh\n# linux-av mains-only cron wrapper\nexec /bin/bash '\''%s'\'' --cron '\''%s'\''\n' \
+            "${power//\'/\'\\\'\'}" "${original//\'/\'\\\'\'}" > "$cron" || die "cannot wrap $cron"
+        chmod 0755 "$cron"
+    done
+    systemctl daemon-reload || die "cannot reload power policy"
+    systemctl enable --now linux-av-power.service || die "cannot start mains power guardian"
+    for unit in "${timers[@]}"; do
+        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            systemctl start --no-block "$unit" || log_warn "could not recover enabled timer $unit"
+        fi
+    done
+    log_info "mains-only scan policy installed (linux-av-power.service)"
+}
 
 # Read one `--option=/absolute/path` argument from a packaged systemd unit.
 # Debian/Ubuntu's clamonacc unit owns its runtime paths, so discover them from
@@ -115,6 +168,7 @@ ensure_enabled_active() {
 
 # ---------------------------------------------------------------------------
 do_install() {
+    do_power_policy
     log_info "distro=$AV_DISTRO_ID family=$AV_FAMILY pkg=$AV_PKG_MGR"
 
     if [ "$AV_FAMILY" = debian ]; then
@@ -152,12 +206,15 @@ do_install() {
             fi
         done
     fi
+    # Packages may add/replace cron scripts; capture their final installed bytes.
+    do_power_policy
     log_info "package install step done."
 }
 
 # ---------------------------------------------------------------------------
 do_enable() {
     have systemctl || die "no systemd on this box (unexpected)"
+    do_power_policy
 
     if [ "$AV_FAMILY" = arch ]; then
         # Arch enables NOTHING automatically and clamd won't start without a DB.
@@ -175,7 +232,8 @@ do_enable() {
             freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
             log_info "enabling clamav-freshclam + clamav-daemon ..."
             systemctl enable --now clamav-freshclam.service || log_warn "enable clamav-freshclam failed"
-            systemctl enable --now clamav-daemon.service    || log_warn "enable clamav-daemon failed"
+            systemctl enable clamav-daemon.service
+            if av_on_mains; then systemctl start clamav-daemon.service || log_warn "start clamav-daemon failed"; fi
         fi
         log_info "enabling auditd ..."
         systemctl enable --now auditd.service || log_warn "enable auditd failed (is the 'audit' package installed?)"
@@ -186,6 +244,11 @@ do_enable() {
         log_info "Debian/Ubuntu auto-enable these at install; ensuring they are running ..."
         local service_failed=0 service
         for service in clamav-freshclam.service clamav-daemon.service auditd.service; do
+            if [ "$service" = clamav-daemon.service ] && ! av_on_mains; then
+                systemctl enable "$service"
+                log_info "$service deferred until mains power returns"
+                continue
+            fi
             ensure_enabled_active "$service" || service_failed=1
         done
         [ "$service_failed" -eq 0 ] \
@@ -248,6 +311,7 @@ do_enable() {
 
 # ---------------------------------------------------------------------------
 do_onaccess() {
+    do_power_policy
     local conf=/etc/clamav/clamd.conf
     [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
     prepare_onaccess_runtime
@@ -324,6 +388,12 @@ do_onaccess() {
         die "no OnAccessIncludePath remains in $conf"
     fi
     log_info "configured on-access in $conf (watch: $effective_watch, exclude user: $clamuser)"
+
+    if ! av_on_mains; then
+        systemctl enable clamav-daemon.service clamav-clamonacc.service || die "cannot enable deferred on-access services"
+        log_info "on-access scanning deferred until mains power returns"
+        return 0
+    fi
 
     # Restart clamd only when its configuration changed. An unconditional
     # restart waits for active clamdscan clients and can interrupt a long scan
@@ -436,7 +506,7 @@ esac
 # `all` run install AND enable as root. (A per-function re-exec with `exec` would
 # replace the process and silently drop the rest of the sequence.)
 case "${1:-}" in
-    install|enable|onaccess|chkrootkit-baseline|all)
+    install|enable|onaccess|power-policy|chkrootkit-baseline|all)
         if [ "$(id -u)" -ne 0 ]; then
             have sudo || die "must run as root and sudo not found"
             log_warn "escalating with sudo ..."
@@ -448,10 +518,11 @@ case "${1:-}" in
     install)  do_install ;;
     enable)   check_kept_aide_baseline; do_enable ;;
     onaccess) do_onaccess ;;
+    power-policy) [ "$#" = 1 ] || die "power-policy takes no options"; do_power_policy ;;
     status)   do_status ;;
     chkrootkit-baseline) av_chkrootkit_baseline ;;
     all)      check_kept_aide_baseline; do_install; do_enable ;;
     ""|-h|--help)
         sed -n '2,/^$/{/^#/p}' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command: $1 (try: install | enable | onaccess | status | all)" ;;
+    *) die "unknown command: $1 (try: install | enable | onaccess | power-policy | status | all)" ;;
 esac

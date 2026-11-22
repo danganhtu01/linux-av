@@ -21,6 +21,11 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0139: independently prove power gating, foreground cancellation and
+# cancellation of delegated work outside the client process tree.
+'power_gate_removed~lib/common.sh~s/^av_on_mains() {$/av_on_mains() { return 0;/~power_runtime'
+'power_worker_kill_removed~lib/common.sh~/^                av_power_stop_tree "\$worker"$/d~power_runtime'
+'power_daemon_kill_removed~bin/av-power~/systemctl kill --kill-whom=all --signal=SIGKILL/d~power_runtime'
 # OC-T-0080 (FAULT-0017): odd names batch by bytes. odd_batch_d158e91_limits restores that commit's limits (a name count of 128
 # and 8192, now in bytes); odd_batch_count_limit restores the name count alone; each of the others moves a batch by a name or more.
 'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt "$limit" \] || break/:/~scan_changed_odd_batches'

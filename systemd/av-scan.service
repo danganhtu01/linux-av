@@ -14,7 +14,7 @@ Environment=HOME=/root
 Environment=AV_COLOR=never
 Environment=AV_LOG_DIR=/var/log/linux-av
 Environment=AV_SCAN_PATHS=@PATHS@
-ExecStart=@BIN@ --now
+ExecStart=@BIN@ --wait-for-mains --now
 Nice=10
 IOSchedulingClass=idle
 @MEMORY_HIGH@

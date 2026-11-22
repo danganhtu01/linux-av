@@ -134,6 +134,7 @@ av-setup install
 av-setup enable
 av-setup enable --keep-aide-baseline   # keep the AIDE database already there instead of rebuilding it
 av-setup onaccess
+av-setup power-policy   # policy-only upgrade of an existing installation
 av-setup status
 ```
 
@@ -180,6 +181,7 @@ is absent. `av-setup status` prints each scanner's report location and mail stat
 ```bash
 tests/run.sh                  # every row; or name rows to run
 tests/mutants.sh              # one guard removed per scratch copy; each named row must go red
+bash tests/power.sh           # synthetic power + scanner/daemon stand-ins only
 ```
 
 Bash, no root, no dependencies. `AV_ROOT` (empty by default) prefixes every `/etc` and `/var`
@@ -198,6 +200,23 @@ whose `base=` line names the scratch root, and a copy of `root-install-guard.sh`
 lines differ; a row proves each copy differs from the file under test by those lines alone.
 
 ### Scanning — `av-scan`
+
+OC-T-0139 / R-4089: scans require confirmed mains power, including while running.
+Manual scans defer/cancel with exit 75; `--scheduled` and installed scan/rootkit
+units wait and retry on reconnect. A shared sysfs check handles USB/PD, Mains,
+Wireless, UPS and batteryless hosts, rejecting unknown state with a system battery.
+`av-setup` installs a guardian and service gates that kill the complete ClamAV
+daemon/on-access cgroups on unplug, then restore enabled protection and pending
+checks on mains. Packaged rootkit/AIDE services and known daily cron scripts are
+covered as well. Signature refresh, package/build operations and auditd remain
+available on battery. See README's mains-only inventory for exact coverage and
+unhandled external/custom entrypoints.
+
+Surface policy-only upgrade from the permanent updated checkout:
+`sudo ./bin/av-setup power-policy`. This adds no package transaction or baseline
+rebuild. `install.sh` supports PATH installation only, with no `--upgrade` flag;
+OVH's root-owned-copy installers remain separate. No rollout is implied by a
+repository change.
 
 ```bash
 av-scan --now                  # one scan of $AV_SCAN_PATHS (default: $HOME)
@@ -342,6 +361,9 @@ Every tracked file in this repository.
 | `root-install-guard.sh` | OVH's second root step (C-10; OC-T-0037), run as root by `/usr/local/sbin/ovh-root-run`: installs `bin/av-guard` and a drop-in `05-guard.conf` (`ExecStartPre=` the guard) for `linux-av-scan.service` and `linux-av-rootkit.service`, and rewrites both base unit files so `ExecStart` names `/usr/local/lib/linux-av/bin/av-scan` (every other byte as it was; the old file kept once as `<unit>.before-OC-T-0037`). First refuses, writing nothing, unless its one `# sha256` line matches `bin/av-guard` and the folders and unit files it touches are root-owned, not links and not group- or other-writable; reads `ExecStartPre` and `ExecStart` back for both units after the reload and runs the installed guard once; starts, stops, enables, disables and restarts nothing. |
 | `bin/av-guard` | `ExecStartPre=` of OVH's two root units (OC-T-0037): refuses to start the unit, with one line naming the path and the reason, unless every component down to each file the unit runs or sources (`av-scan`, `lib/common.sh`, the config files, the guard), both unit files and both drop-in folders with every entry in them is root-owned, not group- or other-writable and not a link. Reads no argument, file or variable from its environment. Installed only by `root-install-guard.sh`. |
 | `bin/av-scan` | The scan runner: immediate, quick, full, path-scoped, scheduled-foreground, rootkit, integrity, status — and the code that renders and installs the root-owned systemd timers. |
+| `bin/av-power` | Shared power service gate, runtime guardian, and supervisor entrypoint for packaged cron/baseline commands. Reads the scanner unit inventory under `/etc/linux-av`. |
+| `systemd/av-power.service`, `systemd/av-power.conf` | Guardian service and scanner service drop-in templates, rendered by `av-setup power-policy` and the normal setup commands. |
+| `tests/power.sh` | Synthetic power state and harmless scanner/daemon process tests; included in `tests/run.sh`. |
 | `bin/av-setup` | Installs packages and enables services per distro; also configures on-access scanning, the AIDE check timer's boot-delay drop-in, the scanners' report destinations and rkhunter's nightly run, and starts the AIDE baseline in its own unit (or, with `--keep-aide-baseline`, keeps the database that is there). Needs root (`status` does not). |
 | `lib/reports.sh` | Sourced by `av-setup`. The report-destination edits, the detached AIDE baseline, the chkrootkit baseline and the `status` report lines; every `/etc` and `/var` path goes through `av_path` (prefix `AV_ROOT`). |
 | `tests/run.sh` | The suite: bash only, no root except the `guard_*` rows (below); includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
@@ -365,6 +387,9 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | Path | What | Written by |
 |---|---|---|
 | `/etc/linux-av/av.env` | system-wide config. `bootstrap.sh --full` writes `AV_SCAN_PATHS="/"` here, editing in place rather than replacing the file | `bootstrap.sh` |
+| `/etc/linux-av/power.units`, `/etc/systemd/system/linux-av-power.service`, scanner `40-linux-av-power.conf` drop-ins | managed scan inventory, guardian and startup/runtime policy | `av-setup power-policy` (also normal setup commands) |
+| `/run/linux-av-power/` | pending service recovery and daily cron locks, volatile across reboot | `av-power` |
+| `/etc/cron.daily/*.linux-av-power-original` | preserved distro cron scripts; their original entrypoints become power wrappers | `av-setup power-policy` |
 | `~/.config/linux-av/av.env` | per-user config | you |
 | `<repo>/config/av.env` | repo-local config; gitignored | you |
 | `~/.local/state/linux-av/` | per-user logs, scan state and quarantine — `AV_LOG_DIR`, with `AV_QUARANTINE` and `AV_LOG_FILE` beneath it | `av-scan` |

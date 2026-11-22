@@ -126,7 +126,7 @@ av_rkhunter_daily() {
     fi
     if have rkhunter && [ ! -e "$(av_path /var/lib/rkhunter/db/rkhunter.dat)" ]; then
         log_info "no rkhunter property database yet — running: rkhunter --propupd"
-        rkhunter --propupd >/dev/null 2>&1 \
+        av_power_run rkhunter --propupd >/dev/null 2>&1 \
             || log_warn "rkhunter --propupd failed; run it by hand"
     fi
 }
@@ -163,7 +163,8 @@ av_aide_baseline() {
         log_info "the AIDE baseline is already building ($unit.service) — not starting a second"
     elif have systemd-run; then
         log_info "building the AIDE baseline in its own unit, detached from this terminal ..."
-        if systemd-run --unit="$unit" --property=RuntimeMaxSec="$limit" --collect "${cmd[@]}"; then
+        if systemd-run --unit="$unit" --property=RuntimeMaxSec="$limit" --collect \
+            "$BASH" "$AV_HOME/bin/av-power" --wait --run "${cmd[@]}"; then
             log_info "baseline started as $unit.service (limit $limit)"
         else
             log_warn "could not start $unit.service; build the baseline by hand: ${cmd[*]}"
@@ -171,7 +172,7 @@ av_aide_baseline() {
         fi
     else
         log_warn "systemd-run not found — building the baseline in this terminal (do not close it)"
-        "${cmd[@]}" || log_warn "${cmd[0]} failed"
+        av_power_run "${cmd[@]}" || log_warn "${cmd[0]} failed or deferred for mains power"
         return 0
     fi
     log_info "watch it:  systemctl status $unit   |   journalctl -u $unit -f"

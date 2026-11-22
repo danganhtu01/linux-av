@@ -276,6 +276,92 @@ a mount excluded by `AV_EXCLUDE_FSTYPES`. If `clamscan` is missing, it warns tha
 the daemon cannot enforce those exclusions.
 Force either engine with `--engine clamscan|clamdscan` or `AV_ENGINE=`.
 
+### Mains-only scans — OC-T-0139 / R-4089
+
+All linux-av scan entrypoints require mains power. Manual work exits **75** when
+deferred or cancelled. `--wait-for-mains` waits and retries an interrupted scan
+from the beginning; the foreground `--scheduled` loop and installed scan/rootkit
+templates use this recovery behavior. Cancelled scans never advance completion
+stamps. This policy is independent of distro and scanner engine.
+
+`lib/common.sh` reads `/sys/class/power_supply/*` by **type**, not adapter or
+battery name. Mains, USB (including USB-C/PD variants), Wireless and BrickID
+supplies are recognized. A present system Battery (or UPS) requires positive
+external `online=1` and a known non-discharging status. Discharging wins over
+a stale online adapter; unknown/missing battery status or supply type defers
+work. Device-scoped peripheral batteries are ignored. An empty readable class
+or absent battery slot permits mains-only servers; missing/unreadable sysfs
+defers work. A UPS can report mains through its own online attribute.
+
+The command supervisor checks power before starting and while work runs. On
+loss it freezes and kills the process tree, including timeout groups, scanner
+children and batch workers. Checks normally occur every second; detection and
+service-manager scheduling impose a small cancellation delay, not a physical
+zero-latency guarantee. Forced cancellation can leave private scan scratch
+directories (`av-scan.*` in TMPDIR and `av-scan-state.*` in the log directory);
+these are never accepted as completion stamps.
+
+`av-setup install`, `enable`, `all` and `onaccess` install the same managed
+`linux-av-power.service` guardian and `40-linux-av-power.conf` service drop-ins.
+They gate service startup with the shared check, kill entire scanner cgroups
+without waiting for graceful daemon draining, and queue interrupted/due work
+under `/run/linux-av-power/pending`. Enabled continuous protection and pending
+checks recover on mains. Scanner services bind to the guardian's lifetime.
+`AV_AIDE_INIT=0` still skips baseline creation and periodic-check enablement;
+power gates also apply to AIDE jobs an administrator already enabled.
+`clamav-daemon.socket` is stopped on battery too; attempted socket activation
+still encounters the daemon's service gate.
+
+Inventory of repository-managed work:
+
+| Path | Enforcement and recovery |
+|---|---|
+| `av-scan --now` (quick/full/path/changed/quarantine), `--scheduled` | Shared command supervisor, including file walks and all batches; scheduled work retries on mains |
+| `av-scan --rootkit`, `--integrity` | Same supervisor for rkhunter, chkrootkit, aide/aide.wrapper; manual work returns 75, scheduled rootkit work retries |
+| `clamdscan` and its delegated multiscan workers | Requires active `linux-av-power.service` and `clamav-daemon.service`; client is pinned to a packaged local Unix socket via a generated config, overriding TCP settings; guardian kills the daemon cgroup and queued work on battery |
+| `clamav-clamonacc.service` + `clamav-daemon.service` | Both startup-gated and killed on battery; enabled services restored on mains; real-time protection is intentionally absent on battery |
+| `linux-av-scan` / `linux-av-rootkit` units (configured basenames supported) | Templates wait/retry; policy upgrade adds gates and an ExecStopPost hook to replay self-cancellation (exit 75), retaining existing ExecStart paths/arguments, root-owned guards, environment and limits |
+| Packaged `chkrootkit`, `rkhunter`, `aidecheck`, `dailyaidecheck` services | Startup gates, cgroup cancellation, and pending replay on mains; timer schedules stay intact, with timer-level AC conditions cleared so due events reach the service gate; enabled timers are recovered during policy installation |
+| Existing `/etc/cron.daily/{rkhunter,chkrootkit,aide,aide-common}` | Wrapper runs the preserved distro script through the supervisor; waits/retries on mains, uses flock to coalesce repeats; preserves report/config behavior |
+| Detached AIDE baseline and terminal fallback; `rkhunter --propupd` during enable | Baseline unit wraps the command and waits/retries; terminal fallback and property refresh defer/cancel on battery |
+| `freshclam`, `clamav-freshclam`, rkhunter's weekly signature/database refresh | Signature refresh, outside scan gating; available on battery |
+| apt/pacman, `av-aide-arch` / makepkg, auditd, report/baseline adoption | Package/build/administration or audit work, outside scan gating; package installation places daemon gates before maintainer scripts can start services and reapplies policy afterward |
+
+A refresh embedded in a distro's daily scan script follows that whole script's
+power policy; the wrapper preserves the packaged script's behavior.
+
+For **Surface upgrading an existing checkout**, run this supported command from
+the permanent checkout after the new code has been imported:
+
+```bash
+sudo ./bin/av-setup power-policy
+```
+
+It installs/upgrades policy only: no package transaction, signature refresh or
+baseline rebuild. `install.sh` remains a PATH symlink installer; it has no
+`--upgrade` flag. The OVH-specific `root-install*.sh` scripts remain separate
+root-owned-copy procedures and are not Surface installers. Those scripts alone
+do not install the new guardian/drop-ins/cron wrappers; full policy rollout also
+requires `av-setup power-policy` from a suitable permanent, root-owned checkout
+on hosts using that deployment model. Existing root-owned scan copies acquire
+the standalone command supervision when their usual installer updates them.
+
+Unhandled paths: arbitrary direct scanner binary invocations, custom units or
+user crontabs/cron.d entries outside the listed inventory, third-party containers,
+remote/custom clamd sockets, and scanners launched independently by alert hooks.
+Remote/custom socket delegation is refused by av-scan; use clamscan or the
+packaged local daemon. A daemon double-forking outside a managed service is not
+covered by the foreground process-tree supervisor. Rerun `power-policy` after
+external package upgrades that replace the managed cron wrappers (the installer
+preserves the new package script). Pending service state is volatile across
+reboot; existing enabled timers/cron schedules provide the next run. The
+permanent checkout must remain available, as with existing timer installations.
+The policy is not an OS-wide prohibition on privileged users launching scanners.
+
+`bash tests/power.sh` exercises synthetic power supplies and harmless process
+stand-ins, including a delegated daemon in a separate session; it is also run
+by `tests/run.sh`. No real scan, install or host service operation is needed.
+
 Each scan checks a lexical absolute path against skipped mounts before any
 `realpath` call, so a path already on a dead network mount is dropped without
 probing it. Remaining paths resolve with `realpath -m`, including symlinks with
@@ -389,11 +475,13 @@ Key vars (all optional, shown with defaults):
 | `AV_EXCLUDE_FSTYPES` | `autofs cifs smb3 smbfs nfs nfs4 9p ceph glusterfs afs fuse fuse.*` | skip these filesystem types (shell patterns); empty disables |
 | `AV_MOUNTINFO` | `/proc/self/mountinfo` | mount table read at each scan, without probing mounts |
 | `AV_SCAN_TIMEOUT` | `12h` | scanner time limit; `0` disables; kill grace is 5 minutes |
+| `AV_POWER_SUPPLY_DIR` | `/sys/class/power_supply` | power-supply class; override only for synthetic tests |
+| `AV_POWER_POLL_INTERVAL` | `1` | seconds between runtime power checks; tests use a shorter interval |
 | `AV_ONACCESS_PATHS` | scan paths (never `/`) | what real-time scanning watches |
 | `AV_ENGINE` | `auto` | `auto` \| `clamdscan` \| `clamscan` |
 | `AV_LOG_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/linux-av` | logs + state |
 | `AV_QUARANTINE` | `$AV_LOG_DIR/quarantine` | where `-q` moves infected files |
-| `AV_CLAMD_SOCKET` | auto-detected | override if detection fails |
+| `AV_CLAMD_SOCKET` | auto-detected | packaged local socket override; arbitrary/remote sockets are refused |
 | `AV_ON_FOUND` | – | shell command run when threats are found (alert hook) |
 | `AV_TIMER_NAME` | `linux-av-scan` | basename of the installed systemd units |
 | `AV_TIMER_BOOT_DELAY` | `1min` | `OnBootSec` for the scan/rootkit timers (run after each boot) |
@@ -685,6 +773,14 @@ policy events.
 
 ## 7. Uninstall
 
+Before deleting the checkout, remove the persistent power policy too: disable
+and stop `linux-av-power.service`, restore each managed daily cron wrapper from
+its `.linux-av-power-original` (after verifying the wrapper marker), remove the
+guardian unit, `40-linux-av-power.conf` drop-ins and `/etc/linux-av/power.units`,
+then run `systemctl daemon-reload`. Scanner services bound to the guardian stop
+with it; restore any services you intend to retain explicitly. The inventory
+above names every managed path, including custom scan unit basenames.
+
 ```bash
 sudo av-scan --remove-timer          # drop the systemd timer
 rm ~/.local/bin/av-scan ~/.local/bin/av-setup ~/.local/bin/av-aide-arch   # or /usr/local/bin with sudo
@@ -693,7 +789,7 @@ rm ~/.local/bin/av-scan ~/.local/bin/av-setup ~/.local/bin/av-aide-arch   # or /
 
 ## 8. Requirements & notes
 
-- **bash 4+, systemd, coreutils** — present on all three distros by default.
+- **bash 4+, systemd, coreutils, util-linux (`flock`)** — present on all three distros by default.
 - `av-setup` needs **root** (re-execs via `sudo`); `av-scan --now/--scheduled`
   only needs enough rights to read the paths you scan.
 - ClamAV exit codes are handled: `0` clean, `1` **threats found** (logged, not a

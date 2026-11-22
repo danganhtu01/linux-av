@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Shared service gate, runtime guardian and wrapper for packaged cron jobs.
+set -uo pipefail
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+    [[ $_src = /* ]] || _src="$_dir/$_src"
+done
+AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# Root automation must enter through the permanent, guarded launcher.
+if [ "$EUID" = 0 ]; then
+    [ "$AV_HOME" = /usr/local/lib/linux-av ] || {
+        echo 'linux-av: root must use the verified permanent installation (see README Surface upgrade)' >&2; exit 1;
+    }
+    case $- in *p*) ;; *) exec /bin/sh /usr/local/lib/linux-av/bin/av-root av-power "$@" ;; esac
+    /bin/sh /usr/local/lib/linux-av/bin/av-guard --power >/dev/null || exit 1
+    [ -z "${AV_ROOT:-}" ] || { echo 'AV_ROOT is for nonroot tests only' >&2; exit 1; }
+    AV_ROOT=
+    BASH_ENV= ENV=
+    readonly AV_HOME AV_ROOT PATH BASH BASH_ENV ENV
+    AV_POWER_STATE_DIR=/run/linux-av-power
+    AV_POWER_UNITS_FILE=/etc/linux-av/power.units
+    AV_POWER_SUPPLY_DIR=/sys/class/power_supply
+    readonly AV_POWER_STATE_DIR AV_POWER_UNITS_FILE AV_POWER_SUPPLY_DIR
+fi
+# shellcheck source=../lib/common.sh
+. "$AV_HOME/lib/common.sh"
+
+pending="${AV_POWER_STATE_DIR:-/run/linux-av-power}/pending"
+queue_unit() {
+    [[ $1 =~ ^[a-zA-Z0-9@_.:-]+\.(service|socket)$ ]] || return 1
+    mkdir -p "$pending" && : > "$pending/$1"
+}
+
+watch_power() {
+    local unit state file
+    local units_file="${AV_POWER_UNITS_FILE:-/etc/linux-av/power.units}"
+    [ -r "$units_file" ] || die "missing scanner unit inventory: $units_file"
+    mkdir -p "$pending" || return 1
+    # Recover enabled continuous protection after boot or a guardian restart.
+    # Scheduled checks are queued only when due/active, never at every AC event.
+    for unit in clamav-daemon.service clamav-daemon.socket clamav-clamonacc.service; do
+        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then queue_unit "$unit"; fi
+    done
+    while :; do
+        [ -r "$units_file" ] || die "scanner unit inventory disappeared: $units_file"
+        if av_on_mains; then
+            for file in "$pending"/*; do
+                [ -f "$file" ] || continue
+                unit="${file##*/}"
+                # Remove before starting: a gate that sees an unplug queues it
+                # again. Keep failed starts pending and retry while on mains.
+                rm -f -- "$file"
+                systemctl start --no-block "$unit" || queue_unit "$unit"
+            done
+        else
+            while IFS= read -r unit; do
+                [[ $unit =~ ^[a-zA-Z0-9@_.:-]+\.(service|socket)$ ]] || continue
+                state="$(systemctl show "$unit" -p ActiveState --value 2>/dev/null)"
+                case "$state" in
+                    active|activating|reloading|deactivating)
+                        queue_unit "$unit"
+                        # No graceful clamd drain: its active/queued work must
+                        # stop too. Socket activation is stopped separately.
+                        systemctl kill --kill-whom=all --signal=SIGKILL "$unit" 2>/dev/null || true
+                        systemctl stop --no-block "$unit" || true ;;
+                esac
+                case "$unit" in
+                    clamav-daemon.service|clamav-daemon.socket|clamav-clamonacc.service)
+                        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then queue_unit "$unit"; fi ;;
+                esac
+            done < "$units_file"
+        fi
+        /bin/sleep "${AV_POWER_POLL_INTERVAL:-1}"
+    done
+}
+
+case "${1:-}" in
+    --check) av_on_mains ;;
+    --check-unit)
+        if av_on_mains; then exit 0; fi
+        queue_unit "${2:?unit required}" || exit 255
+        exit 1 ;;
+    --finished-unit)
+        if [ "${EXIT_STATUS:-}" = 75 ] || ! av_on_mains; then
+            queue_unit "${2:?unit required}" || exit 1
+        fi ;;
+    --watch) watch_power ;;
+    --cron)
+        # Multiple daily invocations while unplugged coalesce into one pending
+        # run. /run state disappears at reboot; the distro schedules the next run.
+        mkdir -p "${pending%/*}"
+        if [ "$EUID" = 0 ]; then
+            exec flock -n "${pending%/*}/cron.${2##*/}.lock" /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run /bin/sh "${2:?script required}"
+        fi
+        exec flock -n "${pending%/*}/cron.${2##*/}.lock" "$BASH" "$0" --wait --run /bin/sh "${2:?script required}" ;;
+    --run|--wait)
+        wait_power=0
+        if [ "$1" = --wait ]; then wait_power=1; shift; fi
+        [ "${1:-}" = --run ] || die "expected --run command [args...]"
+        shift
+        [ "$#" -gt 0 ] || die "command required"
+        while :; do
+            [ "$wait_power" = 0 ] || av_power_wait
+            av_power_run "$@"; rc=$?
+            [ "$wait_power" = 1 ] && [ "$rc" = 75 ] || exit "$rc"
+        done ;;
+    *) die "usage: av-power --check | --check-unit UNIT | --finished-unit UNIT | --watch | [--wait] --run COMMAND [ARGS...] | --cron SCRIPT" ;;
+esac

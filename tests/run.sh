@@ -52,7 +52,7 @@ assert_same() { cmp -s "$1" "$2" || fail "$3: $1 and $2 differ"; }
 # ---------------------------------------------------------------------------
 # fixture
 # ---------------------------------------------------------------------------
-TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee cmp ls stat"
+TOOLS="mktemp rm sed grep awk cp mv mkdir date cat dirname readlink tail head basename getent cut wc chmod touch tr tee cmp ls stat sort"
 
 # new_fixture NAME [debian|arch]  -> sets R (AV_ROOT), B (PATH dir), H (HOME), CALLS
 new_fixture() {
@@ -231,7 +231,7 @@ row_baseline_detached_debian() {
     new_fixture "$ROW"
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "systemd-run command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run aideinit -y -f" "systemd-run command line"
     assert_lacks "$(calls)" "
 aideinit" "aideinit not run directly"
     assert_has "$OUT" "systemctl status linux-av-aide-init" "how to watch (status)"
@@ -243,7 +243,7 @@ row_baseline_detached_arch() {
     new_fixture "$ROW" arch
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run sh -c aide --init && mv -f \"\$1\" \"\$2\" sh $R/var/lib/aide/aide.db.new.gz $R/var/lib/aide/aide.db.gz" "arch command line"
     assert_lacks "$(calls)" "aideinit" "no aideinit on arch"
     assert_has "$(cat "$(conf default/rkhunter)")" 'CRON_DAILY_RUN=""' "arch: rkhunter cron setting not touched"
 }
@@ -258,7 +258,7 @@ row_baseline_running_not_twice() {
 row_baseline_timeout_env() {
     new_fixture "$ROW"
     SETUP_ENV=(AV_AIDE_INIT_TIMEOUT=90min AV_AIDE_INIT_UNIT=my-aide); setup enable; SETUP_ENV=()
-    assert_has "$(calls)" "systemd-run --unit=my-aide --property=RuntimeMaxSec=90min --collect aideinit -y -f" "unit and limit from env"
+    assert_has "$(calls)" "systemd-run --unit=my-aide --property=RuntimeMaxSec=90min --collect /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run aideinit -y -f" "unit and limit from env"
 }
 
 row_baseline_skip_aide_init_0() {
@@ -267,7 +267,7 @@ row_baseline_skip_aide_init_0() {
     assert_lacks "$(calls)" "systemd-run" "no baseline with AV_AIDE_INIT=0"
     assert_lacks "$(calls)" "aideinit" "no aideinit with AV_AIDE_INIT=0"
     assert_has "$OUT" "AV_AIDE_INIT=0" "skip is announced"
-    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d" "no timer drop-in with AV_AIDE_INIT=0"
+    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf" "no boot scheduling override with AV_AIDE_INIT=0"
 }
 
 row_baseline_foreground_without_systemd_run() {
@@ -344,7 +344,7 @@ row_keep_aide_baseline_aide_init_0() {
     assert_has "$OUT" "AV_AIDE_INIT=0 — skipping AIDE baseline build and periodic-check enablement" "the AV_AIDE_INIT=0 skip is announced"
     assert_eq "$(printf '%s\n' "$OUT" | grep -c "WARN .*--keep-aide-baseline is ignored: AV_AIDE_INIT=0 wins")" 1 "one warning says AV_AIDE_INIT=0 wins"
     assert_lacks "$OUT" "keeping the existing" "the database is not reported kept"
-    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d" "no timer drop-in with AV_AIDE_INIT=0"
+    assert_nofile "$R/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf" "no boot scheduling override with AV_AIDE_INIT=0"
 }
 
 row_keep_aide_baseline_aide_init_0_no_db() {
@@ -360,7 +360,7 @@ row_keep_aide_baseline_option_off() {
     new_fixture "$ROW"; printf 'db\n' > "$R/var/lib/aide/aide.db"
     setup enable
     assert_eq "$RC" 0 "enable exit status"
-    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect aideinit -y -f" "rebuilt without the option"
+    assert_has "$(calls)" "systemd-run --unit=linux-av-aide-init --property=RuntimeMaxSec=4h --collect /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run aideinit -y -f" "rebuilt without the option"
     assert_lacks "$OUT" "--keep-aide-baseline" "no mention of the option"
 }
 
@@ -390,7 +390,7 @@ EOS
     assert_eq "$RC" 1 "a typo is refused"
     assert_lacks "$(calls)" "sudo" "sudo is not asked for a typo"
     setup enable --keep-aide-baseline
-    assert_has "$(calls)" "sudo -E $REPO/bin/av-setup enable --keep-aide-baseline" "the option goes through sudo"
+    assert_has "$(calls)" "sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup enable --keep-aide-baseline" "the option goes through sudo"
 }
 
 # all: the database is looked for before the packages are installed
@@ -621,6 +621,30 @@ row_mail_absent_file_not_created() {
     setup enable
     assert_nofile "$R/etc/default/aide" "an absent /etc/default/aide is not created"
     assert_has "$OUT" "/etc/default/aide is not present" "says why"
+}
+
+row_common_root_default() {
+    new_fixture "$ROW"
+    local state expected
+    for state in unset empty prefix; do
+        expected=
+        [ "$state" != prefix ] || expected=$R
+        OUT="$("$ENV_BIN" -i PATH="$B" HOME="$H" AV_HOME="$REPO" AV_CONFIG="$H/av.env" AV_COLOR=never \
+            "$BASH_BIN" -euc '
+                case $2 in
+                    unset) unset AV_ROOT ;;
+                    empty) AV_ROOT=; readonly AV_ROOT ;;
+                    prefix) AV_ROOT=$3; readonly AV_ROOT ;;
+                esac
+                . "$1/lib/common.sh"
+                printf "root=<%s>\n" "$AV_ROOT"
+                if [ "$2" != unset ]; then
+                    if ( AV_ROOT=changed ) 2>/dev/null; then exit 3; fi
+                fi
+            ' sh "$REPO" "$state" "$R" 2>&1)"; RC=$?
+        assert_eq "$RC" 0 "$state root prefix loads without assignment errors and stays readonly when initialized"
+        assert_eq "$OUT" "root=<$expected>" "$state root prefix preserved/defaulted"
+    done
 }
 
 row_av_root_refused_as_root() {
@@ -3656,9 +3680,8 @@ row_guard_targets_fixed() {
 # The three config paths are what av-scan sources under the unit's own environment (HOME=/root, no AV_CONFIG, AV_HOME the
 # installed copy); a change to that chain in lib/common.sh or to HOME in the units must change the guard too.
 row_guard_config_chain() {
-    assert_eq "$(sed -n '/^for _cfg in/,/^do$/p' "$REPO/lib/common.sh")" "$(printf '%s\n' 'for _cfg in \' '    "${AV_CONFIG:-}" \' \
-        '    "$XDG_CONFIG_HOME/linux-av/av.env" \' '    "/etc/linux-av/av.env" \' '    "$AV_HOME/config/av.env"' 'do')" \
-        'the config chain lib/common.sh sources'
+    assert_has "$(cat "$REPO/lib/common.sh")" '_av_configs=(/etc/linux-av/av.env)' 'root config is fixed to the system file'
+    assert_has "$(cat "$REPO/lib/common.sh")" 'for _cfg in "${_av_configs[@]}"; do' 'only the selected config list is sourced'
     assert_has "$(cat "$REPO/lib/common.sh")" ': "${XDG_CONFIG_HOME:=$HOME/.config}"' 'XDG_CONFIG_HOME defaults under HOME'
     assert_has "$(cat "$REPO/systemd/av-scan.service")" 'Environment=HOME=/root' 'the scan unit sets HOME=/root'
     assert_has "$(cat "$REPO/systemd/av-rootkit.service")" 'Environment=HOME=/root' 'the rootkit unit sets HOME=/root'
@@ -3997,6 +4020,85 @@ row_guard_documented() {
     done
 }
 
+
+row_power_policy_install() {
+    new_fixture "$ROW"
+    mkdir -p "$R/etc/cron.daily"
+    printf '#!/bin/sh\necho original\n' > "$R/etc/cron.daily/rkhunter"
+    local dir="$R/etc/systemd/system" unit
+    mkdir -p "$dir/linux-av-scan.service.d"
+    printf '[Service]\nExecStart=/usr/local/bin/av-scan --now\nNice=10\n' > "$dir/linux-av-scan.service"
+    printf '[Service]\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$dir/linux-av-rootkit.service"
+    printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$dir/linux-av-scan.service.d/root-owned.conf"
+    printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\nCPUQuota=37%%\nMemoryMax=3G\n' > "$dir/linux-av-scan.service.d/05-guard.conf"
+    cp "$dir/linux-av-scan.service.d/05-guard.conf" "$D/guard"
+    setup power-policy
+    assert_eq "$RC" 0 'policy-only upgrade succeeds'
+    assert_lacks "$(calls)" 'systemctl enable --now linux-av-power.service' 'activation remains separate'
+    assert_lacks "$(calls)" 'apt-get ' 'no package transaction'
+    assert_lacks "$(calls)" 'freshclam ' 'no signature update'
+    assert_lacks "$(calls)" 'systemd-run ' 'no baseline rebuild'
+    assert_has "$(cat "$dir/linux-av-scan.service")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' 'scan migrated'
+    assert_has "$(cat "$dir/linux-av-rootkit.service")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' 'rootkit migrated'
+    assert_has "$(cat "$dir/linux-av-scan.service.d/root-owned.conf")" 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' 'override migrated'
+    assert_same "$D/guard" "$dir/linux-av-scan.service.d/05-guard.conf" 'guard and resource limits unchanged'
+    assert_has "$(cat "$dir/linux-av-scan.service.before-OC-T-0139")" 'ExecStart=/usr/local/bin/av-scan --now' 'original command backed up'
+    for unit in clamav-daemon clamav-clamonacc chkrootkit rkhunter aidecheck dailyaidecheck linux-av-scan linux-av-rootkit; do
+        assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'ExecCondition=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power ' 'shared start gate'
+        assert_has "$(cat "$dir/$unit.service.d/40-linux-av-power.conf")" 'KillSignal=SIGKILL' 'no daemon drain'
+    done
+    assert_has "$(cat "$dir/linux-av-scan.service.d/40-linux-av-power.conf")" 'ExecStopPost=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power ' 'self-cancelled scheduled work is queued'
+    assert_lacks "$(cat "$dir/linux-av-scan.service.d/40-linux-av-power.conf")" 'ExecStart=' 'gate does not replace scan command'
+    assert_has "$(cat "$dir/aidecheck.timer.d/40-linux-av-power.conf")" 'ConditionACPower=' 'due events reach the service gate even on battery'
+    assert_has "$(cat "$R/etc/cron.daily/rkhunter")" '--cron ' 'packaged cron wrapped'
+    cp "$R/etc/cron.daily/rkhunter.linux-av-power-original" "$D/original"
+    cp "$R/etc/cron.daily/rkhunter" "$D/wrapper"
+    setup power-policy
+    assert_eq "$RC" 0 'second policy upgrade succeeds'
+    assert_same "$D/original" "$R/etc/cron.daily/rkhunter.linux-av-power-original" 'original retained'
+    assert_same "$D/wrapper" "$R/etc/cron.daily/rkhunter" 'wrapper stable'
+    printf '#!/bin/sh\necho upgraded-package\n' > "$R/etc/cron.daily/rkhunter"
+    setup power-policy
+    assert_has "$(cat "$R/etc/cron.daily/rkhunter.linux-av-power-original")" 'upgraded-package' 'new package script preserved on upgrade'
+}
+
+row_power_policy_exec_refused() {
+    local directive
+    for directive in 'ExecStart=/usr/bin/false' 'ExecStartPre=/usr/bin/false' \
+        'ExecStartPost=/usr/bin/false' 'ExecReload=/usr/bin/false' 'ExecStop=/usr/bin/false' \
+        'ExecCondition=/usr/bin/false' 'ExecStopPost=/usr/bin/false' 'ExecUnknown=/usr/bin/false'; do
+        new_fixture "$ROW-${directive%%=*}"
+        # The final directive must be checked even without a trailing newline.
+        printf '[Service]\n%s' "$directive" > "$R/etc/systemd/system/linux-av-scan.service"
+        cp "$R/etc/systemd/system/linux-av-scan.service" "$D/original"
+        setup power-policy
+        assert_eq "$RC" 1 "$directive refused"
+        assert_has "$OUT" 'unsupported executable' 'exec whitelist still enforced'
+        assert_same "$D/original" "$R/etc/systemd/system/linux-av-scan.service" 'refused unit untouched'
+        assert_nofile "$R/etc/systemd/system/linux-av-power.service" 'no policy write before successful audit'
+        assert_nofile "$R/etc/systemd/system/linux-av-scan.service.before-OC-T-0139" 'no backup before successful audit'
+    done
+}
+
+row_power_cron_migration() {
+    [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/cron-migration.sh" 2>&1)"
+    assert_eq "$?" 0 "inert cron migration checks: $output"
+}
+
+row_power_policy_verify() {
+    [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/policy.sh" 2>&1)"
+    assert_eq "$?" 0 "synthetic installed policy checks: $output"
+}
+
+row_power_runtime() {
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/power.sh" 2>&1)"
+    assert_eq "$?" 0 "synthetic power and process tests: $output"
+}
 
 ROWS="$(declare -F | awk '$3 ~ /^row_/ {print $3}' | sort)"
 if [ "$#" -gt 0 ]; then

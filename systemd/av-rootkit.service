@@ -12,6 +12,6 @@ Type=oneshot
 Environment=HOME=/root
 Environment=AV_COLOR=never
 Environment=AV_LOG_DIR=/var/log/linux-av
-ExecStart=@BIN@ --rootkit
+ExecStart=@BIN@ --wait-for-mains --rootkit
 Nice=15
 IOSchedulingClass=idle

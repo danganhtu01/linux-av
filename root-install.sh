@@ -4,9 +4,9 @@
 # (a tree step of linux-av@<commit>; C-10). OC-T-0046, R-3377: his words 2026-11-05, "Stop the antivirus scans jobs now.
 # Resume it after the fix is live, which could be later." This is the fix; a separate card starts the timer.
 # The runner checks this file's SHA-256 and each listed file's before it runs anything:
-# sha256 05da74b3350033313844900ca623e19fd20eefe18f29ce963787c9519091e58c bin/av-scan
-# sha256 1ee5629599004961efafe99e43c791ae1b0d18e50f606f3b4d17733f6a57c747 lib/common.sh
-# sha256 ae1283589ae0b920d1f72dbb72d74b1668e8312d36b9b7f8ca876317dd396684 systemd/av-scan.service
+# sha256 63d881cc652f56f0f8a2cbde92f526d613b8ddd9a6bb7937dff1311563f27fbd bin/av-scan
+# sha256 8d730e8f4405b4e80b7a97c9c38ecfe0440bec818e23557754244fdeb747aa1d lib/common.sh
+# sha256 f63f123c07e3fb672e6fef8317a6a398681d7f8c091916bb72355806cc9fd626 systemd/av-scan.service
 # What it writes, all root:root:
 #   /usr/local/lib/linux-av/bin/av-scan     0755  (the old one kept once as av-scan.before-R-3377)
 #   /usr/local/lib/linux-av/lib/common.sh   0644  (the old one kept once as common.sh.before-R-3377)
@@ -66,7 +66,8 @@ t=$(mktemp -d /run/linux-av-root-install.XXXXXXXX)
 trap 'case $t in /run/linux-av-root-install.?*) rm -rf --one-file-system -- "$t" ;; esac' EXIT
 # OC-T-0067, R-3377: render memory limits without activation. CPU values remain
 # solely in OVH's R-3377-cpu-cap.conf. Pin config to an empty private file; defaults and
-# explicit AV_SCAN_MEMORY_* environment overrides match the timer renderer.
+# explicit AV_SCAN_MEMORY_* environment overrides match the timer renderer. Other inherited
+# selectors and Bash startup files/functions are excluded before rendering.
 # --render-scan-limits only prints the memory drop-in (render_scan_limits in bin/av-scan). It never calls
 # systemctl and never starts a scan.
 # Run it through bash, not as a program: ovh-root-run copies this tree without file modes, so bin/av-scan has
@@ -75,7 +76,9 @@ trap 'case $t in /run/linux-av-root-install.?*) rm -rf --one-file-system -- "$t"
 # sh. Run the copy in $here, not the one in $dst: AV_HOME comes from the script's own path and the renderer
 # reads "$AV_HOME/systemd/av-scan.service", which this script never installs.
 : > "$t/av.env"
-AV_CONFIG="$t/av.env" bash "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
+/usr/bin/env -i PATH="$PATH" HOME=/root AV_CONFIG="$t/av.env" \
+  AV_SCAN_MEMORY_HIGH="${AV_SCAN_MEMORY_HIGH-2G}" AV_SCAN_MEMORY_MAX="${AV_SCAN_MEMORY_MAX-3G}" \
+  /bin/bash --noprofile --norc -p "$here/bin/av-scan" --render-scan-limits > "$t/limits.conf"
 [ -s "$t/limits.conf" ] || die "the memory drop-in rendered empty"
 printf '%s\n' '# OC-T-0046, R-3377: a scan never runs longer than this (av-scan stops clamscan at AV_SCAN_TIMEOUT, 12h)' '[Service]' 'TimeoutStartSec=12h30min' > "$t/30-time-limit.conf"
 # The single quotes are meant: the line is Perl for needrestart, written as it stands.

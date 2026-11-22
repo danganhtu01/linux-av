@@ -99,9 +99,14 @@ if [ "$AIDE" -eq 1 ]; then
     fi
 fi
 
+# All root operations use the separately verified copy. Put AV_SCAN_PATHS and
+# other root settings in /etc/linux-av/av.env before setup (no inherited AV_*).
+[ -r /usr/local/lib/linux-av/bin/av-root ] || {
+    echo 'bootstrap: first follow the verified permanent install in README (Surface upgrade)' >&2; exit 1;
+}
 # --- 3. Install packages + enable services (per distro; re-execs via sudo) --
 say "installing + enabling the AV stack (av-setup all)"
-"$REPO/bin/av-setup" all
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup all
 
 # --- 4. Whole-box config (optional) ----------------------------------------
 SCAN_TARGET="${AV_SCAN_PATHS:-$HOME}"   # $HOME here = the human's, before sudo
@@ -124,19 +129,19 @@ fi
 # --- 5. Real-time on-access scanning (optional) ----------------------------
 if [ "$ONACCESS" -eq 1 ]; then
     say "enabling real-time on-access scanning, watching: $SCAN_TARGET"
-    sudo env AV_SCAN_PATHS="$SCAN_TARGET" "$REPO/bin/av-setup" onaccess
+    sudo env AV_SCAN_PATHS="$SCAN_TARGET" /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup onaccess
 fi
 
 # --- 6. Scan timer (optional) ----------------------------------------------
 if [ -n "$TIMER_MS" ]; then
     say "installing systemd scan timer every ${TIMER_MS}ms, target: $SCAN_TARGET"
-    sudo env AV_SCAN_PATHS="$SCAN_TARGET" "$AVSCAN" --install-timer "$TIMER_MS"
+    sudo env AV_SCAN_PATHS="$SCAN_TARGET" /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-timer "$TIMER_MS"
 fi
 
 # --- 7. Rootkit-scan timer (optional) --------------------------------------
 if [ -n "$ROOTKIT_MS" ]; then
     say "installing rootkit-scan timer every ${ROOTKIT_MS}ms (rkhunter + chkrootkit)"
-    sudo "$AVSCAN" --install-rootkit-timer "$ROOTKIT_MS"
+    sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-rootkit-timer "$ROOTKIT_MS"
 fi
 
 say "done on $(hostname). Verify:  av-scan --status   (open a new shell if 'av-scan' isn't found yet)"

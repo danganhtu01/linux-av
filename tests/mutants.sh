@@ -21,6 +21,24 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0139 legacy migration ordering and final activation boundary.
+'power_cron_disable_removed~root-install-power.sh~/--cron-disable || fail/d~power_cron_migration'
+'power_cron_wait_removed~root-install-power.sh~/--cron-wait || fail/d~power_cron_migration'
+'power_cron_publish_before_readback~lib/root-policy.sh~s@case \$dst in "\$base/etc/cron.daily/"\*)@case $dst in /never/*)@~power_cron_migration'
+'power_policy_install_logs~lib/root-policy.sh~/printf .*power policy installed;/c\        log_info "power policy installed; no unit started, stopped, enabled or restarted"~power_cron_migration'
+# OC-T-0139 rerun contract and actual cron/install lock protocol.
+'power_verify_bytes_skipped~lib/root-policy.sh~/expected "$kind" "$input" | cmp -s "$dest" - /c\            :~power_policy_verify'
+'power_verify_reload_ignored~lib/root-policy.sh~/stale loaded policy for/c\        :~power_policy_verify'
+'power_cron_lock_removed~bin/av-root~/flock -s 9 /d~power_policy_verify'
+# OC-T-0139 repair: initialized readonly roots and complete executable audits.
+'common_root_readonly_reassigned~lib/common.sh~s/AV_ROOT=}/AV_ROOT:=}/~common_root_default'
+'power_policy_exec_audit_removed~lib/root-policy.sh~/arg =/c\                continue~power_policy_exec_refused'
+'power_policy_unterminated_exec_skipped~lib/root-policy.sh~s/ || \[ -n "\$arg" \]//~power_policy_exec_refused'
+# OC-T-0139: independently prove power gating, foreground cancellation and
+# cancellation of delegated work outside the client process tree.
+'power_gate_removed~lib/common.sh~s/^av_on_mains() {$/av_on_mains() { return 0;/~power_runtime'
+'power_worker_kill_removed~lib/common.sh~/^                av_power_stop_tree "\$worker"$/d~power_runtime'
+'power_daemon_kill_removed~bin/av-power~/systemctl kill --kill-whom=all --signal=SIGKILL/d~power_runtime'
 # OC-T-0080 (FAULT-0017): odd names batch by bytes. odd_batch_d158e91_limits restores that commit's limits (a name count of 128
 # and 8192, now in bytes); odd_batch_count_limit restores the name count alone; each of the others moves a batch by a name or more.
 'odd_batch_unbounded~bin/av-scan~s/\[ "$bytes" -lt "$limit" \] || break/:/~scan_changed_odd_batches'
@@ -167,8 +185,8 @@ MUTANTS=(
 'root_perl_guard~root-install.sh~/^perl -c /d~root_install_perl_guard'
 'root_library_first~root-install.sh~/^put "\$here\/lib\/common.sh"/ { h; d; }; /^put "\$here\/bin\/av-scan"/ { G; }~root_install_library_first'
 # OC-T-0067 round 5: the renderer runs through bash (ovh-root-run drops file modes), from the tree and not the installed copy.
-'root_render_direct~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ "$here\/bin\/av-scan" --render/~root_install_no_exec_bits'
-'root_render_installed~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ bash "$dst\/bin\/av-scan" --render/~root_install_limits root_install_no_exec_bits'
+'root_render_direct~root-install.sh~s@/bin/bash --noprofile --norc -p "\$here/bin/av-scan" --render@"$here/bin/av-scan" --render@~root_install_no_exec_bits'
+'root_render_installed~root-install.sh~s@/bin/bash --noprofile --norc -p "\$here/bin/av-scan" --render@/bin/bash --noprofile --norc -p "$dst/bin/av-scan" --render@~root_install_limits root_install_no_exec_bits'
 'root_install_before_render~root-install.sh~/^: > "\$t\/av.env"/i put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"~root_install_render_first'
 'root_install_keep_before_render~root-install.sh~/^: > "\$t\/av.env"/i keep "$dst/lib/common.sh"~root_install_render_first'
 'root_render_empty_guard~root-install.sh~/rendered empty/d~root_install_render_empty'
@@ -374,7 +392,7 @@ copy_to() { # dir
     cp -r "$REPO/systemd" "$1/"
     [ -d "$REPO/config" ] && cp -r "$REPO/config" "$1/"
     cp "$REPO/README.md" "$REPO/MASTER.md" "$1/"
-    cp "$REPO/root-install.sh" "$REPO/root-install-guard.sh" "$1/"
+    cp "$REPO/root-install.sh" "$REPO/root-install-guard.sh" "$REPO/root-install-power.sh" "$1/"
 }
 run_rows() { # dir rows...
     local dir="$1"; shift

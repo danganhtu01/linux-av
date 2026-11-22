@@ -10,6 +10,8 @@
 #                        it; refused, before anything changes, when there is none.
 #                        AV_AIDE_INIT=0 still wins (it skips AIDE altogether).
 #   av-setup onaccess     enable ClamAV real-time (on-access) scanning
+#   av-setup power-policy  install/upgrade mains-only policy without packages or baselines
+#   av-setup power-policy-verify  read-only installed/effective policy check
 #   av-setup status       show what is installed / running, and where reports go
 #   av-setup chkrootkit-baseline   adopt the last clean chkrootkit run as log.expected
 #   av-setup all [--keep-aide-baseline]   install + enable (the usual first-run)
@@ -25,11 +27,40 @@ while [ -L "$_src" ]; do
     [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
 done
 AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# Root automation must enter through the permanent, guarded launcher.
+if [ "$EUID" = 0 ]; then
+    [ "$AV_HOME" = /usr/local/lib/linux-av ] || {
+        echo 'linux-av: root must use the verified permanent installation (see README Surface upgrade)' >&2; exit 1;
+    }
+    case $- in *p*) ;; *) exec /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup "$@" ;; esac
+    /bin/sh /usr/local/lib/linux-av/bin/av-guard --power >/dev/null || exit 1
+    [ -z "${AV_ROOT:-}" ] || { echo 'AV_ROOT is for nonroot tests only' >&2; exit 1; }
+    AV_ROOT=
+    BASH_ENV= ENV=
+    readonly AV_HOME AV_ROOT PATH BASH BASH_ENV ENV
+    AV_POWER_STATE_DIR=/run/linux-av-power
+    AV_POWER_UNITS_FILE=/etc/linux-av/power.units
+    AV_POWER_SUPPLY_DIR=/sys/class/power_supply
+    readonly AV_POWER_STATE_DIR AV_POWER_UNITS_FILE AV_POWER_SUPPLY_DIR
+fi
 # shellcheck source=../lib/common.sh
 . "$AV_HOME/lib/common.sh"
 # shellcheck source=../lib/reports.sh
 . "$AV_HOME/lib/reports.sh"
-av_detect_distro
+if [ "${1:-}" = power-policy-verify ]; then
+    # die normally logs to disk. This command reports only to stderr, including
+    # failures, and requires neither distro detection nor sudo re-execution.
+    die() { printf 'linux-av: %s\n' "$*" >&2; exit 1; }
+else
+    av_detect_distro
+fi
+
+# Policy-only upgrades use the same renderer as install/enable/onaccess. Install
+# gates even before packages exist: Debian maintainer scripts can start clamd.
+do_power_policy() {
+    . "$AV_HOME/lib/root-policy.sh"
+    av_install_power_policy
+}
 
 # Read one `--option=/absolute/path` argument from a packaged systemd unit.
 # Debian/Ubuntu's clamonacc unit owns its runtime paths, so discover them from
@@ -115,6 +146,7 @@ ensure_enabled_active() {
 
 # ---------------------------------------------------------------------------
 do_install() {
+    do_power_policy
     log_info "distro=$AV_DISTRO_ID family=$AV_FAMILY pkg=$AV_PKG_MGR"
 
     if [ "$AV_FAMILY" = debian ]; then
@@ -152,12 +184,15 @@ do_install() {
             fi
         done
     fi
+    # Packages may add/replace cron scripts; capture their final installed bytes.
+    do_power_policy
     log_info "package install step done."
 }
 
 # ---------------------------------------------------------------------------
 do_enable() {
     have systemctl || die "no systemd on this box (unexpected)"
+    do_power_policy
 
     if [ "$AV_FAMILY" = arch ]; then
         # Arch enables NOTHING automatically and clamd won't start without a DB.
@@ -175,7 +210,8 @@ do_enable() {
             freshclam || log_warn "freshclam failed; check /etc/clamav/freshclam.conf"
             log_info "enabling clamav-freshclam + clamav-daemon ..."
             systemctl enable --now clamav-freshclam.service || log_warn "enable clamav-freshclam failed"
-            systemctl enable --now clamav-daemon.service    || log_warn "enable clamav-daemon failed"
+            systemctl enable clamav-daemon.service
+            if av_on_mains; then systemctl start clamav-daemon.service || log_warn "start clamav-daemon failed"; fi
         fi
         log_info "enabling auditd ..."
         systemctl enable --now auditd.service || log_warn "enable auditd failed (is the 'audit' package installed?)"
@@ -186,6 +222,11 @@ do_enable() {
         log_info "Debian/Ubuntu auto-enable these at install; ensuring they are running ..."
         local service_failed=0 service
         for service in clamav-freshclam.service clamav-daemon.service auditd.service; do
+            if [ "$service" = clamav-daemon.service ] && ! av_on_mains; then
+                systemctl enable "$service"
+                log_info "$service deferred until mains power returns"
+                continue
+            fi
             ensure_enabled_active "$service" || service_failed=1
         done
         [ "$service_failed" -eq 0 ] \
@@ -248,6 +289,7 @@ do_enable() {
 
 # ---------------------------------------------------------------------------
 do_onaccess() {
+    do_power_policy
     local conf=/etc/clamav/clamd.conf
     [ -f "$conf" ] || die "$conf not found — run 'av-setup install' first"
     prepare_onaccess_runtime
@@ -324,6 +366,12 @@ do_onaccess() {
         die "no OnAccessIncludePath remains in $conf"
     fi
     log_info "configured on-access in $conf (watch: $effective_watch, exclude user: $clamuser)"
+
+    if ! av_on_mains; then
+        systemctl enable clamav-daemon.service clamav-clamonacc.service || die "cannot enable deferred on-access services"
+        log_info "on-access scanning deferred until mains power returns"
+        return 0
+    fi
 
     # Restart clamd only when its configuration changed. An unconditional
     # restart waits for active clamdscan clients and can interrupt a long scan
@@ -436,11 +484,11 @@ esac
 # `all` run install AND enable as root. (A per-function re-exec with `exec` would
 # replace the process and silently drop the rest of the sequence.)
 case "${1:-}" in
-    install|enable|onaccess|chkrootkit-baseline|all)
+    install|enable|onaccess|power-policy|chkrootkit-baseline|all)
         if [ "$(id -u)" -ne 0 ]; then
             have sudo || die "must run as root and sudo not found"
             log_warn "escalating with sudo ..."
-            exec sudo -E "$0" "$@"
+            exec sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup "$@"
         fi ;;
 esac
 
@@ -448,10 +496,15 @@ case "${1:-}" in
     install)  do_install ;;
     enable)   check_kept_aide_baseline; do_enable ;;
     onaccess) do_onaccess ;;
+    power-policy) [ "$#" = 1 ] || die "power-policy takes no options"; do_power_policy ;;
+    power-policy-verify)
+        [ "$#" = 1 ] || die 'power-policy-verify takes no options'
+        . "$AV_HOME/lib/root-policy.sh"
+        av_verify_power_policy ;;
     status)   do_status ;;
     chkrootkit-baseline) av_chkrootkit_baseline ;;
     all)      check_kept_aide_baseline; do_install; do_enable ;;
     ""|-h|--help)
         sed -n '2,/^$/{/^#/p}' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command: $1 (try: install | enable | onaccess | status | all)" ;;
+    *) die "unknown command: $1 (try: install | enable | onaccess | power-policy | status | all)" ;;
 esac

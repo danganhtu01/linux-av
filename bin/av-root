@@ -1,0 +1,40 @@
+#!/bin/sh
+# Fixed root entrypoint. No checkout resolution or inherited code/config selectors.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH
+[ "$(id -u)" = 0 ] || { echo 'av-root: root required' >&2; exit 1; }
+lib=/usr/local/lib/linux-av
+case ${1:-} in av-power|av-scan|av-setup) tool=$1; shift ;; *) exit 2 ;; esac
+# New guarded cron waits out an installation; the shared lock remains open
+# across exec and covers the entire supervisor/job. Installation takes it
+# exclusively, nonblocking, before replacing code. No lock write for verifier.
+if [ "$tool" = av-power ] && [ "${1:-}" = --cron ]; then
+    /bin/sh "$lib/bin/av-guard" --cron-lock || exit 1
+    umask 022
+    exec 9>>/run/linux-av-policy.lock
+    flock -s 9 || exit 1
+fi
+# Check before bash or any toolkit library/config is loaded.
+/bin/sh "$lib/bin/av-guard" --power || exit 1
+if [ "$tool" = av-power ] && [ "${1:-}" = --cron ] && [ -e /etc/linux-av/power.incomplete ]; then
+    echo 'av-root: power policy installation incomplete; cron deferred' >&2
+    exit 75
+fi
+# Scan scope is inert data (quoted argv/array parsing, never shell source).
+# Preserve existing unit scopes; all executable/config/state selectors are reset.
+scan_paths=${AV_SCAN_PATHS:-/root}
+# Scope also appears in rendered systemd data; refuse replacement/line syntax.
+cr=$(printf '\r')
+case $scan_paths in
+    *'|'*|*'&'*|*'\'*|*'"'*|*"'"*|*"$cr"*|*'
+'*) echo 'av-root: unsupported scan scope syntax; use root config or --path' >&2; exit 1 ;;
+esac
+status=
+case ${EXIT_STATUS:-} in 75) status=75 ;; esac
+exec /usr/bin/env -i PATH="$PATH" HOME=/root USER=root LOGNAME=root \
+    XDG_CONFIG_HOME=/root/.config XDG_STATE_HOME=/root/.local/state \
+    AV_CONFIG=/etc/linux-av/av.env AV_COLOR=never AV_LOG_DIR=/var/log/linux-av \
+    AV_SCAN_PATHS="$scan_paths" EXIT_STATUS="$status" \
+    /bin/bash --noprofile --norc -p "$lib/bin/$tool" "$@"

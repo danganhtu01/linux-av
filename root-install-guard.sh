@@ -8,7 +8,7 @@
 # unless every file the unit runs or sources, and every folder above it, is root-owned and not writable by anyone else.
 # The runner checks this file's SHA-256 and the listed file's before it runs anything, and this script checks the same line itself
 # before it reads or writes anything else (defence in depth). The line below is the only one that may start with the hash word:
-# sha256 7a1e65b9164e17bca7c6242f427742bd8e8e47b0f5d9a64771aa1ad64872ead8 bin/av-guard
+# sha256 44835afa77069f9bb88ecf18715c57f87ed9e8c020e2b5eafee1acea0c82ddbb bin/av-guard
 # What it writes, all root:root (both backups are made before anything else is written; a second run writes the same bytes and
 # keeps the first backups):
 #   /usr/local/lib/linux-av/bin/av-guard                                   0755

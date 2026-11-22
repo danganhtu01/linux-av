@@ -5,7 +5,7 @@ Description=linux-av mains power scan guardian
 Type=simple
 Environment=HOME=/root
 Environment=AV_COLOR=never
-ExecStart=/bin/bash "@POWER@" --watch
+ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power --watch
 Restart=always
 RestartSec=1s
 RuntimeDirectory=linux-av-power

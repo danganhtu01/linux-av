@@ -172,8 +172,8 @@ MUTANTS=(
 'root_perl_guard~root-install.sh~/^perl -c /d~root_install_perl_guard'
 'root_library_first~root-install.sh~/^put "\$here\/lib\/common.sh"/ { h; d; }; /^put "\$here\/bin\/av-scan"/ { G; }~root_install_library_first'
 # OC-T-0067 round 5: the renderer runs through bash (ovh-root-run drops file modes), from the tree and not the installed copy.
-'root_render_direct~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ "$here\/bin\/av-scan" --render/~root_install_no_exec_bits'
-'root_render_installed~root-install.sh~s/ bash "\$here\/bin\/av-scan" --render/ bash "$dst\/bin\/av-scan" --render/~root_install_limits root_install_no_exec_bits'
+'root_render_direct~root-install.sh~s@/bin/bash --noprofile --norc -p "\$here/bin/av-scan" --render@"$here/bin/av-scan" --render@~root_install_no_exec_bits'
+'root_render_installed~root-install.sh~s@/bin/bash --noprofile --norc -p "\$here/bin/av-scan" --render@/bin/bash --noprofile --norc -p "$dst/bin/av-scan" --render@~root_install_limits root_install_no_exec_bits'
 'root_install_before_render~root-install.sh~/^: > "\$t\/av.env"/i put "$here/bin/av-scan" 0755 "$dst/bin/av-scan"~root_install_render_first'
 'root_install_keep_before_render~root-install.sh~/^: > "\$t\/av.env"/i keep "$dst/lib/common.sh"~root_install_render_first'
 'root_render_empty_guard~root-install.sh~/rendered empty/d~root_install_render_empty'

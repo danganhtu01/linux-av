@@ -33,6 +33,40 @@ while [ -L "$_src" ]; do
     [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
 done
 AV_HOME="$(cd -P "$(dirname "$_src")/.." && pwd)"; export AV_HOME
+# The OVH installer has already pinned this script/template. Its inert renderer
+# must work from noexec staging without loading any library or configuration.
+if [ "$EUID" = 0 ] && [ "$#" = 1 ] && [ "$1" = --render-scan-limits ]; then
+    memory_high=${AV_SCAN_MEMORY_HIGH-2G}; memory_max=${AV_SCAN_MEMORY_MAX-3G}
+    for setting in memory_high memory_max; do
+        value=${!setting}
+        [[ -z $value || $value =~ ^([0-9]+[KMGT]?|infinity)$ ]] || {
+            case $setting in memory_high) label=AV_SCAN_MEMORY_HIGH ;; *) label=AV_SCAN_MEMORY_MAX ;; esac
+            echo "$label must be a systemd size" >&2; exit 1;
+        }
+    done
+    [ -z "$memory_high" ] || memory_high="MemoryHigh=$memory_high"
+    [ -z "$memory_max" ] || memory_max="MemoryMax=$memory_max"
+    printf '%s\n' '[Service]'
+    sed -n -e "s|@MEMORY_HIGH@|$memory_high|" -e "s|@MEMORY_MAX@|$memory_max|" \
+        -e '/^MemoryHigh=/p' -e '/^MemoryMax=/p' "$AV_HOME/systemd/av-scan.service"
+    exit
+fi
+# Root automation must enter through the permanent, guarded launcher.
+if [ "$EUID" = 0 ]; then
+    [ "$AV_HOME" = /usr/local/lib/linux-av ] || {
+        echo 'linux-av: root must use the verified permanent installation (see README Surface upgrade)' >&2; exit 1;
+    }
+    case $- in *p*) ;; *) exec /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan "$@" ;; esac
+    /bin/sh /usr/local/lib/linux-av/bin/av-guard --power >/dev/null || exit 1
+    [ -z "${AV_ROOT:-}" ] || { echo 'AV_ROOT is for nonroot tests only' >&2; exit 1; }
+    AV_ROOT=
+    BASH_ENV= ENV=
+    readonly AV_HOME AV_ROOT PATH BASH BASH_ENV ENV
+    AV_POWER_STATE_DIR=/run/linux-av-power
+    AV_POWER_UNITS_FILE=/etc/linux-av/power.units
+    AV_POWER_SUPPLY_DIR=/sys/class/power_supply
+    readonly AV_POWER_STATE_DIR AV_POWER_UNITS_FILE AV_POWER_SUPPLY_DIR
+fi
 # shellcheck source=../lib/common.sh
 . "$AV_HOME/lib/common.sh"
 av_detect_distro
@@ -854,7 +888,7 @@ render_scan_limits() {
 install_timer() {
     local name="$1" tmpl="$2" ms="$3"; need_root
     [ "$ms" -gt 0 ] 2>/dev/null || die "interval (ms) must be a positive integer"
-    local bin; bin="$(command -v av-scan || echo "$AV_HOME/bin/av-scan")"
+    local bin="/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan"
     local unit="${AV_ROOT}/etc/systemd/system/${name}"
     local iv; iv="$(ms_to_systemd "$ms")"
     local memory_high="" memory_max=""

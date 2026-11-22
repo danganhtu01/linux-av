@@ -164,7 +164,7 @@ av_aide_baseline() {
     elif have systemd-run; then
         log_info "building the AIDE baseline in its own unit, detached from this terminal ..."
         if systemd-run --unit="$unit" --property=RuntimeMaxSec="$limit" --collect \
-            "$BASH" "$AV_HOME/bin/av-power" --wait --run "${cmd[@]}"; then
+            /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --wait --run "${cmd[@]}"; then
             log_info "baseline started as $unit.service (limit $limit)"
         else
             log_warn "could not start $unit.service; build the baseline by hand: ${cmd[*]}"

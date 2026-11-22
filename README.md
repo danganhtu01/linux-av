@@ -14,8 +14,8 @@ The scripts detect the distro at runtime and branch only where the distros
 actually differ (package names, a couple of paths, and — crucially — *what gets
 auto-enabled on install*). Everything user-facing is driven by **env vars with
 sane defaults** and **relative, symlink-following path resolution**, so the same
-git checkout works for any user on any of the three distros without editing a
-line.
+git checkout works for unprivileged use on all three distros. Root automation
+requires the verified permanent installation described under Surface upgrade below.
 
 See [MASTER.md](MASTER.md) for the repo's entry point: its position in the fleet, the
 commands and their flags, and where state lives on a provisioned box.
@@ -24,7 +24,7 @@ commands and their flags, and where state lives on a provisioned box.
 
 ## 0. Fastest path — `bootstrap.sh`
 
-Run this **on each box**; it clones (if needed), installs the commands, installs
+First complete the verified permanent installation below. Then run this **on each box**; it clones (if needed), installs the commands, installs
 + enables the AV stack, and can add a scan timer — in one go:
 
 ```bash
@@ -203,7 +203,7 @@ altogether) and one warning says so. `enable` and `all` refuse any other option.
 **chkrootkit's baseline.** With `DIFF_MODE="true"` and no `/var/log/chkrootkit/log.expected`,
 chkrootkit reports its whole output every night. `av-setup` does not run chkrootkit, so it
 cannot know a clean run happened by itself. It reads the nightly run's `log.today` instead:
-`sudo av-setup chkrootkit-baseline` (also run at the end of `enable`) copies it to
+`sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup chkrootkit-baseline` (also run at the end of `enable`) copies it to
 `log.expected` only when `log.today` is not empty, has no `INFECTED`, `Vulnerable`, `WARNING` or `Warning` line (otherwise it lists them and prints the `cp -a` command for after reading),
 and `log.expected` does not exist. After the first night, that one command is all it takes.
 
@@ -308,7 +308,9 @@ without waiting for graceful daemon draining, and queue interrupted/due work
 under `/run/linux-av-power/pending`. Enabled continuous protection and pending
 checks recover on mains. Scanner services bind to the guardian's lifetime.
 `AV_AIDE_INIT=0` still skips baseline creation and periodic-check enablement;
-power gates also apply to AIDE jobs an administrator already enabled.
+power gates also apply to AIDE jobs an administrator already enabled. Policy
+installation does not activate the guardian; perform its separate activation
+before expecting delegated ClamAV/on-access protection.
 `clamav-daemon.socket` is stopped on battery too; attempted socket activation
 still encounters the daemon's service gate.
 
@@ -320,8 +322,8 @@ Inventory of repository-managed work:
 | `av-scan --rootkit`, `--integrity` | Same supervisor for rkhunter, chkrootkit, aide/aide.wrapper; manual work returns 75, scheduled rootkit work retries |
 | `clamdscan` and its delegated multiscan workers | Requires active `linux-av-power.service` and `clamav-daemon.service`; client is pinned to a packaged local Unix socket via a generated config, overriding TCP settings; guardian kills the daemon cgroup and queued work on battery |
 | `clamav-clamonacc.service` + `clamav-daemon.service` | Both startup-gated and killed on battery; enabled services restored on mains; real-time protection is intentionally absent on battery |
-| `linux-av-scan` / `linux-av-rootkit` units (configured basenames supported) | Templates wait/retry; policy upgrade adds gates and an ExecStopPost hook to replay self-cancellation (exit 75), retaining existing ExecStart paths/arguments, root-owned guards, environment and limits |
-| Packaged `chkrootkit`, `rkhunter`, `aidecheck`, `dailyaidecheck` services | Startup gates, cgroup cancellation, and pending replay on mains; timer schedules stay intact, with timer-level AC conditions cleared so due events reach the service gate; enabled timers are recovered during policy installation |
+| `linux-av-scan` / `linux-av-rootkit` units (configured basenames supported) | Templates wait/retry; policy upgrade adds gates and an ExecStopPost hook to replay self-cancellation (exit 75), migrating supported ExecStart paths to the permanent launcher, retaining arguments, guards and limits |
+| Packaged `chkrootkit`, `rkhunter`, `aidecheck`, `dailyaidecheck` services | Startup gates, cgroup cancellation, and pending replay on mains; timer schedules stay intact, with timer-level AC conditions cleared so due events reach the service gate; timer activation remains an operator step |
 | Existing `/etc/cron.daily/{rkhunter,chkrootkit,aide,aide-common}` | Wrapper runs the preserved distro script through the supervisor; waits/retries on mains, uses flock to coalesce repeats; preserves report/config behavior |
 | Detached AIDE baseline and terminal fallback; `rkhunter --propupd` during enable | Baseline unit wraps the command and waits/retries; terminal fallback and property refresh defer/cancel on battery |
 | `freshclam`, `clamav-freshclam`, rkhunter's weekly signature/database refresh | Signature refresh, outside scan gating; available on battery |
@@ -330,21 +332,106 @@ Inventory of repository-managed work:
 A refresh embedded in a distro's daily scan script follows that whole script's
 power policy; the wrapper preserves the packaged script's behavior.
 
-For **Surface upgrading an existing checkout**, run this supported command from
-the permanent checkout after the new code has been imported:
+**Surface: verified permanent installation / upgrade (OC-T-0139).** Root
+entrypoints use `/usr/local/lib/linux-av/bin/av-root`; a checkout or a symlink
+installed by `install.sh` is not a root deployment. `av-root` checks
+`av-guard --power`, clears the inherited environment, and starts privileged Bash
+without startup files. Only `/etc/linux-av/av.env` is sourced for root; HOME,
+XDG, `AV_CONFIG`, repo-local config, exported functions and inherited `AV_*`
+settings cannot select another file. The validated scan-scope string `AV_SCAN_PATHS` and finished-unit status 75 are
+carried through; executable/config/state selectors are reset. Power sysfs, inventory and runtime paths are fixed. Root settings,
+including scan scope (default `/root`; existing unit scopes are preserved), belong in the root-owned system config.
+Review that config as executable shell, including anything it sources or calls.
+
+`root-install-power.sh` reuses the pinned root-install model: an independently
+verified root-private installer copies all 13 pinned inputs into private staging,
+checks those copies, backs up changed installed files once, and installs regular
+root:root files under `/usr/local/lib/linux-av` (0755 commands, 0644 libraries and
+templates). Nothing from the caller-owned tree is executed or sourced. The
+installed setup then renders the guardian, inventory, service/timer drop-ins and
+cron wrappers, and migrates supported scan ExecStart lines, including
+`root-owned.conf`, to `av-root`. Scan arguments, guards, CPU/memory/time limits
+and other unit bytes are retained. Unknown scan commands, environment-file
+inputs, links, foreign owners and group/other-writable paths refuse. Effective
+systemd fragments, drop-ins and environment-file paths are checked too. OS
+aliases are accepted there only if root owns the alias and its resolved path is
+safe. Effective toolkit commands are checked after daemon-reload.
+
+Supported scan command prefixes for migration are `/usr/local/bin/av-scan`,
+`/usr/local/lib/linux-av/bin/av-scan`, and the new `/bin/sh
+/usr/local/lib/linux-av/bin/av-root av-scan`. Custom unit basenames must already
+be set in `/etc/linux-av/av.env` and listed in an existing inventory when
+quiescing. Other layouts require review; do not bypass a refusal.
+
+Before an operator performs this upgrade, arrange a separately authorized
+maintenance window: guardian, scanner services and their timers must be inactive,
+including custom units, the cron/crond scheduler and any daily cron scan already in progress. The installer
+refuses active managed services/timers and does not stop them. Record enabled
+and active states to restore explicitly afterward. Do not run package upgrades
+or allow daily cron dispatch during this window.
+
+After the imported release has passed the release checks below, obtain the
+**installer SHA-256 from the trusted release/run-card channel**, independently of
+the writable checkout. Export it as `LINUX_AV_INSTALLER_SHA256`. From the imported
+release directory, use exactly:
 
 ```bash
-sudo ./bin/av-setup power-policy
+: "${LINUX_AV_INSTALLER_SHA256:?set the independently verified release installer SHA-256}"
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+  /bin/bash --noprofile --norc -p -s -- "$PWD" "$LINUX_AV_INSTALLER_SHA256" <<'ROOT'
+set -euo pipefail
+[[ $2 =~ ^[0-9a-f]{64}$ ]]
+stage=$(mktemp -d /root/linux-av-power-install.XXXXXXXX)
+trap 'rm -rf --one-file-system -- "$stage"' EXIT
+install -m 0600 -- "$1/root-install-power.sh" "$stage/installer"
+printf '%s  %s\n' "$2" "$stage/installer" | sha256sum -c -
+cd -- "$1"
+/bin/sh "$stage/installer"
+ROOT
 ```
 
-It installs/upgrades policy only: no package transaction, signature refresh or
-baseline rebuild. `install.sh` remains a PATH symlink installer; it has no
-`--upgrade` flag. The OVH-specific `root-install*.sh` scripts remain separate
-root-owned-copy procedures and are not Surface installers. Those scripts alone
-do not install the new guardian/drop-ins/cron wrappers; full policy rollout also
-requires `av-setup power-policy` from a suitable permanent, root-owned checkout
-on hosts using that deployment model. Existing root-owned scan copies acquire
-the standalone command supervision when their usual installer updates them.
+This updates code and policy only: no packages, signature refresh, baseline,
+scan, unit enable/start/stop/restart or timer-state changes. It runs
+`daemon-reload` and read-backs. Backups use `.before-OC-T-0139`; cron package
+originals retain `.linux-av-power-original`. A repeat is stable. A code-stage or
+later read-back failure can leave part of the new release installed; keep the
+maintenance window in place, retain the first backups and correct the refusal
+before any activation. This is not a transactional rollback mechanism.
+
+After successful installation, future policy-only refreshes (for example after a
+package replaces a daily cron script) use:
+
+```bash
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup power-policy
+```
+
+Activation is a separate, explicitly authorized operator step. On Surface, once
+root configuration and the effective units have been reviewed, the guardian is
+started with `sudo systemctl enable --now linux-av-power.service`; restore only
+the timers/services recorded for this host. Do not use a scan restart as an
+installation check. Setup and timers also use the permanent launcher, for example
+`sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup all --keep-aide-baseline` (only when an AIDE database already exists).
+`install.sh` still installs user PATH links and has no `--upgrade` flag.
+
+OVH's existing `root-install.sh` and `root-install-guard.sh` remain separate
+run-card procedures, with their hostname, CPU-cap, backup, rendering and read-back
+safeguards. They do not constitute a complete power-policy deployment. This
+release needs the verified permanent installation before root scans can resume;
+`root-install-power.sh` also checks OVH's existing CPU cap and never starts its
+scan or timer. OVH activation remains a separate card.
+
+Release checks still required before rollout: run `bash tests/root-power.sh` as
+real root in a disposable GNU/Linux container (a skip is not a pass), run the
+existing root `guard_*` checks, and verify actual Surface/OVH systemd read-back
+formats and host unit layouts. The new test creates a private chroot with copied
+OS tools and inert service/cron fixtures; no host services or scanners are used.
+The nonroot suite is `bash tests/run.sh`. This worker cannot run the root checks:
+there is no root/sudo and user namespaces are denied. Audit distro scanner
+configuration and any transitive includes/commands in root-authored config;
+toolkit ownership checks do not attest arbitrary package configuration or code.
+An already-running old guardian or cron process keeps its old in-memory code
+until the operator quiesces it. No host installation or activation has been
+performed by this repair.
 
 Unhandled paths: arbitrary direct scanner binary invocations, custom units or
 user crontabs/cron.d entries outside the listed inventory, third-party containers,
@@ -355,7 +442,7 @@ covered by the foreground process-tree supervisor. Rerun `power-policy` after
 external package upgrades that replace the managed cron wrappers (the installer
 preserves the new package script). Pending service state is volatile across
 reboot; existing enabled timers/cron schedules provide the next run. The
-permanent checkout must remain available, as with existing timer installations.
+permanent root-owned installation remains available independently of the checkout.
 The policy is not an OS-wide prohibition on privileged users launching scanners.
 
 `bash tests/power.sh` exercises synthetic power supplies and harmless process
@@ -396,8 +483,8 @@ cover the whole machine you need **both**:
    use `sudo`.
 
 ```bash
-sudo av-scan --full --now            # entire filesystem, as root
-sudo AV_SCAN_PATHS=/ av-scan --now   # same, via env
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --full --now            # entire filesystem, as root
+sudo env AV_SCAN_PATHS=/ /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now   # same, via env
 ```
 
 What a root `--full` scan **does** and **does not** cover:
@@ -408,7 +495,7 @@ What a root `--full` scan **does** and **does not** cover:
 - ❌ **Network mounts, automounts, and FUSE mounts** are skipped by default through
   `AV_EXCLUDE_FSTYPES`; local `fuseblk` disks remain included.
 - ❌ **Unmounted / disconnected drives** — a scan only sees what's mounted when
-  it runs. Mount it first, or scan explicitly: `sudo av-scan --path /mnt/disk --now`.
+  it runs. Mount it first, or scan explicitly: `sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --path /mnt/disk --now`.
 - ❌ **Real-time coverage** — a periodic full scan is a snapshot in time. For
   on-write/on-open protection, enable `av-setup onaccess`.
 
@@ -428,8 +515,8 @@ The interval is **milliseconds** (`10000` = 10 s). Sub-second values work too.
 **B. Persistent systemd timer** (survives reboots; runs as root so it can read
 system paths). Same units on all three distros since they all use systemd:
 ```bash
-sudo av-scan --install-timer 86400000   # every 86 400 000 ms = 1 day
-sudo av-scan --remove-timer
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-timer 86400000   # every 86 400 000 ms = 1 day
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --remove-timer
 systemctl list-timers linux-av-scan.timer
 ```
 
@@ -444,8 +531,8 @@ the box was off. Change the boot delay with `AV_TIMER_BOOT_DELAY=30s` before
 (Debian wires a cron.daily; Arch doesn't). Give them their own timer — weekly is
 plenty:
 ```bash
-sudo av-scan --install-rootkit-timer 604800000   # every 604 800 000 ms = 7 days
-sudo av-scan --remove-rootkit-timer
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-rootkit-timer 604800000   # every 604 800 000 ms = 7 days
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --remove-rootkit-timer
 systemctl list-timers linux-av-rootkit.timer
 ```
 This runs `av-scan --rootkit` (rkhunter `--check --sk` + chkrootkit) as root on
@@ -460,7 +547,7 @@ Copy the example and edit — or just `export` the vars:
 mkdir -p ~/.config/linux-av
 cp ~/linux-av/config/av.env.example ~/.config/linux-av/av.env
 ```
-`av.env` is looked up in this order (first found wins): `$AV_CONFIG` →
+For unprivileged commands, `av.env` is looked up in this order (first found wins): `$AV_CONFIG` →
 `~/.config/linux-av/av.env` → `/etc/linux-av/av.env` → `<repo>/config/av.env`.
 
 Key vars (all optional, shown with defaults):
@@ -659,7 +746,13 @@ The installer never enables, starts or restarts
 units and leaves the timer state alone (R-3377). Starting remains a separate
 card; do not restart the scan as part of this build or install.
 
-**The guard on OVH's two root units (OC-T-0037).** `linux-av-scan.service` and `linux-av-rootkit.service` run as
+**The legacy guard on OVH's two root units (OC-T-0037).** Its default mode remains
+compatible with those run cards. The `--power` mode used by the permanent launcher
+also checks all installed toolkit commands, libraries and templates, the sole
+root config, inventory, managed unit/drop-in paths, daily cron originals and
+runtime state (including ancestors); user/repo config is never selected.
+
+ `linux-av-scan.service` and `linux-av-rootkit.service` run as
 root, so they must never run or source a file a user can change. OVH's drop-in `root-owned.conf` already points
 `ExecStart` at the root-owned copy in `/usr/local/lib/linux-av`, but the base unit files still named
 `/usr/local/bin/av-scan`, a link into a checkout a user can write (losing the drop-in fell back to it), and nothing
@@ -773,7 +866,8 @@ policy events.
 
 ## 7. Uninstall
 
-Before deleting the checkout, remove the persistent power policy too: disable
+Deleting the user checkout leaves the permanent root installation intact.
+To uninstall the toolkit, remove the persistent power policy first: disable
 and stop `linux-av-power.service`, restore each managed daily cron wrapper from
 its `.linux-av-power-original` (after verifying the wrapper marker), remove the
 guardian unit, `40-linux-av-power.conf` drop-ins and `/etc/linux-av/power.units`,
@@ -782,7 +876,7 @@ with it; restore any services you intend to retain explicitly. The inventory
 above names every managed path, including custom scan unit basenames.
 
 ```bash
-sudo av-scan --remove-timer          # drop the systemd timer
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --remove-timer          # drop the systemd timer
 rm ~/.local/bin/av-scan ~/.local/bin/av-setup ~/.local/bin/av-aide-arch   # or /usr/local/bin with sudo
 # packages stay installed; remove with pacman -Rns / apt purge if you want them gone
 ```
@@ -817,7 +911,7 @@ av-aide-arch --rebuild    # force a clean rebuild
 ```
 
 Verify: `aide --version` runs and `ldd "$(command -v aide)" | grep gcrypt` shows
-`libgcrypt.so`. Then `sudo av-scan --integrity` works. AIDE is optional — the
+`libgcrypt.so`. Then `sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --integrity` works. AIDE is optional — the
 ClamAV / rkhunter / chkrootkit / auditd stack is fully functional without it.
 
 ### How the makepkg build differs from an `apt`/`pacman` install

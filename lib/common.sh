@@ -42,12 +42,17 @@ export AV_HOME
 # ---------------------------------------------------------------------------
 : "${XDG_CONFIG_HOME:=$HOME/.config}"
 : "${XDG_STATE_HOME:=$HOME/.local/state}"
-for _cfg in \
+if [ "${EUID:-$(id -u)}" = 0 ]; then
+    _av_configs=(/etc/linux-av/av.env)
+else
+    _av_configs=(
     "${AV_CONFIG:-}" \
     "$XDG_CONFIG_HOME/linux-av/av.env" \
     "/etc/linux-av/av.env" \
     "$AV_HOME/config/av.env"
-do
+    )
+fi
+for _cfg in "${_av_configs[@]}"; do
     if [ -n "$_cfg" ] && [ -f "$_cfg" ]; then
         # shellcheck disable=SC1090
         . "$_cfg"
@@ -133,8 +138,8 @@ have()      { command -v "$1" >/dev/null 2>&1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0 $*)"; }
 # AV_ROOT is a path prefix for the test suite only. A root run with it set would
 # edit files under the prefix while systemctl, aideinit and rkhunter --propupd act
-# on the real system, so it is refused as root (av-setup re-execs through sudo -E,
-# which keeps it).
+# on the real system, so it is refused as root. The permanent launcher also
+# clears this test-only selector before starting a root command.
 av_refuse_root_prefix() { # euid
     [ -n "${AV_ROOT:-}" ] || return 0
     [ "$1" -eq 0 ] || return 0
@@ -240,9 +245,8 @@ av_power_wait() {
 av_detect_distro() {
     AV_DISTRO_ID="unknown"; local like=""
     if [ -r "${AV_ROOT:-}/etc/os-release" ]; then
-        # shellcheck disable=SC1091
-        . "${AV_ROOT:-}/etc/os-release"
-        AV_DISTRO_ID="${ID:-unknown}"; like="${ID_LIKE:-}"
+        AV_DISTRO_ID=$(sed -n -E "s/^ID=[\"']?([a-zA-Z0-9_-]+)[\"']?$/\\1/p" "${AV_ROOT:-}/etc/os-release")
+        like=$(sed -n -E "s/^ID_LIKE=[\"']?([a-zA-Z0-9_ -]+)[\"']?$/\\1/p" "${AV_ROOT:-}/etc/os-release")
     fi
     case "$AV_DISTRO_ID $like" in
         *arch*)            AV_FAMILY="arch";   AV_PKG_MGR="pacman" ;;

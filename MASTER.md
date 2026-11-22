@@ -138,7 +138,7 @@ av-setup power-policy   # policy-only upgrade of an existing installation
 av-setup status
 ```
 
-Needs root and re-execs itself through `sudo -E` if you forget. An unknown subcommand is fatal; `enable` and `all` take `--keep-aide-baseline` and refuse any other option.
+Needs root and escalates through the verified permanent `av-root` launcher if you forget; inherited code/config selectors are cleared. An unknown subcommand is fatal; `enable` and `all` take `--keep-aide-baseline` and refuse any other option.
 
 The cross-distro trap this command exists to hide: **Arch auto-enables nothing, and
 `freshclam` must seed the signature database once before `clamav-daemon` will start at all.**
@@ -212,11 +212,13 @@ covered as well. Signature refresh, package/build operations and auditd remain
 available on battery. See README's mains-only inventory for exact coverage and
 unhandled external/custom entrypoints.
 
-Surface policy-only upgrade from the permanent updated checkout:
-`sudo ./bin/av-setup power-policy`. This adds no package transaction or baseline
-rebuild. `install.sh` supports PATH installation only, with no `--upgrade` flag;
-OVH's root-owned-copy installers remain separate. No rollout is implied by a
-repository change.
+Surface first installs/upgrades the verified permanent copy with
+`root-install-power.sh`, following README's exact root-private staging and hash
+verification procedure. Subsequent policy-only refreshes use
+`sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-setup power-policy`.
+There is no package transaction, baseline rebuild or activation in that command.
+`install.sh` supports user PATH links only, with no `--upgrade` flag; OVH's existing
+run cards retain their safeguards. No rollout is implied by a repository change.
 
 ```bash
 av-scan --now                  # one scan of $AV_SCAN_PATHS (default: $HOME)
@@ -236,10 +238,10 @@ av-scan --scheduled 10000      # foreground loop every 10000 ms — for testing,
 Root-only, and these are the ones that write units:
 
 ```bash
-sudo av-scan --install-timer 86400000
-sudo av-scan --remove-timer
-sudo av-scan --install-rootkit-timer 604800000
-sudo av-scan --remove-rootkit-timer
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-timer 86400000
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --remove-timer
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --install-rootkit-timer 604800000
+sudo /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --remove-rootkit-timer
 ```
 
 **Scanning the whole box takes two things, not one:** target `/` (`--full`, or
@@ -369,6 +371,7 @@ Every tracked file in this repository.
 | `tests/run.sh` | The suite: bash only, no root except the `guard_*` rows (below); includes scan regressions exercised against earlier versions through `AV_REPO_UNDER_TEST`. |
 | `tests/mutants.sh` | Removes each guard of the new code in a scratch copy and checks the named row goes red. The `guard_*` mutants run only as root, the rest only as another user. |
 | `FAULTS.toml` | Faults a review found and left open when a build landed (R-3443, R-3446), one entry each with its severity, place, base and head; written only by the records tool (`records add fault`, `records set`). OC-T-0047 filed FAULT-0001 to FAULT-0004 there on 2026-11-07. |
+| `root-install-power.sh`, `bin/av-root`, `lib/root-policy.sh`, `tests/root-power.sh` | Verified permanent root installation, clean guarded launcher, conservative policy integration and root-only disposable-chroot checks. |
 | `bin/av-aide-arch` | Arch-only AIDE build: fetches the AUR PKGBUILD, forces the gcrypt backend, `makepkg -sif`. Must not run as root. |
 | `lib/common.sh` | Sourced by all three commands. Resolves `AV_HOME` through symlinks, loads `av.env`, defines every `AV_*` default, detects the distro, maps package names, and provides logging plus `die` / `have` / `need_root`. |
 | `systemd/av-scan.service` | Template for the scheduled ClamAV scan. `@BIN@`, `@PATHS@`, `@MEMORY_HIGH@` and `@MEMORY_MAX@` are filled in at install time; runs as root with `AV_LOG_DIR=/var/log/linux-av`. |
@@ -387,6 +390,7 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | Path | What | Written by |
 |---|---|---|
 | `/etc/linux-av/av.env` | system-wide config. `bootstrap.sh --full` writes `AV_SCAN_PATHS="/"` here, editing in place rather than replacing the file | `bootstrap.sh` |
+| `/usr/local/lib/linux-av/` | verified permanent code/libraries/templates; independent of user PATH links and checkout lifetime | `root-install-power.sh` |
 | `/etc/linux-av/power.units`, `/etc/systemd/system/linux-av-power.service`, scanner `40-linux-av-power.conf` drop-ins | managed scan inventory, guardian and startup/runtime policy | `av-setup power-policy` (also normal setup commands) |
 | `/run/linux-av-power/` | pending service recovery and daily cron locks, volatile across reboot | `av-power` |
 | `/etc/cron.daily/*.linux-av-power-original` | preserved distro cron scripts; their original entrypoints become power wrappers | `av-setup power-policy` |
@@ -394,7 +398,7 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | `<repo>/config/av.env` | repo-local config; gitignored | you |
 | `~/.local/state/linux-av/` | per-user logs, scan state and quarantine — `AV_LOG_DIR`, with `AV_QUARANTINE` and `AV_LOG_FILE` beneath it | `av-scan` |
 | `/var/log/linux-av/` | the timers' logs. The unit templates set `AV_LOG_DIR` here, so timer output does **not** land in the user tree | timer units |
-| `/etc/systemd/system/linux-av-scan.service` and `.timer` | the rendered scan timer, `ExecStart` pointing into this checkout | `av-scan --install-timer` |
+| `/etc/systemd/system/linux-av-scan.service` and `.timer` | the rendered scan timer, `ExecStart` using the permanent `av-root` launcher | `av-scan --install-timer` |
 | `/etc/systemd/system/linux-av-rootkit.service` and `.timer` | the rendered rootkit timer | `av-scan --install-rootkit-timer` |
 | `/etc/systemd/system/aidecheck.timer.d/10-linux-av-bootdelay.conf` (or under `dailyaidecheck.timer.d/`) | drop-in adding `OnBootSec` + `Persistent=true`, so the packaged AIDE check also runs after boot instead of only at a fixed clock time | `av-setup enable` |
 | `/etc/clamav/clamd.conf` | `OnAccess*` directives appended and reconciled | `av-setup onaccess` |
@@ -404,7 +408,15 @@ None of this is in git, and none of it is removed by deleting the checkout.
 | `/var/log/chkrootkit/log.expected` | chkrootkit's expected output, adopted from `log.today` | `av-setup chkrootkit-baseline` |
 | `~/.cache/linux-av/` | `av-aide-arch` build tree — `AV_AIDE_BUILD_DIR` | `av-aide-arch` |
 
-Config lookup, first found wins:
+Root automation uses the verified `/usr/local/lib/linux-av/bin/av-root` entrypoint,
+which runs `bin/av-guard --power` before loading code/config and clears inherited
+settings. Its sole config is `/etc/linux-av/av.env`. See the exact Surface
+installation/upgrade commands and outstanding release checks in README.
+`root-install-power.sh` pins and installs all code/templates, then integrates policy
+without unit activation; existing OVH `root-install-guard.sh` and `05-guard.conf`
+safeguards remain in use.
+
+Unprivileged config lookup, first found wins:
 `$AV_CONFIG` → `~/.config/linux-av/av.env` → `/etc/linux-av/av.env` → `<repo>/config/av.env`.
 Every tunable is a plain env var, so exporting it works just as well as a file.
 

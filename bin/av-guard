@@ -8,7 +8,8 @@
 # sourced from it, and the components that do exist above it are still checked, so nobody else can create it. Every other path
 # must exist. Each drop-in folder is checked, and so is every entry in it, dot files and links included; an entry that is a
 # folder is checked, not entered, because systemd reads only the files directly in a drop-in folder.
-# Nothing it checks can be changed from outside this file: it reads no argument, no file and no environment variable (it sets PATH
+# The legacy default target list is fixed; --power below extends it for permanent deployments.
+# Nothing in the legacy list can be changed from outside this file: it reads no argument, no file and no environment variable (it sets PATH
 # itself) and base= below is empty (a row checks both). tests/run.sh runs a copy whose base= line names a scratch root, and a row
 # proves that copy differs from this file by that line alone.
 # Not checked: ACLs and extended attributes (stat does not show them), the shell and stat themselves, and units in /run or
@@ -71,6 +72,63 @@ dropins() {
         if [ -e "$d_f" ] || [ -L "$d_f" ]; then node "$d_f" req; fi
     done
 }
+
+# --power is also used before policy installation, so policy files may be absent.
+# All existing policy/runtime paths are checked, including their ancestors.
+if [ "${1:-}" = --power ]; then
+    for rel in bin/av-guard bin/av-root bin/av-power bin/av-scan bin/av-setup \
+        lib/common.sh lib/reports.sh lib/root-policy.sh systemd/av-power.service \
+        systemd/av-power.conf systemd/av-scan.service systemd/av-rootkit.service systemd/av-scan.timer; do
+        walk req "usr/local/lib/linux-av/$rel"
+        [ -f "$base/usr/local/lib/linux-av/$rel" ] || fail "$rel" 'is not a regular file'
+    done
+    walk opt etc/linux-av/av.env
+    [ ! -e "$base/etc/linux-av/av.env" ] || [ -f "$base/etc/linux-av/av.env" ] || fail /etc/linux-av/av.env 'is not a regular file'
+    # The launcher selects only /etc/linux-av/av.env. No HOME/XDG/repo fallback.
+    for rel in etc/linux-av/power.units run/linux-av-power; do walk opt "$rel"; done
+    for rel in etc/systemd/system etc/cron.daily run/linux-av-power; do
+        walk opt "$rel"
+        [ -d "$base/$rel" ] || continue
+        case $rel in
+            etc/systemd/system)
+                for f in "$base/$rel"/linux-av-* "$base/$rel"/*.d/40-linux-av-power.conf; do
+                    [ -e "$f" ] || [ -L "$f" ] || continue
+                    walk req "${f#"$base/"}"
+                    if [ -d "$f" ]; then
+                        for entry in "$f"/* "$f"/.[!.]* "$f"/..?*; do
+                            [ -e "$entry" ] || [ -L "$entry" ] || continue
+                            node "$entry" req
+                        done
+                    fi
+                done ;;
+            etc/cron.daily)
+                for name in rkhunter chkrootkit aide aide-common; do
+                    walk opt "$rel/$name"
+                    walk opt "$rel/$name.linux-av-power-original"
+                done ;;
+            *)
+                for f in "$base/$rel"/* "$base/$rel"/pending/*; do
+                    [ -e "$f" ] || [ -L "$f" ] || continue
+                    walk req "${f#"$base/"}"
+                done ;;
+        esac
+    done
+    if [ -e "$base/etc/linux-av/power.units" ]; then
+        [ -f "$base/etc/linux-av/power.units" ] || fail /etc/linux-av/power.units 'is not regular'
+        while IFS= read -r unit; do
+            case $unit in ''|*[!a-zA-Z0-9_:@.-]*) fail power.units 'invalid unit name' ;; esac
+            case $unit in *.service|*.socket) ;; *) fail power.units 'invalid unit suffix' ;; esac
+            walk opt "etc/systemd/system/$unit"
+            walk opt "etc/systemd/system/$unit.d"
+            for entry in "$base/etc/systemd/system/$unit.d"/* "$base/etc/systemd/system/$unit.d"/.[!.]* "$base/etc/systemd/system/$unit.d"/..?*; do
+                [ -e "$entry" ] || [ -L "$entry" ] || continue
+                node "$entry" req
+            done
+        done < "$base/etc/linux-av/power.units"
+    fi
+    echo 'av-guard: ok'
+    exit 0
+fi
 
 walk req usr/local/lib/linux-av/bin/av-guard
 walk req usr/local/lib/linux-av/bin/av-scan

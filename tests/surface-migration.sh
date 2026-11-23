@@ -34,6 +34,11 @@ if run; then fail 'installer accepted incorrect effective guard'; fi
 [ -f "$L/lib/root-policy.sh" ] && [ -f "$R/etc/linux-av/power.incomplete" ] || fail 'failed install did not leave code and retry gate'
 [ ! -e "$units/linux-av-power.service" ] || fail 'failed install published policy'
 rm "$R/override.linux-av-scan.service.ExecStartPre"
+# Successful empty stdout is an absent property, independently for both units.
+# Keep these inert output overrides through retry, repeat and policy verification.
+if [ "$layout" = unguarded ]; then
+    for name in scan rootkit; do : > "$R/override.linux-av-$name.service.ExecStartPre"; done
+fi
 run || fail "exact $layout Surface layout rejected on incomplete-install retry"
 [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'successful retry retained gate'
 for name in scan rootkit; do
@@ -83,7 +88,12 @@ for name in scan rootkit; do
     readonly_verify
     [ "$status" != 0 ] && grep -q 'unexpected effective ExecStart' "$T/out" || fail 'verification accepted swapped scan/rootkit argument'
     rm "$R/override.$unit.ExecStart"
-    for pre in '' 'ExecStartPre=garbage' \
+    for pre in '' 'ExecStartPre='; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        readonly_verify
+        [ "$status" = 0 ] || fail 'verification refused absent or explicitly empty pre-start property'
+    done
+    for pre in ' ' 'ExecStartPre=garbage' \
         'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
         'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
         printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
@@ -123,7 +133,7 @@ for name in scan rootkit; do
     [ "$name" != rootkit ] || { arg=--rootkit; other=--now; }
     for defect in missing_override no_reset extra_reset duplicate_base wrong_section indented continuation \
         other_checkout shell_prefix command_modifier base_arg override_arg extra_arg unknown_exec environment \
-        unexpected_pre duplicate_guard malformed_pre blank_pre later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
+        unexpected_pre duplicate_guard malformed_pre whitespace_pre later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
         foreign_base foreign_override writable_base writable_override writable_parent symlink user group dynamic_user; do
         reset_units
         base=$units/$unit; override=$units/$unit.d/root-owned.conf
@@ -146,7 +156,7 @@ for name in scan rootkit; do
             unexpected_pre) printf '\n[Service]\nExecStartPre=/usr/bin/false\n' >> "$base" ;;
             duplicate_guard) printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/$unit.d/zz-other.conf" ;;
             malformed_pre) printf 'ExecStartPre=garbage\n' > "$R/override.$unit.ExecStartPre" ;;
-            blank_pre) : > "$R/override.$unit.ExecStartPre" ;;
+            whitespace_pre) printf ' \n' > "$R/override.$unit.ExecStartPre" ;;
             later_command) printf '[Service]\nExecStart=\nExecStart=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             later_guard) printf '[Service]\nExecStartPre=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             wrong_effective_arg) printf 'ExecStart={ path=/usr/local/lib/linux-av/bin/av-scan ; argv[]=/usr/local/lib/linux-av/bin/av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$other" > "$R/override.$unit.ExecStart" ;;

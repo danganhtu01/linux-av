@@ -212,11 +212,16 @@ for name in scan rootkit; do
     printf 'ExecStart={ path=/bin/sh ; argv[]=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$wrong" > "$R/override.$unit.ExecStart"
     refused 'unexpected effective ExecStart'
     rm "$R/override.$unit.ExecStart"
-    # Explicit emptiness and one permanent guard are the two valid readbacks.
+    # Absent stdout, explicit emptiness and one permanent guard are valid readbacks.
+    for pre in '' 'ExecStartPre='; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        unchanged_verify
+        [ "$status" = 0 ] || fail 'absent or explicitly empty pre-start property refused'
+    done
     printf 'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=no ; status=0/0 }\n' > "$R/override.$unit.ExecStartPre"
     unchanged_verify
     [ "$status" = 0 ] || fail 'known permanent pre-start guard refused'
-    for pre in '' 'ExecStartPre=garbage' \
+    for pre in ' ' 'ExecStartPre=garbage' \
         'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
         'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
         printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"

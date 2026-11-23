@@ -369,7 +369,8 @@ is accepted only as unit-file data for the default scan/rootkit units: one base
 ExecStart, matching intended argument, and a loaded `root-owned.conf` with an
 empty ExecStart reset followed by the matching permanent av-scan command.
 The effective command must select that permanent command, with either an empty
-ExecStartPre or the one exact permanent `av-guard` pre-command, root identity and
+ExecStartPre (successful empty stdout or explicit `ExecStartPre=`) or the one
+exact permanent `av-guard` pre-command, root identity and
 NeedDaemonReload=no. Every other pre-start hook refuses. Migration adds no hook:
 the resulting `av-root` command enforces `av-guard --power` itself. All unit fragments,
 drop-ins and ancestors must pass the ownership/mode audit. The writable checkout
@@ -582,7 +583,8 @@ routes become inert before draining, timeout/retry preservation, installation
 after drain, failed readback before route publication, already-open inode
 detection and natural completion, interrupted migration, and invalid-type/orphan
 refusals. It does not exercise the host cron daemon or attest real root ownership.
-[Candidate proof and exact checks](OC-T-0139-PROOF.md) record this build's evidence and limits. The root
+[Candidate proof and static expected counts](OC-T-0139-PROOF.md) record this build's
+scope and limits. No tests or syntax checks were run for this build. The root
 fixture now includes active cron, legacy drain timeouts/scanner refusals and read-only
 success/mismatch snapshots; its proc/descriptor identity is synthetic, not a
 mounted host proc. Root-fixture and real host readback checks require a later

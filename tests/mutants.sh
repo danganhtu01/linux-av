@@ -22,7 +22,12 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # shellcheck disable=SC2016
 MUTANTS=(
 # OC-T-0139 Surface acceptance must be structural; av-root enforces the guard.
-'power_surface_empty_rejected~lib/root-policy.sh~s/if \[ "\$shown" != .ExecStartPre=. \]; then/if :; then/~power_surface_migration'
+'power_surface_empty_rejected~lib/root-policy.sh~s/if \[ -n "\$shown" \] \&\& \[ "\$shown" != .ExecStartPre=. \]; then/if :; then/~power_surface_migration'
+# Each mutation changes one condition in one stage; inputs remain inert output data.
+'power_surface_absent_rejected~lib/root-policy.sh~s/^        if \[ -n "\$shown" \] \&\& /        if /~power_surface_migration'
+'power_scan_absent_rejected~lib/root-policy.sh~s/^            if \[ -n "\$shown" \] \&\& /            if /~power_policy_verify'
+'power_surface_nonmatching_accepted~lib/root-policy.sh~s/^        if \[ -n "\$shown" \].*; then$/        if false; then/~power_surface_migration'
+'power_scan_nonmatching_accepted~lib/root-policy.sh~s/^            if \[ -n "\$shown" \].*; then$/            if false; then/~power_policy_verify'
 'power_surface_base_shape_removed~lib/root-policy.sh~/unsupported Surface base in/c\        :~power_surface_migration'
 'power_surface_reset_removed~lib/root-policy.sh~/unsupported Surface reset\/command in/c\        :~power_surface_migration'
 'power_surface_guard_removed~lib/root-policy.sh~/unexpected effective Surface guard for/c\        :~power_surface_migration'

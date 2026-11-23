@@ -101,6 +101,10 @@ set -euo pipefail
 # Match av-root's log destination inside the fixture; include it in snapshots.
 export AV_HOME="$L" AV_ROOT= AV_CONFIG="$T/empty-config" AV_LOG_DIR="$R/var/log/linux-av" AV_COLOR=never
 unset AV_LOG_FILE
+# Use the real read-only entrypoint, including its stderr-only refusal path.
+if [ "${1:-}" = verify ]; then
+    exec /bin/bash "$L/bin/av-setup" power-policy-verify
+fi
 . "$L/lib/common.sh"
 . "$L/lib/root-policy.sh"
 av_power_policy "${1:-install}"

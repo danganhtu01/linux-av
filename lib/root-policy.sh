@@ -131,8 +131,13 @@ av_power_policy() (
         got=$(printf '%s\n' "$shown" | exec_fields ExecStart)
         [ "$got" = "ExecStart ${command%% *} | $command | no" ] || die "unexpected effective Surface ExecStart for $name: $shown"
         shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name guard"
-        got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
-        [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unexpected effective Surface guard for $name: $shown"
+        # The exact legacy Surface units can have no pre-start hook. Migration
+        # selects av-root, which enforces av-guard --power itself before Bash.
+        # Only an explicit empty property or the one permanent guard is valid.
+        if [ "$shown" != 'ExecStartPre=' ]; then
+            got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
+            [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unexpected effective Surface guard for $name: $shown"
+        fi
     }
     audit_unit() {
         local prop values path
@@ -393,8 +398,7 @@ av_power_policy() (
                 [ -z "$value" ] || die "unsupported effective $prop for $name: $value"
             done
             shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name ExecStartPre"
-            value=$(systemctl show "$name.service" -p ExecStartPre --value) || die "cannot inspect $name ExecStartPre"
-            if [ -n "$value" ]; then
+            if [ "$shown" != 'ExecStartPre=' ]; then
                 got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
                 [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unsupported effective ExecStartPre for $name: $shown"
             fi

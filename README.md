@@ -368,8 +368,10 @@ quiescing. The exact historical Surface base command
 is accepted only as unit-file data for the default scan/rootkit units: one base
 ExecStart, matching intended argument, and a loaded `root-owned.conf` with an
 empty ExecStart reset followed by the matching permanent av-scan command.
-The effective command must select that permanent command with the exact
-`av-guard` pre-command, root identity and fresh loaded state. All unit fragments,
+The effective command must select that permanent command, with either an empty
+ExecStartPre or the one exact permanent `av-guard` pre-command, root identity and
+NeedDaemonReload=no. Every other pre-start hook refuses. Migration adds no hook:
+the resulting `av-root` command enforces `av-guard --power` itself. All unit fragments,
 drop-ins and ancestors must pass the ownership/mode audit. The writable checkout
 target is never inspected, resolved, sourced or executed. Only the accepted
 ExecStart lines change; original backups and other settings remain intact.

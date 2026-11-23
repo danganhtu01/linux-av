@@ -4,6 +4,8 @@
 set -euo pipefail
 [ "$EUID" != 0 ] || { echo 'Surface fixture requires an unprivileged user' >&2; exit 2; }
 REPO=${AV_REPO_UNDER_TEST:-$(cd "$(dirname "$0")/.." && pwd)}
+check_layout() (
+layout=$1
 T=$(mktemp -d)
 trap 'rm -rf -- "$T"' EXIT
 export T REPO
@@ -16,9 +18,11 @@ for name in scan rootkit; do
     arg=--now; [ "$name" != rootkit ] || arg=--rootkit
     unit=linux-av-$name.service
     mkdir -p "$units/$unit.d"
-    printf '# Surface legacy unit\n[Unit]\nDescription=Surface %s\n[Service]\nType=oneshot\nUser=root\nEnvironment=AV_SCAN_PATHS=/root\nExecStart=%s %s\nNice=10\nTimeoutStartSec=12h\n[Install]\nWantedBy=multi-user.target\n' "$name" "$legacy" "$arg" > "$units/$unit"
+    printf '# Surface legacy unit\n[Unit]\nDescription=Surface %s\n[Service]\nType=oneshot\nEnvironment=AV_SCAN_PATHS=/root\nExecStart=%s %s\nNice=10\nTimeoutStartSec=12h\n[Install]\nWantedBy=multi-user.target\n' "$name" "$legacy" "$arg" > "$units/$unit"
     printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan %s\n' "$arg" > "$units/$unit.d/root-owned.conf"
-    printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/$unit.d/05-guard.conf"
+    if [ "$layout" = guarded ]; then
+        printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/$unit.d/05-guard.conf"
+    fi
     printf '[Service]\nCPUQuota=37%%\nCPUWeight=20\nMemoryMax=3G\n' > "$units/$unit.d/R-3377-cpu-cap.conf"
 done
 cp -r "$units" "$T/original"
@@ -30,7 +34,7 @@ if run; then fail 'installer accepted incorrect effective guard'; fi
 [ -f "$L/lib/root-policy.sh" ] && [ -f "$R/etc/linux-av/power.incomplete" ] || fail 'failed install did not leave code and retry gate'
 [ ! -e "$units/linux-av-power.service" ] || fail 'failed install published policy'
 rm "$R/override.linux-av-scan.service.ExecStartPre"
-run || fail 'exact guarded Surface layout rejected on incomplete-install retry'
+run || fail "exact $layout Surface layout rejected on incomplete-install retry"
 [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'successful retry retained gate'
 for name in scan rootkit; do
     arg=--now; [ "$name" != rootkit ] || arg=--rootkit
@@ -40,7 +44,11 @@ for name in scan rootkit; do
         cmp -s "$T/expected" "$units/$rel" || fail "unexpected changed bytes: $rel"
         cmp -s "$T/original/$rel" "$units/$rel.before-OC-T-0139" || fail "wrong original backup: $rel"
     done
+    if [ "$layout" = unguarded ]; then
+        ! grep -r '^ExecStartPre=' "$units/$unit" "$units/$unit.d" || fail 'introduced a pre-start hook'
+    fi
     for rel in 05-guard.conf R-3377-cpu-cap.conf; do
+        [ -f "$T/original/$unit.d/$rel" ] || continue
         cmp -s "$T/original/$unit.d/$rel" "$units/$unit.d/$rel" || fail "lost guard/limits: $unit/$rel"
     done
 done
@@ -50,12 +58,41 @@ snapshot > "$T/first"
 run || fail 'repeat installation failed'
 snapshot > "$T/second"
 cmp -s "$T/first" "$T/second" || fail 'repeat changed installed bytes/backups'
-echo 'ok exact Surface base/override migration, incomplete retry, preserved settings/backups and stable repeat'
+echo "ok $layout exact Surface migration, default root identity, incomplete retry, settings/backups and stable repeat"
 
 /bin/sh "$L/bin/av-guard" --power > "$T/out" 2>&1 || fail 'installed guard refused'
-/bin/bash "$T/policy-driver" verify > "$T/out" 2>&1 || fail 'installed/effective policy verification refused'
+policy_snapshot() {
+    snapshot
+    (cd "$R" && find usr/local/lib/linux-av etc var -printf '%y %m %U %G %T@ %C@ %p %l\n' | sort)
+}
+readonly_verify() {
+    policy_snapshot > "$T/verify-before"
+    : > "$R/calls"
+    if /bin/bash "$T/policy-driver" verify > "$T/out" 2>&1; then status=0; else status=$?; fi
+    policy_snapshot > "$T/verify-after"
+    cmp -s "$T/verify-before" "$T/verify-after" || fail 'verification changed installed bytes/metadata'
+    if grep -v '^show ' "$R/calls"; then fail 'verification mutated systemd'; fi
+}
+readonly_verify
+[ "$status" = 0 ] || fail 'installed/effective policy verification refused'
 grep -qx 'linux-av: installed power policy verified' "$T/out" || fail 'missing policy verification success'
-echo 'ok migrated Surface guard and installed/effective policy verification'
+for name in scan rootkit; do
+    unit=linux-av-$name.service
+    wrong=--rootkit; [ "$name" != rootkit ] || wrong=--now
+    printf 'ExecStart={ path=/bin/sh ; argv[]=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$wrong" > "$R/override.$unit.ExecStart"
+    readonly_verify
+    [ "$status" != 0 ] && grep -q 'unexpected effective ExecStart' "$T/out" || fail 'verification accepted swapped scan/rootkit argument'
+    rm "$R/override.$unit.ExecStart"
+    for pre in '' 'ExecStartPre=garbage' \
+        'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
+        'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        readonly_verify
+        [ "$status" != 0 ] && grep -q 'unsupported effective ExecStartPre' "$T/out" || fail 'verification accepted unexpected pre-start readback'
+    done
+    rm "$R/override.$unit.ExecStartPre"
+done
+echo "ok $layout installed guard and read-only effective-policy success/negative readback"
 
 # Each negative starts from the same exact original layout. Check all unit bytes
 # and backups, and require refusal before daemon-reload or any service action.
@@ -79,14 +116,15 @@ refused() {
     if grep -v '^show ' "$R/calls"; then fail "service-manager mutation on refusal: $1"; fi
     grep -Eq 'unsupported|unexpected|missing|not loaded|stale|av-guard:|unsafe|symlink|cannot inspect' "$T/out" || fail "unexplained refusal: $1"
 }
+negatives=0
 for name in scan rootkit; do
     unit=linux-av-$name.service
     arg=--now; other=--rootkit
     [ "$name" != rootkit ] || { arg=--rootkit; other=--now; }
     for defect in missing_override no_reset extra_reset duplicate_base wrong_section indented continuation \
         other_checkout shell_prefix command_modifier base_arg override_arg extra_arg unknown_exec environment \
-        missing_guard later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
-        foreign_base foreign_override writable_base writable_override writable_parent symlink user; do
+        unexpected_pre duplicate_guard malformed_pre blank_pre later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
+        foreign_base foreign_override writable_base writable_override writable_parent symlink user group dynamic_user; do
         reset_units
         base=$units/$unit; override=$units/$unit.d/root-owned.conf
         case $defect in
@@ -105,7 +143,10 @@ for name in scan rootkit; do
             extra_arg) sed -i '/^ExecStart=./s/$/ --path \/root/' "$base" ;;
             unknown_exec) printf '\n[Service]\nExecStartPost=/usr/bin/false' >> "$base" ;;
             environment) printf '\n[Service]\nEnvironmentFile=%s/etc/default/unreviewed\n' "$R" >> "$base" ;;
-            missing_guard) rm "$units/$unit.d/05-guard.conf" ;;
+            unexpected_pre) printf '\n[Service]\nExecStartPre=/usr/bin/false\n' >> "$base" ;;
+            duplicate_guard) printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/$unit.d/zz-other.conf" ;;
+            malformed_pre) printf 'ExecStartPre=garbage\n' > "$R/override.$unit.ExecStartPre" ;;
+            blank_pre) : > "$R/override.$unit.ExecStartPre" ;;
             later_command) printf '[Service]\nExecStart=\nExecStart=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             later_guard) printf '[Service]\nExecStartPre=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             wrong_effective_arg) printf 'ExecStart={ path=/usr/local/lib/linux-av/bin/av-scan ; argv[]=/usr/local/lib/linux-av/bin/av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$other" > "$R/override.$unit.ExecStart" ;;
@@ -120,9 +161,15 @@ for name in scan rootkit; do
             writable_parent) chmod 0775 "$units/$unit.d" ;;
             symlink) mv "$override" "$T/linked-override"; ln -s "$T/linked-override" "$override" ;;
             user) echo atdang > "$R/override.$unit.User" ;;
+            group) echo atdang > "$R/override.$unit.Group" ;;
+            dynamic_user) echo yes > "$R/override.$unit.DynamicUser" ;;
         esac
-        refused "$name/$defect"
+        refused "$layout/$name/$defect"
+        negatives=$((negatives+1))
     done
 done
 [ ! -e "$R/forbidden-probe" ] || fail 'inspected or resolved writable checkout target'
-echo 'ok 60 Surface negatives: structure, exact paths/arguments, effective guard/override, unit ownership/modes/links and preserved refusal state'
+echo "ok $layout $negatives Surface negatives: structure, exact paths/arguments, pre-start hooks, identity, metadata and preserved refusal state"
+)
+check_layout unguarded
+check_layout guarded

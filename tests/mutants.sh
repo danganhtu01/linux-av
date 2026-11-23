@@ -21,6 +21,13 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/linux-av-mutants.XXXXXX")" || exit 2
 # NAME~FILE~SED-EXPRESSION~ROWS that must go red (space-separated)
 # shellcheck disable=SC2016
 MUTANTS=(
+# OC-T-0139 Surface acceptance must be structural; av-root enforces the guard.
+'power_surface_empty_rejected~lib/root-policy.sh~s/if \[ "\$shown" != .ExecStartPre=. \]; then/if :; then/~power_surface_migration'
+'power_surface_base_shape_removed~lib/root-policy.sh~/unsupported Surface base in/c\        :~power_surface_migration'
+'power_surface_reset_removed~lib/root-policy.sh~/unsupported Surface reset\/command in/c\        :~power_surface_migration'
+'power_surface_guard_removed~lib/root-policy.sh~/unexpected effective Surface guard for/c\        :~power_surface_migration'
+'power_scan_pre_readback_removed~lib/root-policy.sh~/unsupported effective ExecStartPre for/c\                :~power_policy_verify'
+'power_scan_intended_readback_removed~lib/root-policy.sh~/unexpected effective ExecStart for \$name:/c\            :~power_policy_verify'
 # OC-T-0139 legacy migration ordering and final activation boundary.
 'power_cron_disable_removed~root-install-power.sh~/--cron-disable || fail/d~power_cron_migration'
 'power_cron_wait_removed~root-install-power.sh~/--cron-wait || fail/d~power_cron_migration'

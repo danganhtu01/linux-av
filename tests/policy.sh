@@ -124,6 +124,21 @@ sed -e "s|^base=\$|base='$R'|" -e "s|^PATH=.*|PATH='$B:/usr/bin:/bin'|" "$REPO/b
 printf '#!/bin/sh\necho 0\n' > "$B/id"; chmod +x "$B/id"
 sed -e "s|^lib=/usr/local/lib/linux-av\$|lib='$L'|" -e "s|^PATH=.*|PATH='$B:/usr/bin:/bin'|" \
     -e "s|/run/linux-av-policy|$R/run/linux-av-policy|g" -e "s|/etc/linux-av/power.incomplete|$R/etc/linux-av/power.incomplete|g" "$REPO/bin/av-root" > "$T/launcher"
+# Both migrated scan arguments cross the launcher's own guard before the tool.
+# The stand-in records argv only; no scanner is executed.
+cp -p "$L/bin/av-scan" "$T/saved-scan"
+printf 'printf "%%s\\n" "$@"\n' > "$L/bin/av-scan"
+for arg in --now --rootkit; do
+    /bin/sh "$T/launcher" av-scan "$arg" > "$T/out" 2>&1 || fail 'scan launcher refused safe tree'
+    [ "$(cat "$T/out")" = "$(printf 'av-guard: ok\n%s' "$arg")" ] || fail 'scan launcher skipped guard or changed argument'
+    chmod g+w "$L/bin/av-scan"
+    if /bin/sh "$T/launcher" av-scan "$arg" > "$T/out" 2>&1; then fail 'scan launcher bypassed guard'; fi
+    grep -q 'av-guard:' "$T/out" || fail 'scan launcher did not report guard refusal'
+    ! grep -qx -- "$arg" "$T/out" || fail 'scan stand-in ran after guard refusal'
+    chmod g-w "$L/bin/av-scan"
+done
+cp -p "$T/saved-scan" "$L/bin/av-scan"
+echo 'ok scan launcher enforces its own guard for both migrated arguments (inert stand-in)'
 printf 'printf ran > "%s"\nread -r line < "%s"\n' "$T/cron-ran" "$T/job-release" > "$L/bin/av-power"
 mkfifo "$T/install-release" "$T/job-release"
 flock --no-fork -x "$R/run/linux-av-policy.lock" /bin/bash -c 'touch "$1"; read -r line < "$2"' sh "$T/locked" "$T/install-release" & locker=$!
@@ -191,6 +206,24 @@ for prop in NeedDaemonReload ExecStart ExecCondition ExecStopPost KillMode Requi
 done
 : > "$R/force-not-found.linux-av-power.service"; refused 'installed unit not loaded'; rm "$R/force-not-found.linux-av-power.service"
 : > "$R/show-failure"; refused 'cannot inspect'; rm "$R/show-failure"
+for name in scan rootkit; do
+    unit=linux-av-$name.service
+    wrong=--rootkit; [ "$name" != rootkit ] || wrong=--now
+    printf 'ExecStart={ path=/bin/sh ; argv[]=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$wrong" > "$R/override.$unit.ExecStart"
+    refused 'unexpected effective ExecStart'
+    rm "$R/override.$unit.ExecStart"
+    # Explicit emptiness and one permanent guard are the two valid readbacks.
+    printf 'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=no ; status=0/0 }\n' > "$R/override.$unit.ExecStartPre"
+    unchanged_verify
+    [ "$status" = 0 ] || fail 'known permanent pre-start guard refused'
+    for pre in '' 'ExecStartPre=garbage' \
+        'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
+        'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        refused 'unsupported effective ExecStartPre'
+    done
+    rm "$R/override.$unit.ExecStartPre"
+done
 cp -p "$L/bin/av-power" "$T/saved-code"
 printf '\n' >> "$L/bin/av-power"; refused 'installed release bytes differ'
 cp -p "$T/saved-code" "$L/bin/av-power"

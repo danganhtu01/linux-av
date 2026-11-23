@@ -88,6 +88,57 @@ av_power_policy() (
         state=$(systemctl show "$1" -p LoadState --value) || [ "$state" = not-found ] || die "cannot inspect $1"
         case $state in loaded) return 0 ;; not-found) return 1 ;; *) die "unsupported LoadState for $1: $state" ;; esac
     }
+    exec_fields() { sed -n "s/^$1={ path=\\(.*\\) ; argv\\[\\]=\\(.*\\) ; ignore_errors=\\([a-z]*\\) ; .*/$1 \\1 | \\2 | \\3/p"; }
+    # Read unit data only. In particular, the Surface checkout command below is
+    # an exact historical string, never a path to inspect, resolve or execute.
+    local surface_scan=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan
+    start_lines() {
+        local line section=
+        while IFS= read -r line || [ -n "$line" ]; do
+            case $line in \[*\]) section=$line ;; esac
+            if [[ $line =~ ^[[:space:]]*Exec[A-Za-z]+[[:space:]]*= ]]; then
+                [[ $line =~ ^Exec[A-Za-z]+= ]] && [ "$section" = '[Service]' ] || die "unsupported executable syntax in $1: $line"
+                case $line in ExecStart=*) printf '%s\n' "$line" ;; esac
+            fi
+            # Continuations can hide directives or change executable semantics.
+            case $line in ''|\#*|\;*) ;; *\\) die "unsupported unit continuation in $1" ;; esac
+        done < "$1"
+    }
+    surface_layout() {
+        local name=$1 intended=$2 fragment=$units_dir/$1.service override=$units_dir/$1.service.d/root-owned.conf starts command prop value shown got paths path found=no
+        case $name in linux-av-scan|linux-av-rootkit) ;; *) die "unsupported Surface unit: $name" ;; esac
+        starts=$(start_lines "$fragment")
+        [ "$starts" = "ExecStart=$surface_scan $intended" ] || die "unsupported Surface base in $fragment"
+        [ -f "$override" ] || die "missing Surface root-owned override: $override"
+        starts=$(start_lines "$override")
+        command="/usr/local/lib/linux-av/bin/av-scan $intended"
+        [ "$starts" = $'ExecStart=\n'"ExecStart=$command" ] || die "unsupported Surface reset/command in $override"
+        loaded "$name.service" || die "Surface unit not loaded: $name"
+        value=$(systemctl show "$name.service" -p FragmentPath --value) || die "cannot inspect $name fragment"
+        [ "$value" = "$fragment" ] || die "unexpected Surface fragment for $name: $value"
+        paths=$(systemctl show "$name.service" -p DropInPaths --value) || die "cannot inspect $name drop-ins"
+        for path in $paths; do [ "$path" != "$override" ] || found=yes; done
+        [ "$found" = yes ] || die "Surface override not loaded for $name"
+        value=$(systemctl show "$name.service" -p NeedDaemonReload --value) || die "cannot inspect $name reload state"
+        [ "$value" = no ] || die "stale loaded Surface unit: $name"
+        for prop in User Group; do
+            value=$(systemctl show "$name.service" -p "$prop" --value) || die "cannot inspect $name $prop"
+            case $value in ''|root|0) ;; *) die "unexpected Surface $prop for $name: $value" ;; esac
+        done
+        value=$(systemctl show "$name.service" -p DynamicUser --value) || die "cannot inspect $name DynamicUser"
+        case $value in ''|no) ;; *) die "unexpected Surface DynamicUser for $name: $value" ;; esac
+        shown=$(systemctl show "$name.service" -p ExecStart) || die "cannot inspect $name command"
+        got=$(printf '%s\n' "$shown" | exec_fields ExecStart)
+        [ "$got" = "ExecStart ${command%% *} | $command | no" ] || die "unexpected effective Surface ExecStart for $name: $shown"
+        shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name guard"
+        # The exact legacy Surface units can have no pre-start hook. Migration
+        # selects av-root, which enforces av-guard --power itself before Bash.
+        # Only an explicit empty property or the one permanent guard is valid.
+        if [ "$shown" != 'ExecStartPre=' ]; then
+            got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
+            [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unexpected effective Surface guard for $name: $shown"
+        fi
+    }
     audit_unit() {
         local prop values path
         loaded "$1" || return 0
@@ -106,7 +157,7 @@ av_power_policy() (
             service) cat "$AV_HOME/systemd/av-power.conf" ;;
             timer) printf '[Unit]\nConditionACPower=\n' ;;
             cron) printf '#!/bin/sh\n# linux-av mains-only cron wrapper\nexec /bin/sh /usr/local/lib/linux-av/bin/av-root av-power --cron %s\n' "$2" ;;
-            upgrade) sed -E 's#^ExecStart=/usr/local/(bin/av-scan|lib/linux-av/bin/av-scan) #ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan #' "$2" ;;
+            upgrade) sed -E 's#^ExecStart=(/usr/local/(bin/av-scan|lib/linux-av/bin/av-scan)|/home/atdang/\.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan) (--now|--rootkit)$#ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan \3#' "$2" ;;
             cron-hashes)
                 for name in rkhunter chkrootkit aide aide-common; do
                     original=$base/etc/cron.daily/$name.linux-av-power-original
@@ -186,18 +237,29 @@ av_power_policy() (
     # Preserve every other byte: CPU/memory/time limits, guards, timer state.
     # Unknown commands / environment-file inputs require a separate host review.
     for name in "$AV_TIMER_NAME" "$AV_ROOTKIT_TIMER_NAME"; do
+        local intended=--now surface_ok=no
+        [ "$name" != "$AV_ROOTKIT_TIMER_NAME" ] || intended=--rootkit
+        file=$units_dir/$name.service
+        if [ -f "$file" ] && grep -Fqx "ExecStart=$surface_scan $intended" "$file"; then
+            surface_layout "$name" "$intended"
+            surface_ok=yes
+        fi
         for file in "$units_dir/$name.service" "$units_dir/$name.service.d"/*.conf; do
             [ -f "$file" ] || continue
             if grep -Eq '^[[:space:]]*(EnvironmentFile|RootDirectory|RootImage|WorkingDirectory|ExecSearchPath)=' "$file"; then
                 die "unsupported root input in $file; review before upgrading"
             fi
             [ "${file##*/}" != 40-linux-av-power.conf ] || continue
+            # Check sections and syntax before the exact executable allowlist.
+            start_lines "$file" >/dev/null
             # Read directly: process substitution requires /dev/fd in a chroot.
             while IFS= read -r arg || [ -n "$arg" ]; do
                 [[ $arg =~ ^Exec[A-Za-z]+= ]] || continue
                 case $arg in
                     ExecStart=|ExecStartPre=/usr/local/lib/linux-av/bin/av-guard) ;;
-                    'ExecStart=/usr/local/bin/av-scan '*|'ExecStart=/usr/local/lib/linux-av/bin/av-scan '*|'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan '*) ;;
+                    "ExecStart=/usr/local/bin/av-scan $intended"|"ExecStart=/usr/local/lib/linux-av/bin/av-scan $intended"|"ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan $intended") ;;
+                    "ExecStart=$surface_scan $intended")
+                        [ "$surface_ok" = yes ] && [ "$file" = "$units_dir/$name.service" ] || die "unsupported Surface executable in $file: $arg" ;;
                     'ExecCondition=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power '*|'ExecStopPost=/bin/sh /usr/local/lib/linux-av/bin/av-root av-power '*) ;;
                     *) die "unsupported executable in $file: $arg" ;;
                 esac
@@ -281,7 +343,6 @@ av_power_policy() (
         [ "$EUID" = 0 ] || return 0
     fi
     # Reject a later drop-in that overrides or bypasses the intended commands.
-    exec_fields() { sed -n "s/^$1={ path=\\(.*\\) ; argv\\[\\]=\\(.*\\) ; ignore_errors=\\([a-z]*\\) ; .*/$1 \\1 | \\2 | \\3/p"; }
     verify() {
         local shown got
         shown=$(systemctl show "$1" -p "$2") || die "cannot read back $1 $2"
@@ -337,17 +398,15 @@ av_power_policy() (
                 [ -z "$value" ] || die "unsupported effective $prop for $name: $value"
             done
             shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name ExecStartPre"
-            value=$(systemctl show "$name.service" -p ExecStartPre --value) || die "cannot inspect $name ExecStartPre"
-            if [ -n "$value" ]; then
+            if [ "$shown" != 'ExecStartPre=' ]; then
                 got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
                 [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unsupported effective ExecStartPre for $name: $shown"
             fi
             shown=$(systemctl show "$name.service" -p ExecStart) || die "cannot read back $name"
             got=$(printf '%s\n' "$shown" | exec_fields ExecStart)
-            case $got in
-                'ExecStart /bin/sh | /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan '*" | no") ;;
-                *) die "unexpected effective ExecStart for $name: $shown" ;;
-            esac
+            intended=--now
+            [ "$name" != "$AV_ROOTKIT_TIMER_NAME" ] || intended=--rootkit
+            [ "$got" = "ExecStart /bin/sh | /bin/sh /usr/local/lib/linux-av/bin/av-root av-scan $intended | no" ] || die "unexpected effective ExecStart for $name: $shown"
         fi
     done
     if [ "$action" = verify ]; then

@@ -37,15 +37,35 @@ for prop in "$@"; do
             continue ;;
     esac
     value=
+    pres=()
     for file in "$r/etc/systemd/system/$unit" "$r"/etc/systemd/system/"$unit".d/*.conf; do
         [ -f "$file" ] || continue
         while IFS= read -r line; do
-            case $line in "$prop="*) value=${line#*=} ;; esac
+            case $line in "$prop="*)
+                value=${line#*=}
+                if [ "$prop" = ExecStartPre ]; then
+                    if [ -z "$value" ]; then pres=(); else pres+=("$value"); fi
+                fi ;;
+            esac
         done < "$file"
     done
     value=${value//%n/$unit}
+    if [ "$prop" = ExecStartPre ] && [ "${#pres[@]}" -gt 0 ]; then
+        [ "$value_only" != 1 ] || { printf '%s\n' "${pres[*]}"; continue; }
+        printf 'ExecStartPre='
+        for pre in "${pres[@]}"; do
+            printf '{ path=%s ; argv[]=%s ; ignore_errors=no ; status=0/0 } ' "${pre%% *}" "$pre"
+        done
+        printf '\n'
+        continue
+    fi
     [ "$prop" != KillSignal ] || value=9
-    [ -n "$value" ] || continue
+    if [ -z "$value" ]; then
+        if [ "$value_only" != 1 ]; then
+            case $prop in Exec*) printf '%s=\n' "$prop" ;; esac
+        fi
+        continue
+    fi
     if [ "$value_only" = 1 ]; then echo "$value"; continue; fi
     printf '%s={ path=%s ; argv[]=%s ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n' "$prop" "${value%% *}" "$value"
 done

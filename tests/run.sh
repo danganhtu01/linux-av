@@ -4080,6 +4080,13 @@ row_power_policy_exec_refused() {
     done
 }
 
+row_power_surface_migration() {
+    [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
+    local output
+    output="$(AV_REPO_UNDER_TEST="$REPO" "$BASH_BIN" "$REPO/tests/surface-migration.sh" 2>&1)"
+    assert_eq "$?" 0 "exact Surface migration checks: $output"
+}
+
 row_power_cron_migration() {
     [ "$EUID" != 0 ] || { ROW_SKIPPED=1; return 0; }
     local output

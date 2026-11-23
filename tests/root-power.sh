@@ -3,6 +3,9 @@
 set -euo pipefail
 [ "$EUID" = 0 ] || { echo 'skip root-power: requires root in a disposable container'; exit 0; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+check_layout() (
+layout=$1
+echo "root-power layout: $layout"
 T=$(mktemp -d)
 trap 'rm -rf --one-file-system -- "$T"' EXIT
 R=$T/root
@@ -19,7 +22,7 @@ copy_binary() {
     done < <(ldd "$path" 2>/dev/null | awk '/=> \/|^[[:space:]]*\// {for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')
 }
 for tool in /bin/sh /bin/bash /usr/bin/env; do copy_binary "$tool"; done
-for tool in id stat readlink hostname mktemp mkdir cp mv install rm sed grep cmp sort cut wc sha256sum date dirname getent cat sleep tr flock seq sync ln chmod timeout; do
+for tool in id stat readlink hostname mktemp mkdir cp mv install rm sed grep cmp sort cut wc sha256sum date dirname getent cat sleep tr flock seq sync ln chmod timeout find diff; do
     copy_binary "$(command -v "$tool")"
 done
 mkdir -p "$R/usr/sbin" "$R/etc/systemd/system" "$R/etc/cron.daily" "$R/run" "$R/root" "$R/release" "$R/sys/class/power_supply" "$R/dev" "$R/proc/1/fd"
@@ -45,11 +48,16 @@ chmod 0600 "$R/installer"
 # Simulate a caller-owned checkout; only pinned private snapshots may execute.
 chown -R 1000:1000 "$R/release"
 mkdir -p "$R/etc/systemd/system/linux-av-scan.service.d" "$R/etc/systemd/system/linux-av-rootkit.service.d"
-printf '[Service]\nExecStart=/usr/local/bin/av-scan --now\nNice=10\n' > "$R/etc/systemd/system/linux-av-scan.service"
-printf '[Service]\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service"
+printf '[Service]\nExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --now\nNice=10\n' > "$R/etc/systemd/system/linux-av-scan.service"
+printf '[Service]\nExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service"
 printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --now\n' > "$R/etc/systemd/system/linux-av-scan.service.d/root-owned.conf"
+printf '[Service]\nExecStart=\nExecStart=/usr/local/lib/linux-av/bin/av-scan --rootkit\n' > "$R/etc/systemd/system/linux-av-rootkit.service.d/root-owned.conf"
 printf '[Service]\nCPUQuota=37%%\nCPUWeight=20\nMemoryMax=3G\n' > "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf"
-printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$R/etc/systemd/system/linux-av-scan.service.d/05-guard.conf"
+if [ "$layout" = guarded ]; then
+    printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$R/etc/systemd/system/linux-av-scan.service.d/05-guard.conf"
+    printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$R/etc/systemd/system/linux-av-rootkit.service.d/05-guard.conf"
+fi
+cp -r "$R/etc/systemd/system" "$T/original-units"
 printf '#!/bin/sh\n# inert packaged daily fixture\nexit 0\n' > "$R/etc/cron.daily/rkhunter"
 chmod 0755 "$R/etc/cron.daily/rkhunter"
 mkdir -p "$R/etc/default"
@@ -82,6 +90,11 @@ if run; then fail 'writable systemd environment input accepted'; fi
 grep -q 'unsafe owner/mode' "$T/out" || { cat "$T/out"; fail 'environment-file audit missing'; }
 [ ! -e "$R/etc/systemd/system/linux-av-power.service" ] || fail 'preflight refusal wrote policy'
 chmod 0644 "$R/etc/default/check-fixture"
+printf 'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }\n' > "$R/override.linux-av-scan.service.ExecStartPre"
+if run; then fail 'unexpected legacy pre-start readback accepted'; fi
+grep -q 'unexpected effective Surface guard' "$T/out" || { cat "$T/out"; fail 'wrong pre-start refusal'; }
+[ -f "$R/etc/linux-av/power.incomplete" ] || fail 'failed install did not retain retry gate'
+rm "$R/override.linux-av-scan.service.ExecStartPre"
 run || { cat "$T/out"; fail 'install failed'; }
 [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'successful install retained incomplete marker'
 L=$R/usr/local/lib/linux-av
@@ -91,8 +104,20 @@ for rel in bin/av-root bin/av-guard bin/av-power bin/av-scan bin/av-setup lib/co
     [ "$(stat -c '%u %g %a' "$L/$rel")" = "0 0 $mode" ] || fail "wrong ownership/mode: $rel"
 done
 grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' "$R/etc/systemd/system/linux-av-scan.service" || fail 'scan base not migrated'
+grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' "$R/etc/systemd/system/linux-av-rootkit.service" || fail 'rootkit base not migrated'
 grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --now' "$R/etc/systemd/system/linux-av-scan.service.d/root-owned.conf" || fail 'override not migrated'
-grep -qx 'ExecStartPre=/usr/local/lib/linux-av/bin/av-guard' "$R/etc/systemd/system/linux-av-scan.service.d/05-guard.conf" || fail 'guard lost'
+grep -qx 'ExecStart=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan --rootkit' "$R/etc/systemd/system/linux-av-rootkit.service.d/root-owned.conf" || fail 'rootkit override not migrated'
+for name in scan rootkit; do
+    unit=linux-av-$name.service
+    if [ "$layout" = guarded ]; then
+        cmp "$T/original-units/$unit.d/05-guard.conf" "$R/etc/systemd/system/$unit.d/05-guard.conf" || fail 'guard changed'
+    else
+        ! grep -r '^ExecStartPre=' "$R/etc/systemd/system/$unit" "$R/etc/systemd/system/$unit.d" || fail 'introduced a pre-start hook'
+    fi
+    for rel in "$unit" "$unit.d/root-owned.conf"; do
+        cmp "$T/original-units/$rel" "$R/etc/systemd/system/$rel.before-OC-T-0139" || fail 'wrong original backup'
+    done
+done
 grep -qx 'CPUQuota=37%' "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf" || fail 'CPU cap lost'
 grep -qx 'MemoryMax=3G' "$R/etc/systemd/system/linux-av-scan.service.d/R-3377-cpu-cap.conf" || fail 'memory limit lost'
 cmp "$R/etc/cron.daily/rkhunter.linux-av-power-original" "$R/etc/cron.daily/rkhunter.before-OC-T-0139" || fail 'cron original/backup differ'
@@ -192,3 +217,7 @@ mv "$R/etc/systemd/system/linux-av-power.service.dummy" "$R/etc/systemd/system/l
 if run; then fail 'effective guardian override accepted'; fi
 grep -q 'unexpected effective ExecStart' "$T/out" || { cat "$T/out"; fail 'read-back did not catch override'; }
 echo 'ok package cron upgrade and effective systemd read-back refusal'
+
+)
+check_layout unguarded
+check_layout guarded

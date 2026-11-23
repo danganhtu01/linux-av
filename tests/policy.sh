@@ -62,7 +62,7 @@ unchanged_verify() {
 }
 refused() {
     unchanged_verify
-    [ "$status" != 0 ] || fail "mismatch accepted: $1"
+    [ "$status" = 1 ] || fail "wrong refusal status $status: $1"
     grep -q "$1" "$T/out" || fail "wrong refusal; wanted $1"
 }
 # Fresh and existing active cron are independent of inactive managed scanners.
@@ -212,15 +212,28 @@ for name in scan rootkit; do
     printf 'ExecStart={ path=/bin/sh ; argv[]=/bin/sh /usr/local/lib/linux-av/bin/av-root av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$wrong" > "$R/override.$unit.ExecStart"
     refused 'unexpected effective ExecStart'
     rm "$R/override.$unit.ExecStart"
-    # Explicit emptiness and one permanent guard are the two valid readbacks.
+    # Exact bytes: absent stdout, one LF and the empty property with/without LF.
+    for pre in '' $'\n' 'ExecStartPre=' $'ExecStartPre=\n'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        unchanged_verify
+        [ "$status" = 0 ] || fail 'absent or explicitly empty pre-start property refused'
+    done
     printf 'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=no ; status=0/0 }\n' > "$R/override.$unit.ExecStartPre"
     unchanged_verify
     [ "$status" = 0 ] || fail 'known permanent pre-start guard refused'
-    for pre in '' 'ExecStartPre=garbage' \
+    # Inert raw output, including trailing bytes command substitution used to lose.
+    for pre in ' ' $'\t' $'\r' $'\n\n' $' \n' $'\t\n' $'\r\n' $'\n\n\n' $'ExecStartPre=\n\n' 'ExecStartPre=garbage' \
         'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
         'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
         printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
         refused 'unsupported effective ExecStartPre'
+    done
+    for pre in '' $'\n'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        : > "$R/fail.$unit.ExecStartPre"
+        refused "cannot inspect linux-av-$name ExecStartPre"
+        [ "$status" = 1 ] || fail 'wrong failed-query refusal status'
+        rm "$R/fail.$unit.ExecStartPre"
     done
     rm "$R/override.$unit.ExecStartPre"
 done

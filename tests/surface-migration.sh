@@ -34,6 +34,11 @@ if run; then fail 'installer accepted incorrect effective guard'; fi
 [ -f "$L/lib/root-policy.sh" ] && [ -f "$R/etc/linux-av/power.incomplete" ] || fail 'failed install did not leave code and retry gate'
 [ ! -e "$units/linux-av-power.service" ] || fail 'failed install published policy'
 rm "$R/override.linux-av-scan.service.ExecStartPre"
+# Successful empty stdout is an absent property, independently for both units.
+# Keep these inert output overrides through retry, repeat and policy verification.
+if [ "$layout" = unguarded ]; then
+    for name in scan rootkit; do : > "$R/override.linux-av-$name.service.ExecStartPre"; done
+fi
 run || fail "exact $layout Surface layout rejected on incomplete-install retry"
 [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'successful retry retained gate'
 for name in scan rootkit; do
@@ -83,12 +88,25 @@ for name in scan rootkit; do
     readonly_verify
     [ "$status" != 0 ] && grep -q 'unexpected effective ExecStart' "$T/out" || fail 'verification accepted swapped scan/rootkit argument'
     rm "$R/override.$unit.ExecStart"
-    for pre in '' 'ExecStartPre=garbage' \
+    for pre in '' $'\n' 'ExecStartPre=' $'ExecStartPre=\n'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        readonly_verify
+        [ "$status" = 0 ] || fail 'verification refused absent or explicitly empty pre-start property'
+    done
+    # Preserve exact raw bytes; no fixture output is evaluated as shell code.
+    for pre in ' ' $'\t' $'\r' $'\n\n' $' \n' $'\t\n' $'\r\n' $'\n\n\n' $'ExecStartPre=\n\n' 'ExecStartPre=garbage' \
         'ExecStartPre={ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no ; status=0/0 }' \
         'ExecStartPre={ path=/usr/local/lib/linux-av/bin/av-guard ; argv[]=/usr/local/lib/linux-av/bin/av-guard ; ignore_errors=yes ; status=0/0 }'; do
         printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
         readonly_verify
-        [ "$status" != 0 ] && grep -q 'unsupported effective ExecStartPre' "$T/out" || fail 'verification accepted unexpected pre-start readback'
+        [ "$status" = 1 ] && grep -q 'unsupported effective ExecStartPre' "$T/out" || fail 'verification accepted unexpected pre-start readback'
+    done
+    for pre in '' $'\n'; do
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        : > "$R/fail.$unit.ExecStartPre"
+        readonly_verify
+        [ "$status" = 1 ] && grep -q "cannot inspect linux-av-$name ExecStartPre" "$T/out" || fail 'verification accepted failed pre-start query'
+        rm "$R/fail.$unit.ExecStartPre"
     done
     rm "$R/override.$unit.ExecStartPre"
 done
@@ -99,7 +117,7 @@ echo "ok $layout installed guard and read-only effective-policy success/negative
 reset_units() {
     rm -rf -- "$units"
     cp -r "$T/original" "$units"
-    rm -f "$R"/override.* "$R/stat-foreign"
+    rm -f "$R"/override.* "$R"/fail.* "$R/stat-foreign"
     : > "$R/etc/linux-av/power.incomplete"
     : > "$R/calls"
 }
@@ -109,13 +127,25 @@ unit_snapshot() {
 }
 refused() {
     unit_snapshot > "$T/before-refusal"
-    if /bin/bash "$T/policy-driver" > "$T/out" 2>&1; then fail "accepted $1"; fi
+    if /bin/bash "$T/policy-driver" > "$T/out" 2>&1; then status=0; else status=$?; fi
+    [ "$status" = 1 ] || fail "wrong refusal status $status: $1"
     unit_snapshot > "$T/after-refusal"
     cmp -s "$T/before-refusal" "$T/after-refusal" || fail "wrote units/backups on refusal: $1"
     [ -f "$R/etc/linux-av/power.incomplete" ] || fail "removed retry gate on refusal: $1"
     if grep -v '^show ' "$R/calls"; then fail "service-manager mutation on refusal: $1"; fi
     grep -Eq 'unsupported|unexpected|missing|not loaded|stale|av-guard:|unsafe|symlink|cannot inspect' "$T/out" || fail "unexplained refusal: $1"
 }
+# Healthy preflight controls for each byte form, service and legacy layout.
+for name in scan rootkit; do
+    unit=linux-av-$name.service
+    for pre in '' $'\n' 'ExecStartPre=' $'ExecStartPre=\n'; do
+        reset_units
+        printf '%s' "$pre" > "$R/override.$unit.ExecStartPre"
+        /bin/bash "$T/policy-driver" > "$T/out" 2>&1 || fail "preflight refused healthy $layout/$name pre-start bytes"
+        [ ! -e "$R/etc/linux-av/power.incomplete" ] || fail 'healthy preflight retained retry gate'
+    done
+done
+echo "ok $layout 8 exact empty pre-start preflight controls"
 negatives=0
 for name in scan rootkit; do
     unit=linux-av-$name.service
@@ -123,7 +153,7 @@ for name in scan rootkit; do
     [ "$name" != rootkit ] || { arg=--rootkit; other=--now; }
     for defect in missing_override no_reset extra_reset duplicate_base wrong_section indented continuation \
         other_checkout shell_prefix command_modifier base_arg override_arg extra_arg unknown_exec environment \
-        unexpected_pre duplicate_guard malformed_pre blank_pre later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
+        unexpected_pre duplicate_guard malformed_pre whitespace_pre space_pre tab_pre cr_pre multi_lf_pre tab_lf_pre cr_lf_pre extra_lf_pre explicit_multi_lf_pre fail_empty_pre fail_lf_pre later_command later_guard wrong_effective_arg ignore_errors stale fragment unloaded_override \
         foreign_base foreign_override writable_base writable_override writable_parent symlink user group dynamic_user; do
         reset_units
         base=$units/$unit; override=$units/$unit.d/root-owned.conf
@@ -146,7 +176,17 @@ for name in scan rootkit; do
             unexpected_pre) printf '\n[Service]\nExecStartPre=/usr/bin/false\n' >> "$base" ;;
             duplicate_guard) printf '[Service]\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\nExecStartPre=/usr/local/lib/linux-av/bin/av-guard\n' > "$units/$unit.d/zz-other.conf" ;;
             malformed_pre) printf 'ExecStartPre=garbage\n' > "$R/override.$unit.ExecStartPre" ;;
-            blank_pre) : > "$R/override.$unit.ExecStartPre" ;;
+            whitespace_pre) printf ' \n' > "$R/override.$unit.ExecStartPre" ;;
+            space_pre) printf ' ' > "$R/override.$unit.ExecStartPre" ;;
+            tab_pre) printf '\t' > "$R/override.$unit.ExecStartPre" ;;
+            cr_pre) printf '\r' > "$R/override.$unit.ExecStartPre" ;;
+            multi_lf_pre) printf '\n\n' > "$R/override.$unit.ExecStartPre" ;;
+            tab_lf_pre) printf '\t\n' > "$R/override.$unit.ExecStartPre" ;;
+            cr_lf_pre) printf '\r\n' > "$R/override.$unit.ExecStartPre" ;;
+            extra_lf_pre) printf '\n\n\n' > "$R/override.$unit.ExecStartPre" ;;
+            explicit_multi_lf_pre) printf 'ExecStartPre=\n\n' > "$R/override.$unit.ExecStartPre" ;;
+            fail_empty_pre) : > "$R/override.$unit.ExecStartPre"; : > "$R/fail.$unit.ExecStartPre" ;;
+            fail_lf_pre) printf '\n' > "$R/override.$unit.ExecStartPre"; : > "$R/fail.$unit.ExecStartPre" ;;
             later_command) printf '[Service]\nExecStart=\nExecStart=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             later_guard) printf '[Service]\nExecStartPre=/usr/bin/false\n' > "$units/$unit.d/zz-other.conf" ;;
             wrong_effective_arg) printf 'ExecStart={ path=/usr/local/lib/linux-av/bin/av-scan ; argv[]=/usr/local/lib/linux-av/bin/av-scan %s ; ignore_errors=no ; status=0/0 }\n' "$other" > "$R/override.$unit.ExecStart" ;;
@@ -165,6 +205,9 @@ for name in scan rootkit; do
             dynamic_user) echo yes > "$R/override.$unit.DynamicUser" ;;
         esac
         refused "$layout/$name/$defect"
+        case $defect in fail_*_pre)
+            grep -q "cannot inspect linux-av-$name guard" "$T/out" || fail 'wrong preflight failed-query refusal'
+        esac
         negatives=$((negatives+1))
     done
 done

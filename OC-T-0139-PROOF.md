@@ -1,116 +1,140 @@
-OC-T-0139: empty effective Surface ExecStartPre repair over
-`e346f57c194bebba398b340ae99fe6dfc7699f9b` (2026-11-23 UTC).
+OC-T-0139: exact ExecStartPre stdout/status, source-only gate (2026-11-23 UTC).
 
-No worker commit, push, card, approval request, elevation, chroot, host install,
-live service action, actual scanner execution or historical cache-file access.
-All executed tests run as uid 10002 in the supplied build sandbox.
+Base: linux-av `2c3dd0817716ef8ed8bca612bcbd1da6e8b7edc1` (`2c3dd08`).
+This follows the chief's new source gate described in the task: build and
+source review only. No tests, syntax checks, cases or mutants are authorized or
+run here. All execution expectations below are conditional, never run results.
 
-The exact historical base commands remain data only:
+Both query sites in lib/root-policy.sh (legacy Surface preflight and final
+installed-policy readback) append the fixed `.OC-T-0139` sentinel only after
+systemctl succeeds. Removing just that suffix preserves actual trailing LF
+bytes. A failed query keeps its nonzero status through the assignment and takes
+the same `cannot inspect` refusal, even with otherwise healthy stdout. No
+fallback query, whitespace trimming or service action is added.
+
+The exact empty-property acceptance set, at each site, is:
+
+| stdout bytes | Accepted representation |
+| --- | --- |
+| zero bytes | `''` |
+| `0a` | one LF |
+| `45 78 65 63 53 74 61 72 74 50 72 65 3d` | `ExecStartPre=` without terminal LF |
+| `45 78 65 63 53 74 61 72 74 50 72 65 3d 0a` | `ExecStartPre=` with one terminal LF |
+
+All other responses still enter the existing permanent-guard parser/comparison.
+That parser and its accepted exact path/argv/ignore_errors=no triple are
+unchanged. The same nonmatching, wrong-command, duplicate-guard and ignored-error
+refusals remain. Spaces, tabs, CR and multiple LFs cannot match either the empty
+allowlist or the guard comparison. The existing av-root guard enforcement,
+preflight no-write refusals and read-only verification snapshots remain intact.
+Only lib/root-policy.sh and its root-install-power.sh pin change in production.
+The installer still has 13 pinned inputs; its new external digest is below.
+
+Four modified old preflight cases, individually identified
+
+These are the four original `blank_pre` negative slots changed in 2c3dd08 to
+`whitespace_pre`. This build preserves each replacement as a negative; it does
+not claim an empty-output rejection survived. The original zero-byte input is
+now independently positive at each stage/service/layout.
+
+| Layout | Service | Old input / expectation | Retained input / expectation |
+| --- | --- | --- | --- |
+| unguarded | linux-av-scan.service | zero bytes / refusal | `20 0a` (space + LF) / refusal |
+| unguarded | linux-av-rootkit.service | zero bytes / refusal | `20 0a` (space + LF) / refusal |
+| guarded | linux-av-scan.service | zero bytes / refusal | `20 0a` (space + LF) / refusal |
+| guarded | linux-av-rootkit.service | zero bytes / refusal | `20 0a` (space + LF) / refusal |
+
+Inert fixture coverage and source-derived counts
+
+The output files contain raw data and are copied with `cat`; no content is
+executed. A property-specific marker now makes the systemctl stub exit 97 after
+writing those bytes, without affecting earlier queries. Both sites must refuse
+with policy exit 1 and their existing `cannot inspect` diagnostic when a query
+fails with zero-byte or one-LF stdout. Successful controls use the same bytes.
+
+The preflight matrix keeps the 35 existing defect names and adds eight raw-byte
+defects plus two failed-query defects: 45 x 2 services x 2 layouts = 180 refusals
+(90 per layout). Of these, 140 are the retained slots, 32 are added raw-byte
+refusals and 8 are failed-query refusals. Its healthy loop adds 4 accepted forms
+x 2 services x 2 layouts = 16 successful preflight installations. The original
+guarded/unguarded retry, repeat, backups and preservation controls remain.
+
+Each readback-negative loop now has 12 successful-query outputs: space (`20`),
+tab (`09`), CR (`0d`), two LFs (`0a 0a`), space + LF (`20 0a`), tab + LF
+(`09 0a`), CR + LF (`0d 0a`), three LFs (`0a 0a 0a`), `ExecStartPre=` plus
+two LFs, garbage, the wrong command and the guard with ignore_errors=yes.
+The nine byte-form negatives are shared with the preflight matrix, alongside
+its existing malformed/wrong-command/ignored-error cases.
+
+| Scoped fixture checks | Exact static counts |
+| --- | --- |
+| Surface final readback accepted empty forms | 4 forms x 2 services x 2 layouts = 16 successes |
+| Surface final readback nonmatching outputs | 12 outputs x 2 services x 2 layouts = 48 refusals |
+| Surface final readback failed empty/LF queries | 2 forms x 2 services x 2 layouts = 8 refusals |
+| Policy final readback accepted empty forms | 4 forms x 2 services = 8 successes, plus 2 permanent-guard positives |
+| Policy final readback nonmatching outputs | 12 outputs x 2 services = 24 refusals |
+| Policy final readback failed empty/LF queries | 2 forms x 2 services = 4 refusals |
+| Source census only (no full-suite proposal) | 272 row definitions; 327 mutants, including 75 root-only guard_* entries |
+| This task's execution | 0 tests, 0 syntax checks, 0 cases, 0 mutant runs |
+
+The two new `power_surface_whitespace_accepted` and
+`power_scan_whitespace_accepted` mutants each replace one line's nonempty
+predicate with `[[ $shown == *[![:space:]]* ]]`, wrongly allowing arbitrary
+whitespace through the empty branch. Healthy controls must pass first; the
+space/tab/CR/multiple-LF negatives must kill the mutants. Existing absent and
+nonmatching mutants remain scoped to their original stage. The combined
+`power_surface_empty_rejected` pattern is adapted to the longer exact condition.
+No mutant has been applied or executed during this task.
+
+Exact proposed commands for a later, separately authorized unprivileged run
+
+Run from the repository root as an already unprivileged user. These are proposals
+only, not permission to execute now. There is no root, chroot, host or full-suite
+command proposed for this gate. Require both the real exit status and complete
+output. For EVERY command below, status 77, 64 or 70, or empty output, means
+**NO-RESULT**; a missing expected baseline/summary also means NO-RESULT. Never
+count a skipped, refused or absent run as a pass or a killed mutant.
+
+1. `bash tests/run.sh power_surface_migration power_policy_verify`
+   Expected exit: 0. Exact final summary: `2 passed, 0 failed`.
+   Both named rows must be `ok`, with no skipped row.
+2. `bash tests/mutants.sh power_surface_whitespace_accepted power_scan_whitespace_accepted`
+   Expected exit: 0. Exact baseline: `unmutated: 2 passed, 0 failed`.
+   Exact final summary: `2 killed, 0 survived`; no skipped mutant.
+3. The following full scoped selection (12 entries):
+
+   ```sh
+   bash tests/mutants.sh \
+     power_surface_empty_rejected \
+     power_surface_base_shape_removed \
+     power_surface_reset_removed \
+     power_surface_guard_removed \
+     power_scan_pre_readback_removed \
+     power_scan_intended_readback_removed \
+     power_surface_absent_rejected \
+     power_scan_absent_rejected \
+     power_surface_nonmatching_accepted \
+     power_scan_nonmatching_accepted \
+     power_surface_whitespace_accepted \
+     power_scan_whitespace_accepted
+   ```
+
+   Expected exit: 0. Exact baseline: `unmutated: 2 passed, 0 failed`.
+   Exact final summary: `12 killed, 0 survived`; no skipped mutant.
+
+Source SHA-256 digests (computed by reading bytes only):
 
 ```text
-ExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --now
-ExecStart=/home/atdang/.cache/os-config/repos/danganhtu01/linux-av/bin/av-scan --rootkit
+e31d875f5ed6b4d0e815e1da8cf1e7072f814ea7a2d8544c3d83aefe66f452d6  root-install-power.sh
+0d4686918073a3d0159a438306f2c0b84f690141e3926168b8fe169d55a7b5cf  lib/root-policy.sh
+92fd1f8af8bdcc7587da9510503722fd6069088421525b845fda843accad7ec7  tests/surface-migration.sh
+281b35b2f4033f8e51a395cbf9f103a0e8d528529dacac1297e8c66ea9160738  tests/policy.sh
+6b06513e0a78a07e4298db0bf7163ffb9ae39a27f31c3f53662c2e8f12f71d8c  tests/fixtures/policy-systemctl
+9fb8fe821df4feca479fc814c83192601d7a077c58c683d57b3987b2d43005d4  tests/mutants.sh
 ```
 
-Acceptance still requires the default corresponding service, exactly one base
-ExecStart in [Service], a safe loaded root-owned.conf containing exactly an empty
-ExecStart reset and the matching permanent av-scan command, the exact loaded
-base fragment, NeedDaemonReload=no, and root identity (including default empty
-User/Group; no DynamicUser). Ownership/type/mode/ancestor and effective input
-path audits remain unchanged. No checkout path is inspected, resolved, sourced
-or executed, and the historical path allowlist has not expanded.
-
-The one changed legacy acceptance condition permits explicit `ExecStartPre=`
-readback, alongside the previously supported single permanent av-guard command
-with ignore_errors=no. Unknown commands, duplicate guards, wrong arguments,
-ignored failures, malformed or missing property readback still refuse. Final
-policy readback uses the same explicit-empty condition, rather than a second
---value read that could treat malformed output as absence. av-root and av-guard
-are unchanged: av-root itself checks av-guard --power before privileged Bash or
-any toolkit library/config. No pre-start hooks are added.
-
-Both unprivileged and root fixtures now cover unguarded and guarded layouts for
-both exact base units, with matching root-owned.conf resets. The unprivileged
-fixture uses default root identity, retains byte-exact non-command settings and
-all four original backups, proves actual failed-install retry without manually
-clearing power.incomplete, and proves byte-stable repeat installation. It checks
-installed guard success and the real read-only av-setup power-policy-verify CLI,
-including unchanged bytes/metadata and no service mutations on success or
-negative effective readback. Historical missing-guard refusal is now the required
-unguarded positive; all other old negatives remain. Added negatives cover
-unexpected base hooks, accumulated duplicate guards, blank/malformed readback,
-Group and DynamicUser. Each layout has 70 preflight negatives (140 total).
-
-The shared inert systemctl fixture now emits explicit empty Exec properties and
-accumulates and resets ExecStartPre entries as systemd does; it no longer hides earlier
-hooks by returning only the last one. The shared installer harness now delegates
-verification to the real read-only CLI, including its stderr-only errors. Its
-private relocated copies still recompute test-only pins; production has no test
-bypass. tests/policy.sh also uses an inert scan stand-in to demonstrate that
-av-root prints av-guard: ok before forwarding each intended argument, and refuses
-unsafe tool permissions before reaching the stand-in. No actual scanner runs.
-The root fixture is syntax checked only: it is not executed because chroot is
-excluded from this task. It retains all prior checks, runs both layouts, and adds
-failed-install retry and original-backup/no-added-hook checks. Its copied OS-tool
-list now includes find/diff already used by its snapshot assertions.
-
-Evidence and limitations
-
-- RED: archive of exact e346f57 production sources, with only the final Surface
-  test and shared fixture scripts copied in, exits 1 on the unguarded retry:
-  `unexpected effective Surface guard for linux-av-scan: ExecStartPre=`.
-  Log: `/lane/tmp/oc-t-0139-empty-pre-red.log`.
-- `timeout 180 bash tests/policy.sh`: exit 0. Includes both scan arguments
-  through the launcher's own guard, installed/effective policy success, malformed
-  and unknown pre-start readback, intended arguments and unchanged refusal state.
-  Log: `/lane/tmp/oc-t-0139-empty-pre-policy.log`.
-- `timeout 240 bash tests/cron-migration.sh`: exit 0. Existing disable/drain,
-  bounded timeout/recovery, old/open-inode jobs, stable repeat and policy-only
-  checks pass. Log: `/lane/tmp/oc-t-0139-empty-pre-cron.log`.
-- GREEN: `TMPDIR=/tmp timeout 600 bash tests/surface-migration.sh`: exit 0.
-  Both exact unguarded and guarded layouts pass migration, incomplete-install
-  retry, settings/backups, repeat, installed guard, read-only policy verification
-  and all 140 preflight negatives. Log: `/lane/tmp/oc-t-0139-empty-pre-green.log`.
-  The first standalone run reached its old 240-second bound during the expanded
-  guarded checks; it is superseded by this complete run.
-- `timeout 900 bash tests/run.sh`: exit 0; **235 passed, 0 failed,
-  37 skipped (need root)**. This includes the expanded Surface fixture, policy,
-  cron migration and existing runtime checks.
-  Log: `/lane/tmp/oc-t-0139-empty-pre-tests.log`.
-- `timeout 900 bash tests/mutants.sh power_surface_empty_rejected
-  power_surface_base_shape_removed power_surface_reset_removed
-  power_surface_guard_removed power_scan_pre_readback_removed
-  power_scan_intended_readback_removed`: exit 0; clean baseline **2 passed,
-  0 failed**; **6 killed, 0 survived**. These cover empty legacy acceptance,
-  exact base/reset shape, unexpected pre-start refusal, final pre-start readback
-  and intended scan/rootkit argument readback.
-  Log: `/lane/tmp/oc-t-0139-empty-pre-mutants.log`.
-- Independent production digest verification: power 13/13, guard 1/1, OVH 3/3.
-  Only the power installer's lib/root-policy.sh pin changes. The helper/release
-  gate must independently pin the installer itself.
-- bash -n passes for lib/root-policy.sh and the Surface, shared fixture, policy,
-  root-power, run, cron-migration and mutants scripts; /bin/sh -n passes for the
-  power installer. git diff --check passes.
-
-Final SHA-256 source digests:
-
-```text
-d292af0b543e7a0f4a08b8a5854662d9924c56e155342f2af4e6169472326364  root-install-power.sh
-c5ab3280211ceabcbbe2bacd6cab0625a6c3a684b74a51db252df57dfd592aa7  lib/root-policy.sh
-20a73f712d58be113db050b53281c9124d22a8bf9f7d895818f644e3f24286b9  bin/av-guard
-febff35d3765fd8c4b29d6f09d2f88e7c8013cdaa6765c341e626b33a21f3b14  bin/av-root
-f2095e683937b0d661eef6569f5a989e41125583771fdb2ac1cf7ec83a59fde3  tests/surface-migration.sh
-14580238a89dbd2741de7486628cf6ab77e26a39c9d672d246674120977ada85  tests/fixtures/power-install-env.sh
-825e99125f9bb272a9a23f27fc68fc8baeab4466f2ee801ead54750afa065a08  tests/fixtures/policy-systemctl
-17c80560f13f1d9e559743260e80de414e5fdd9c225afd7ba63d25d07ac46068  tests/root-power.sh
-a01992470bf04ea3737bfb157a5dbe51c95062c19acb210e3a80d280555dbd89  tests/policy.sh
-0cfa8a7fc55c6ef898dbee0ca079127805f7e8b2fd83ec7a4991e8d913425026  tests/mutants.sh
-```
-
-These are local unprivileged synthetic results. Root/chroot and remote Surface
-execution remain unperformed. Real root ownership, host proc visibility, actual
-systemd readback and crash/power-cut durability are not established by these
-fixtures. The existing dispatcher census and supported-layout limitations remain.
-The user-supplied real Surface readback is task evidence, not a live observation
-made during this repair. No deployment or activation is performed. Work completed within the requested
-30-minute limit.
+No tests, syntax checks, suites, cases, mutants, chroot, host installation or
+service actions, push or worker commit were performed. Source inspection and
+hashing do not establish runtime success or actual systemd output. Historical
+results do not establish this build. COMMIT_MSG is supplied for the helper's
+import/commit hooks; the helper's result remains authoritative.

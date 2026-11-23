@@ -130,11 +130,13 @@ av_power_policy() (
         shown=$(systemctl show "$name.service" -p ExecStart) || die "cannot inspect $name command"
         got=$(printf '%s\n' "$shown" | exec_fields ExecStart)
         [ "$got" = "ExecStart ${command%% *} | $command | no" ] || die "unexpected effective Surface ExecStart for $name: $shown"
-        shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name guard"
+        shown=$(systemctl show "$name.service" -p ExecStartPre && printf '%s' '.OC-T-0139') || die "cannot inspect $name guard"
+        shown=${shown%'.OC-T-0139'}
         # The exact legacy Surface units can have no pre-start hook. Migration
         # selects av-root, which enforces av-guard --power itself before Bash.
-        # Only an explicit empty property or the one permanent guard is valid.
-        if [ "$shown" != 'ExecStartPre=' ]; then
+        # The success-only sentinel preserves stdout's trailing LFs and status.
+        # Accept zero bytes, one LF, an empty property line or the permanent guard.
+        if [ -n "$shown" ] && [ "$shown" != $'\n' ] && [ "$shown" != 'ExecStartPre=' ] && [ "$shown" != $'ExecStartPre=\n' ]; then
             got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
             [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unexpected effective Surface guard for $name: $shown"
         fi
@@ -397,8 +399,9 @@ av_power_policy() (
                 value=$(systemctl show "$name.service" -p "$prop" --value) || die "cannot inspect $name $prop"
                 [ -z "$value" ] || die "unsupported effective $prop for $name: $value"
             done
-            shown=$(systemctl show "$name.service" -p ExecStartPre) || die "cannot inspect $name ExecStartPre"
-            if [ "$shown" != 'ExecStartPre=' ]; then
+            shown=$(systemctl show "$name.service" -p ExecStartPre && printf '%s' '.OC-T-0139') || die "cannot inspect $name ExecStartPre"
+            shown=${shown%'.OC-T-0139'}
+            if [ -n "$shown" ] && [ "$shown" != $'\n' ] && [ "$shown" != 'ExecStartPre=' ] && [ "$shown" != $'ExecStartPre=\n' ]; then
                 got=$(printf '%s\n' "$shown" | exec_fields ExecStartPre)
                 [ "$got" = 'ExecStartPre /usr/local/lib/linux-av/bin/av-guard | /usr/local/lib/linux-av/bin/av-guard | no' ] || die "unsupported effective ExecStartPre for $name: $shown"
             fi

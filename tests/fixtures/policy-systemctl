@@ -12,7 +12,12 @@ value_only=0
 for arg in "$@"; do [ "$arg" != --value ] || value_only=1; done
 for prop in "$@"; do
     case $prop in -p|--value) continue ;; esac
-    if [ -f "$r/override.$unit.$prop" ]; then cat "$r/override.$unit.$prop"; continue; fi
+    if [ -f "$r/override.$unit.$prop" ]; then
+        cat "$r/override.$unit.$prop"
+        # A marker supplies query failure after the exact inert stdout bytes.
+        [ ! -f "$r/fail.$unit.$prop" ] || exit 97
+        continue
+    fi
     if [ "$prop" = ActiveState ]; then
         case $unit in cron.service|crond.service) echo active ;; *) echo inactive ;; esac
         continue

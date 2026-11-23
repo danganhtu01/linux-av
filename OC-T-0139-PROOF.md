@@ -79,7 +79,7 @@ its existing malformed/wrong-command/ignored-error cases.
 
 The two new `power_surface_whitespace_accepted` and
 `power_scan_whitespace_accepted` mutants each replace one line's nonempty
-predicate with `[[ $shown =~ [^[:space:]] ]]`, wrongly allowing arbitrary
+predicate with `[[ $shown == *[![:space:]]* ]]`, wrongly allowing arbitrary
 whitespace through the empty branch. Healthy controls must pass first; the
 space/tab/CR/multiple-LF negatives must kill the mutants. Existing absent and
 nonmatching mutants remain scoped to their original stage. The combined
@@ -130,7 +130,7 @@ e31d875f5ed6b4d0e815e1da8cf1e7072f814ea7a2d8544c3d83aefe66f452d6  root-install-p
 92fd1f8af8bdcc7587da9510503722fd6069088421525b845fda843accad7ec7  tests/surface-migration.sh
 281b35b2f4033f8e51a395cbf9f103a0e8d528529dacac1297e8c66ea9160738  tests/policy.sh
 6b06513e0a78a07e4298db0bf7163ffb9ae39a27f31c3f53662c2e8f12f71d8c  tests/fixtures/policy-systemctl
-9d5906011df43ee284d637c9148868936de5b60c942c8b3c69da7f8d4ec9fd58  tests/mutants.sh
+9fb8fe821df4feca479fc814c83192601d7a077c58c683d57b3987b2d43005d4  tests/mutants.sh
 ```
 
 No tests, syntax checks, suites, cases, mutants, chroot, host installation or

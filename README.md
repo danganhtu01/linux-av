@@ -369,7 +369,8 @@ is accepted only as unit-file data for the default scan/rootkit units: one base
 ExecStart, matching intended argument, and a loaded `root-owned.conf` with an
 empty ExecStart reset followed by the matching permanent av-scan command.
 The effective command must select that permanent command, with either an empty
-ExecStartPre (successful empty stdout or explicit `ExecStartPre=`) or the one
+ExecStartPre (successful zero-byte stdout, exactly one LF, or `ExecStartPre=`
+with at most one terminal LF) or the one
 exact permanent `av-guard` pre-command, root identity and
 NeedDaemonReload=no. Every other pre-start hook refuses. Migration adds no hook:
 the resulting `av-root` command enforces `av-guard --power` itself. All unit fragments,
